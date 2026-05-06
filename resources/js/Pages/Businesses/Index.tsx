@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Head, Link, router } from '@inertiajs/react';
 import AppLayout from '@/Layouts/AppLayout';
 import StatusBadge from '@/Components/StatusBadge';
@@ -23,6 +23,7 @@ interface Paginated {
 
 interface Props {
     businesses: Paginated;
+    filters: { search: string };
 }
 
 const tierVariant = (tier: string): 'violet' | 'amber' | 'gray' => {
@@ -31,7 +32,22 @@ const tierVariant = (tier: string): 'violet' | 'amber' | 'gray' => {
     return 'gray';
 };
 
-export default function BusinessesIndex({ businesses }: Props) {
+export default function BusinessesIndex({ businesses, filters }: Props) {
+    const [search, setSearch] = useState(filters.search);
+    const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const handleSearch = useCallback((value: string) => {
+        setSearch(value);
+        if (debounceRef.current) {
+            clearTimeout(debounceRef.current);
+        }
+        debounceRef.current = setTimeout(() => {
+            router.get('/businesses', { search: value }, { preserveState: true, replace: true });
+        }, 350);
+    }, []);
+
+    useEffect(() => () => { if (debounceRef.current) { clearTimeout(debounceRef.current); } }, []);
+
     return (
         <AppLayout>
             <Head title="Businesses" />
@@ -47,6 +63,31 @@ export default function BusinessesIndex({ businesses }: Props) {
                     </svg>
                     New Business
                 </Link>
+            </div>
+
+            <div className="mb-4">
+                <div className="relative max-w-sm">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none">
+                        <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z" clipRule="evenodd" />
+                    </svg>
+                    <input
+                        type="text"
+                        value={search}
+                        onChange={(e) => handleSearch(e.target.value)}
+                        placeholder="Search by name or email…"
+                        className="w-full pl-9 pr-4 py-2 text-sm rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent bg-white"
+                    />
+                    {search && (
+                        <button
+                            onClick={() => handleSearch('')}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                                <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
+                            </svg>
+                        </button>
+                    )}
+                </div>
             </div>
 
             <div className="bg-white rounded-2xl border border-slate-100 shadow-sm">
@@ -105,10 +146,16 @@ export default function BusinessesIndex({ businesses }: Props) {
                         {businesses.data.length === 0 && (
                             <tr>
                                 <td colSpan={6} className="px-6 py-12 text-center">
-                                    <p className="text-slate-400 text-sm">No businesses registered yet.</p>
-                                    <Link href="/businesses/create" className="mt-2 inline-block text-sm text-violet-600 font-medium hover:underline">
-                                        Create your first business →
-                                    </Link>
+                                    {search ? (
+                                        <p className="text-slate-400 text-sm">No businesses match "<span className="font-medium text-slate-600">{search}</span>".</p>
+                                    ) : (
+                                        <>
+                                            <p className="text-slate-400 text-sm">No businesses registered yet.</p>
+                                            <Link href="/businesses/create" className="mt-2 inline-block text-sm text-violet-600 font-medium hover:underline">
+                                                Create your first business →
+                                            </Link>
+                                        </>
+                                    )}
                                 </td>
                             </tr>
                         )}

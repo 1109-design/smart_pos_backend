@@ -14,14 +14,22 @@ use Inertia\Response;
 
 class BusinessController extends Controller
 {
-    public function index(): Response
+    public function index(Request $request): Response
     {
+        $search = $request->string('search')->trim();
+
         $businesses = Tenant::withCount('devices')
+            ->when($search, fn ($q) => $q
+                ->where('business_name', 'like', "%{$search}%")
+                ->orWhere('owner_email', 'like', "%{$search}%")
+            )
             ->orderByDesc('created_at')
-            ->paginate(20);
+            ->paginate(20)
+            ->withQueryString();
 
         return Inertia::render('Businesses/Index', [
             'businesses' => $businesses,
+            'filters' => ['search' => $search->toString()],
         ]);
     }
 
@@ -38,19 +46,19 @@ class BusinessController extends Controller
 
         $data = $request->validate([
             'business_name' => 'required|string|max:255',
-            'owner_email'   => 'required|email|max:255',
-            'tier'          => "required|in:{$validTiers}",
-            'country'       => 'nullable|string|size:2',
+            'owner_email' => 'required|email|max:255',
+            'tier' => "required|in:{$validTiers}",
+            'country' => 'nullable|string|size:2',
             'currency_code' => 'nullable|string|max:10',
-            'admin_name'    => 'required|string|max:255',
-            'admin_pin'     => 'required|digits:4',
+            'admin_name' => 'required|string|max:255',
+            'admin_pin' => 'required|digits:4',
         ]);
 
         $tenant = Tenant::create([
             'business_name' => $data['business_name'],
-            'owner_email'   => $data['owner_email'],
-            'tier'          => $data['tier'],
-            'country'       => $data['country'] ?? null,
+            'owner_email' => $data['owner_email'],
+            'tier' => $data['tier'],
+            'country' => $data['country'] ?? null,
             'currency_code' => $data['currency_code'] ?? 'USD',
         ]);
 
@@ -60,10 +68,10 @@ class BusinessController extends Controller
         tenancy()->initialize($tenant);
 
         $admin = User::create([
-            'name'      => $data['admin_name'],
-            'email'     => $data['owner_email'],
-            'password'  => Hash::make(Str::random(24)),
-            'pin_hash'  => Hash::make($data['admin_pin']),
+            'name' => $data['admin_name'],
+            'email' => $data['owner_email'],
+            'password' => Hash::make(Str::random(24)),
+            'pin_hash' => Hash::make($data['admin_pin']),
             'is_active' => true,
         ]);
 
@@ -74,9 +82,9 @@ class BusinessController extends Controller
         return redirect()->route('businesses.show', $tenant->id)
             ->with('success', 'Business created.')
             ->with('setup_credentials', [
-                'admin_name'   => $data['admin_name'],
-                'admin_email'  => $data['owner_email'],
-                'admin_pin'    => $data['admin_pin'],
+                'admin_name' => $data['admin_name'],
+                'admin_email' => $data['owner_email'],
+                'admin_pin' => $data['admin_pin'],
                 'pairing_code' => $tenant->pairing_code,
             ]);
     }
@@ -86,8 +94,8 @@ class BusinessController extends Controller
         $business = Tenant::findOrFail($id);
 
         return Inertia::render('Businesses/Show', [
-            'business'          => $business,
-            'devicesCount'      => $business->devices()->count(),
+            'business' => $business,
+            'devicesCount' => $business->devices()->count(),
             'setup_credentials' => session('setup_credentials'),
         ]);
     }
@@ -96,7 +104,7 @@ class BusinessController extends Controller
     {
         return Inertia::render('Businesses/Form', [
             'business' => Tenant::findOrFail($id),
-            'tiers'    => Tier::orderBy('sort_order')->get(),
+            'tiers' => Tier::orderBy('sort_order')->get(),
         ]);
     }
 
@@ -108,11 +116,11 @@ class BusinessController extends Controller
 
         $data = $request->validate([
             'business_name' => 'required|string|max:255',
-            'owner_email'   => 'required|email|max:255',
-            'tier'          => "required|in:{$validTiers}",
-            'country'       => 'nullable|string|size:2',
+            'owner_email' => 'required|email|max:255',
+            'tier' => "required|in:{$validTiers}",
+            'country' => 'nullable|string|size:2',
             'currency_code' => 'nullable|string|max:10',
-            'is_active'     => 'boolean',
+            'is_active' => 'boolean',
         ]);
 
         $tenant->update($data);

@@ -24,6 +24,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('businesses/{business}/users', [UserController::class, 'index'])->name('businesses.users.index');
     Route::post('businesses/{business}/users', [UserController::class, 'store'])->name('businesses.users.store');
     Route::put('businesses/{business}/users/{user}', [UserController::class, 'update'])->name('businesses.users.update');
+    Route::put('businesses/{business}/users/{user}/password', [UserController::class, 'changePassword'])->name('businesses.users.change-password');
     Route::delete('businesses/{business}/users/{user}', [UserController::class, 'destroy'])->name('businesses.users.destroy');
 
     // Devices per business
