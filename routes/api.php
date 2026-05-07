@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\DeviceAuthController;
 use App\Http\Controllers\Api\LocationController;
+use App\Http\Controllers\Api\StockLedgerController;
 use App\Http\Controllers\Api\StockTransferController;
 use App\Http\Controllers\Api\SyncController;
 use App\Http\Controllers\Api\WebhookController;
@@ -30,6 +31,9 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::patch('locations/{id}', [LocationController::class, 'update']);
     Route::get('locations/{id}/stock', [LocationController::class, 'stock']);
     Route::get('products/{productId}/stock-by-location', [LocationController::class, 'productStock']);
+
+    // Stock ledger
+    Route::get('stock-ledger', [StockLedgerController::class, 'index']);
 
     // Stock transfers
     Route::get('transfers', [StockTransferController::class, 'index']);

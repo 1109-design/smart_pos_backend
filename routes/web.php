@@ -4,6 +4,7 @@ use App\Http\Controllers\ActivationCodeController;
 use App\Http\Controllers\BackOffice\DashboardController as BackOfficeDashboard;
 use App\Http\Controllers\BackOffice\ReportsController as BackOfficeReports;
 use App\Http\Controllers\BackOffice\SessionController as BackOfficeSession;
+use App\Http\Controllers\BackOffice\StockLedgerController as BackOfficeStockLedger;
 use App\Http\Controllers\BackOffice\UsersController as BackOfficeUsers;
 use App\Http\Controllers\BusinessController;
 use App\Http\Controllers\DashboardController;
@@ -65,6 +66,7 @@ Route::prefix('office')->name('office.')->group(function () {
     Route::middleware('auth.backoffice')->group(function () {
         Route::get('dashboard', BackOfficeDashboard::class)->name('dashboard');
         Route::get('reports', BackOfficeReports::class)->name('reports');
+        Route::get('stock-ledger', BackOfficeStockLedger::class)->name('stock-ledger');
         Route::get('users', [BackOfficeUsers::class, 'index'])->name('users.index');
         Route::put('users/{user}', [BackOfficeUsers::class, 'update'])->name('users.update');
         Route::put('users/{user}/password', [BackOfficeUsers::class, 'changePassword'])->name('users.change-password');

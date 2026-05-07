@@ -28,6 +28,13 @@ const IconUsers = () => (
     </svg>
 );
 
+const IconLedger = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+        <path fillRule="evenodd" d="M2 3.5A1.5 1.5 0 0 1 3.5 2h9A1.5 1.5 0 0 1 14 3.5v11.75A2.75 2.75 0 0 1 11.25 18H3.5A1.5 1.5 0 0 1 2 16.5v-13Zm3.75 7a.75.75 0 0 0 0 1.5h4.5a.75.75 0 0 0 0-1.5h-4.5Zm0-3a.75.75 0 0 0 0 1.5h4.5a.75.75 0 0 0 0-1.5h-4.5Zm0-3a.75.75 0 0 0 0 1.5h4.5a.75.75 0 0 0 0-1.5h-4.5Z" clipRule="evenodd" />
+        <path d="M15 3.75a.75.75 0 0 1 .75-.75h.5a1.5 1.5 0 0 1 1.5 1.5v14.25a.75.75 0 0 1-1.5 0V5.25a.75.75 0 0 0-.75-.75h-.5A.75.75 0 0 1 15 3.75Z" />
+    </svg>
+);
+
 const IconSignOut = () => (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
         <path fillRule="evenodd" d="M3 4.25A2.25 2.25 0 0 1 5.25 2h5.5A2.25 2.25 0 0 1 13 4.25v2a.75.75 0 0 1-1.5 0v-2a.75.75 0 0 0-.75-.75h-5.5a.75.75 0 0 0-.75.75v11.5c0 .414.336.75.75.75h5.5a.75.75 0 0 0 .75-.75v-2a.75.75 0 0 1 1.5 0v2A2.25 2.25 0 0 1 10.75 18h-5.5A2.25 2.25 0 0 1 3 15.75V4.25Z" clipRule="evenodd" />
@@ -36,9 +43,10 @@ const IconSignOut = () => (
 );
 
 const ALL_NAV = [
-    { label: 'Dashboard', href: '/office/dashboard', Icon: IconChart,          roles: null },
-    { label: 'Reports',   href: '/office/reports',   Icon: IconDocumentReport, roles: null },
-    { label: 'Users',     href: '/office/users',     Icon: IconUsers,          roles: ['business_owner', 'manager'] },
+    { label: 'Dashboard',    href: '/office/dashboard',    Icon: IconChart,          roles: null },
+    { label: 'Reports',      href: '/office/reports',      Icon: IconDocumentReport, roles: null },
+    { label: 'Stock Ledger', href: '/office/stock-ledger', Icon: IconLedger,         roles: null },
+    { label: 'Users',        href: '/office/users',        Icon: IconUsers,          roles: ['business_owner', 'manager'] },
 ];
 
 export default function BackOfficeLayout({ children }: PropsWithChildren) {

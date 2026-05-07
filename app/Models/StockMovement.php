@@ -4,11 +4,15 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class StockMovement extends Model
 {
     use HasUuids;
 
+    protected $connection = 'tenant';
+
+    protected $table = 'stock_movements';
 
     protected $fillable = [
         'id', 'business_id', 'location_id', 'to_location_id', 'product_id', 'type',
@@ -19,9 +23,19 @@ class StockMovement extends Model
     protected function casts(): array
     {
         return [
-            'quantity_change'  => 'decimal:4',
-            'unit_cost'        => 'decimal:4',
+            'quantity_change' => 'decimal:4',
+            'unit_cost' => 'decimal:4',
             'running_avg_cost' => 'decimal:4',
         ];
+    }
+
+    public function product(): BelongsTo
+    {
+        return $this->belongsTo(Product::class);
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
     }
 }
