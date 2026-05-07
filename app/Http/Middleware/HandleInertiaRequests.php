@@ -29,11 +29,20 @@ class HandleInertiaRequests extends Middleware
      */
     public function share(Request $request): array
     {
+        $backoffice = session('backoffice');
+
         return [
             ...parent::share($request),
             'auth' => [
                 'user' => $request->user(),
             ],
+            'backoffice_auth' => $backoffice ? [
+                'user_name' => $backoffice['user_name'],
+                'user_email' => $backoffice['user_email'],
+                'role' => $backoffice['role'],
+                'business_name' => $backoffice['business_name'],
+                'currency_code' => $backoffice['currency_code'],
+            ] : null,
         ];
     }
 }

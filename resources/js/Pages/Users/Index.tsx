@@ -148,8 +148,8 @@ export default function UsersIndex({ business, users, roles, filters }: Props) {
             </div>
 
             {/* Table */}
-            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm">
-                <table className="w-full text-sm">
+            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-x-auto -mx-4 sm:mx-0 rounded-none sm:rounded-2xl">
+                <table className="w-full text-sm min-w-[600px]">
                     <thead>
                         <tr className="border-b border-slate-100">
                             <th className="table-th">Name</th>

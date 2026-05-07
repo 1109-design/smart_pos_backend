@@ -52,7 +52,7 @@ export default function BusinessesIndex({ businesses, filters }: Props) {
         <AppLayout>
             <Head title="Businesses" />
 
-            <div className="flex items-center justify-between mb-8">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
                 <div>
                     <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Businesses</h1>
                     <p className="text-sm text-slate-500 mt-1">{businesses.data.length} registered businesses</p>
@@ -90,8 +90,8 @@ export default function BusinessesIndex({ businesses, filters }: Props) {
                 </div>
             </div>
 
-            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm">
-                <table className="w-full text-sm">
+            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-x-auto">
+                <table className="w-full text-sm min-w-[640px]">
                     <thead>
                         <tr className="border-b border-slate-100">
                             <th className="table-th">Business</th>

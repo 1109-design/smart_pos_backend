@@ -149,10 +149,10 @@ export default function SubscriptionShow({ business, tiers, history }: Props) {
                 <p className="text-sm text-slate-500 mt-1">Manage the subscription plan for this business</p>
             </div>
 
-            <div className="grid grid-cols-1 gap-8 lg:grid-cols-5">
+            <div className="grid grid-cols-1 gap-8 xl:grid-cols-5">
 
                 {/* ── Current plan card ─────────────────────────────── */}
-                <div className="lg:col-span-2">
+                <div className="xl:col-span-2">
                     <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Current Plan</p>
                     <div className="rounded-2xl overflow-hidden border border-slate-200 shadow-sm">
                         <div className={`${currentAccent.bg} px-6 pt-6 pb-5`}>
@@ -187,7 +187,7 @@ export default function SubscriptionShow({ business, tiers, history }: Props) {
                 </div>
 
                 {/* ── Manual override ───────────────────────────────── */}
-                <div className="lg:col-span-3">
+                <div className="xl:col-span-3">
                     <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Manual Override</p>
                     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
                         <p className="text-xs text-slate-400 mb-5">
@@ -201,7 +201,7 @@ export default function SubscriptionShow({ business, tiers, history }: Props) {
                             {/* Tier radio cards */}
                             <div>
                                 <label className="block text-sm font-medium text-slate-700 mb-3">Select Tier</label>
-                                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+                                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                                     {tiersArray.map((t, idx) => {
                                         const accent = accentColors[idx % accentColors.length];
                                         const selected = data.tier === t.key;

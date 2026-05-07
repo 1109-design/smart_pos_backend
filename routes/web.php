@@ -1,6 +1,10 @@
 <?php
 
 use App\Http\Controllers\ActivationCodeController;
+use App\Http\Controllers\BackOffice\DashboardController as BackOfficeDashboard;
+use App\Http\Controllers\BackOffice\ReportsController as BackOfficeReports;
+use App\Http\Controllers\BackOffice\SessionController as BackOfficeSession;
+use App\Http\Controllers\BackOffice\UsersController as BackOfficeUsers;
 use App\Http\Controllers\BusinessController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DeviceController;
@@ -50,6 +54,22 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
     Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
+});
+
+// ── Back-Office (Business Employee Portal) ─────────────────────────────────
+Route::prefix('office')->name('office.')->group(function () {
+    Route::get('login', [BackOfficeSession::class, 'create'])->name('login');
+    Route::post('login', [BackOfficeSession::class, 'store'])->name('login.store');
+    Route::post('logout', [BackOfficeSession::class, 'destroy'])->name('logout');
+
+    Route::middleware('auth.backoffice')->group(function () {
+        Route::get('dashboard', BackOfficeDashboard::class)->name('dashboard');
+        Route::get('reports', BackOfficeReports::class)->name('reports');
+        Route::get('users', [BackOfficeUsers::class, 'index'])->name('users.index');
+        Route::put('users/{user}', [BackOfficeUsers::class, 'update'])->name('users.update');
+        Route::put('users/{user}/password', [BackOfficeUsers::class, 'changePassword'])->name('users.change-password');
+        Route::patch('users/{user}/toggle-active', [BackOfficeUsers::class, 'toggleActive'])->name('users.toggle-active');
+    });
 });
 
 require __DIR__.'/auth.php';

@@ -1,0 +1,302 @@
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Head, router, useForm } from '@inertiajs/react';
+import BackOfficeLayout from '@/Layouts/BackOfficeLayout';
+import StatusBadge from '@/Components/StatusBadge';
+import Modal from '@/Components/Modal';
+
+interface User {
+    id: string;
+    name: string;
+    email: string;
+    role: string | null;
+    is_active: boolean;
+}
+
+interface Props {
+    users: User[];
+    roles: string[];
+    viewer_role: string;
+    filters: { search: string };
+}
+
+function roleVariant(role: string | null): 'blue' | 'amber' | 'gray' {
+    if (role === 'business_owner') return 'blue';
+    if (role === 'manager')        return 'amber';
+    return 'gray';
+}
+
+function roleLabel(role: string): string {
+    return role.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+type ModalMode = 'edit' | 'password' | null;
+
+export default function BackOfficeUsers({ users, roles, viewer_role, filters }: Props) {
+    const [modalMode, setModalMode]     = useState<ModalMode>(null);
+    const [selected, setSelected]       = useState<User | null>(null);
+    const [search, setSearch]           = useState(filters.search);
+    const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const handleSearch = useCallback((value: string) => {
+        setSearch(value);
+        if (debounceRef.current) { clearTimeout(debounceRef.current); }
+        debounceRef.current = setTimeout(() => {
+            router.get('/office/users', { search: value }, { preserveState: true, replace: true });
+        }, 350);
+    }, []);
+
+    useEffect(() => () => { if (debounceRef.current) { clearTimeout(debounceRef.current); } }, []);
+
+    const editForm = useForm({ name: '', email: '', role: 'cashier', is_active: true as boolean, pin: '' });
+    const pwForm   = useForm({ password: '', password_confirmation: '' });
+
+    const openEdit = (u: User) => {
+        setSelected(u);
+        editForm.setData({ name: u.name, email: u.email, role: u.role ?? 'cashier', is_active: u.is_active, pin: '' });
+        setModalMode('edit');
+    };
+
+    const openPassword = (u: User) => {
+        setSelected(u);
+        pwForm.reset();
+        setModalMode('password');
+    };
+
+    const closeModal = () => { setModalMode(null); setSelected(null); };
+
+    const submitEdit = (e: React.FormEvent) => {
+        e.preventDefault();
+        editForm.put(`/office/users/${selected!.id}`, { onSuccess: closeModal });
+    };
+
+    const submitPassword = (e: React.FormEvent) => {
+        e.preventDefault();
+        pwForm.put(`/office/users/${selected!.id}/password`, { onSuccess: closeModal });
+    };
+
+    const toggleActive = (u: User) => {
+        const action = u.is_active ? 'deactivate' : 'activate';
+        if (confirm(`${action.charAt(0).toUpperCase() + action.slice(1)} ${u.name}?`)) {
+            router.patch(`/office/users/${u.id}/toggle-active`);
+        }
+    };
+
+    const isOwner = viewer_role === 'business_owner';
+
+    const CloseBtn = () => (
+        <button type="button" onClick={closeModal} className="text-slate-400 hover:text-slate-600">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+                <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
+            </svg>
+        </button>
+    );
+
+    return (
+        <BackOfficeLayout>
+            <Head title="Users" />
+
+            <div className="flex items-center justify-between mb-8">
+                <div>
+                    <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Staff Users</h1>
+                    <p className="text-sm text-slate-500 mt-1">{users.length} team member{users.length !== 1 ? 's' : ''}</p>
+                </div>
+            </div>
+
+            {/* Search */}
+            <div className="mb-5">
+                <div className="relative max-w-sm">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none">
+                        <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z" clipRule="evenodd" />
+                    </svg>
+                    <input
+                        type="text"
+                        value={search}
+                        onChange={(e) => handleSearch(e.target.value)}
+                        placeholder="Search by name or email…"
+                        className="w-full pl-9 pr-4 py-2 text-sm rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent bg-white"
+                    />
+                    {search && (
+                        <button onClick={() => handleSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                                <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
+                            </svg>
+                        </button>
+                    )}
+                </div>
+            </div>
+
+            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-x-auto">
+                <table className="w-full text-sm min-w-[560px]">
+                    <thead>
+                        <tr className="border-b border-slate-100">
+                            <th className="table-th">Name</th>
+                            <th className="table-th">Email</th>
+                            <th className="table-th">Role</th>
+                            <th className="table-th">Status</th>
+                            <th className="table-th">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                        {users.map((u) => (
+                            <tr key={u.id} className="hover:bg-slate-50/60 transition-colors">
+                                <td className="table-td font-medium text-slate-800">{u.name}</td>
+                                <td className="table-td text-slate-500">{u.email}</td>
+                                <td className="table-td">
+                                    {u.role && <StatusBadge label={roleLabel(u.role)} variant={roleVariant(u.role)} />}
+                                </td>
+                                <td className="table-td">
+                                    <StatusBadge label={u.is_active ? 'Active' : 'Inactive'} variant={u.is_active ? 'green' : 'red'} />
+                                </td>
+                                <td className="table-td">
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => openEdit(u)}
+                                            className="text-xs font-medium text-slate-600 hover:text-slate-900 px-2.5 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 transition-colors"
+                                        >
+                                            Edit
+                                        </button>
+                                        <button
+                                            onClick={() => openPassword(u)}
+                                            className="text-xs font-medium text-emerald-600 hover:text-emerald-800 px-2.5 py-1 rounded-lg border border-emerald-100 hover:bg-emerald-50 transition-colors"
+                                        >
+                                            Password
+                                        </button>
+                                        {isOwner && (
+                                            <button
+                                                onClick={() => toggleActive(u)}
+                                                className={`text-xs font-medium px-2.5 py-1 rounded-lg border transition-colors ${
+                                                    u.is_active
+                                                        ? 'text-amber-600 hover:text-amber-800 border-amber-100 hover:bg-amber-50'
+                                                        : 'text-slate-500 hover:text-slate-700 border-slate-200 hover:bg-slate-50'
+                                                }`}
+                                            >
+                                                {u.is_active ? 'Deactivate' : 'Activate'}
+                                            </button>
+                                        )}
+                                    </div>
+                                </td>
+                            </tr>
+                        ))}
+                        {users.length === 0 && (
+                            <tr>
+                                <td colSpan={5} className="px-6 py-10 text-center text-slate-400 text-sm">
+                                    {search
+                                        ? <>No users match "<span className="font-medium text-slate-600">{search}</span>".</>
+                                        : 'No users found.'}
+                                </td>
+                            </tr>
+                        )}
+                    </tbody>
+                </table>
+            </div>
+
+            {/* ── Edit Modal ─────────────────────────────────────────────── */}
+            <Modal show={modalMode === 'edit'} onClose={closeModal} maxWidth="md">
+                <div className="p-6">
+                    <div className="flex items-center justify-between mb-5">
+                        <h2 className="text-lg font-semibold text-slate-900">Edit User</h2>
+                        <CloseBtn />
+                    </div>
+                    <form onSubmit={submitEdit} className="space-y-4">
+                        <div>
+                            <label className="form-label">Name</label>
+                            <input type="text" value={editForm.data.name} onChange={(e) => editForm.setData('name', e.target.value)} className="form-input" required />
+                            {editForm.errors.name && <p className="text-red-500 text-xs mt-1">{editForm.errors.name}</p>}
+                        </div>
+                        <div>
+                            <label className="form-label">Email</label>
+                            <input type="email" value={editForm.data.email} onChange={(e) => editForm.setData('email', e.target.value)} className="form-input" required />
+                            {editForm.errors.email && <p className="text-red-500 text-xs mt-1">{editForm.errors.email}</p>}
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <label className="form-label">Role</label>
+                                <select
+                                    value={editForm.data.role}
+                                    onChange={(e) => editForm.setData('role', e.target.value)}
+                                    className="form-input"
+                                    disabled={selected?.id === undefined}
+                                >
+                                    {roles.map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}
+                                </select>
+                                {editForm.errors.role && <p className="text-red-500 text-xs mt-1">{editForm.errors.role}</p>}
+                            </div>
+                            <div>
+                                <label className="form-label">POS PIN <span className="text-slate-400 font-normal">(leave blank to keep)</span></label>
+                                <input
+                                    type="text"
+                                    maxLength={4}
+                                    value={editForm.data.pin}
+                                    onChange={(e) => editForm.setData('pin', e.target.value)}
+                                    className="form-input"
+                                    placeholder="••••"
+                                />
+                                {editForm.errors.pin && <p className="text-red-500 text-xs mt-1">{editForm.errors.pin}</p>}
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-3 p-3 rounded-xl border border-slate-100 bg-slate-50">
+                            <input
+                                id="bo_is_active"
+                                type="checkbox"
+                                checked={editForm.data.is_active}
+                                onChange={(e) => editForm.setData('is_active', e.target.checked)}
+                                className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                            />
+                            <label htmlFor="bo_is_active" className="text-sm font-medium text-slate-700 cursor-pointer">
+                                Account active
+                            </label>
+                            <span className="text-xs text-slate-400 ml-auto">Inactive users cannot log in to the POS</span>
+                        </div>
+                        <div className="flex justify-end gap-3 pt-2">
+                            <button type="button" onClick={closeModal} className="btn-secondary">Cancel</button>
+                            <button type="submit" disabled={editForm.processing} className="btn-primary disabled:opacity-50">Save Changes</button>
+                        </div>
+                    </form>
+                </div>
+            </Modal>
+
+            {/* ── Change Password Modal ──────────────────────────────────── */}
+            <Modal show={modalMode === 'password'} onClose={closeModal} maxWidth="sm">
+                <div className="p-6">
+                    <div className="flex items-center justify-between mb-1">
+                        <h2 className="text-lg font-semibold text-slate-900">Change Password</h2>
+                        <CloseBtn />
+                    </div>
+                    {selected && (
+                        <p className="text-sm text-slate-500 mb-5">Setting new password for <span className="font-medium text-slate-700">{selected.name}</span></p>
+                    )}
+                    <form onSubmit={submitPassword} className="space-y-4">
+                        <div>
+                            <label className="form-label">New Password</label>
+                            <input
+                                type="password"
+                                value={pwForm.data.password}
+                                onChange={(e) => pwForm.setData('password', e.target.value)}
+                                className="form-input"
+                                required
+                                autoComplete="new-password"
+                            />
+                            {pwForm.errors.password && <p className="text-red-500 text-xs mt-1">{pwForm.errors.password}</p>}
+                        </div>
+                        <div>
+                            <label className="form-label">Confirm Password</label>
+                            <input
+                                type="password"
+                                value={pwForm.data.password_confirmation}
+                                onChange={(e) => pwForm.setData('password_confirmation', e.target.value)}
+                                className="form-input"
+                                required
+                                autoComplete="new-password"
+                            />
+                            {pwForm.errors.password_confirmation && <p className="text-red-500 text-xs mt-1">{pwForm.errors.password_confirmation}</p>}
+                        </div>
+                        <div className="flex justify-end gap-3 pt-2">
+                            <button type="button" onClick={closeModal} className="btn-secondary">Cancel</button>
+                            <button type="submit" disabled={pwForm.processing} className="btn-primary disabled:opacity-50">Update Password</button>
+                        </div>
+                    </form>
+                </div>
+            </Modal>
+        </BackOfficeLayout>
+    );
+}

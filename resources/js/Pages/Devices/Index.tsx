@@ -56,8 +56,8 @@ export default function DevicesIndex({ business, devices }: Props) {
 
             <BusinessTabs businessId={business.id} active="devices" devicesCount={devices.length} />
 
-            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm">
-                <table className="w-full text-sm">
+            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-x-auto">
+                <table className="w-full text-sm min-w-[600px]">
                     <thead>
                         <tr className="border-b border-slate-100">
                             <th className="table-th">Device Name</th>

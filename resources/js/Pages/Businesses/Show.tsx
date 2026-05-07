@@ -87,7 +87,7 @@ export default function BusinessShow({ business, devicesCount, setup_credentials
             </div>
 
             {/* Header */}
-            <div className="flex items-start justify-between mb-6">
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-6">
                 <div>
                     <h1 className="text-2xl font-bold text-slate-900 tracking-tight">{business.business_name}</h1>
                     <p className="text-sm text-slate-500 mt-1">{business.owner_email}</p>
@@ -126,7 +126,7 @@ export default function BusinessShow({ business, devicesCount, setup_credentials
                     <p className="text-xs text-violet-300 mt-3">Enter this code in the mobile app to connect this business</p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4 max-w-lg">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-lg">
                     {[
                         { label: 'Business ID', value: business.id },
                         { label: 'Currency',    value: business.currency_code },

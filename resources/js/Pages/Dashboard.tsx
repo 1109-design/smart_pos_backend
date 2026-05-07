@@ -70,14 +70,14 @@ export default function Dashboard({ stats, recent_businesses }: Props) {
                 <StatsCard label="Ultimate"         value={stats.ultimate_businesses} color="violet" icon={<IconCrown />} />
             </div>
 
-            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm">
+            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-x-auto">
                 <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
                     <h2 className="font-semibold text-slate-800">Recent Businesses</h2>
                     <Link href="/businesses" className="text-sm text-violet-600 font-medium hover:text-violet-700">
                         View all →
                     </Link>
                 </div>
-                <table className="w-full text-sm">
+                <table className="w-full text-sm min-w-[540px]">
                     <thead>
                         <tr className="text-left border-b border-slate-100">
                             <th className="table-th">Business</th>

@@ -28,7 +28,7 @@ export default function BusinessTabs({ businessId, active, devicesCount }: Props
         }`;
 
     return (
-        <div className="flex border-b border-slate-200 mb-6 gap-1">
+        <div className="flex border-b border-slate-200 mb-6 gap-1 overflow-x-auto scrollbar-none -mx-4 px-4 sm:mx-0 sm:px-0">
             {TABS.map(({ key, label, suffix }) => (
                 <Link
                     key={key}
