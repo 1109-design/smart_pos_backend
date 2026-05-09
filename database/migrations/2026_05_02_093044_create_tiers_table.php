@@ -13,7 +13,7 @@ return new class extends Migration
             $table->string('key')->primary();
             $table->string('label');
             $table->string('price');
-            $table->json('features')->default('[]');
+            $table->json('features')->nullable();
             $table->unsignedTinyInteger('sort_order')->default(0);
             $table->timestamps();
         });
