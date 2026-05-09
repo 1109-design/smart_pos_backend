@@ -203,14 +203,15 @@ class SyncProcessor
                 ExchangeRate::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'from_currency' => $payload['from_currency'] ?? '',
-                        'to_currency' => $payload['to_currency'] ?? '',
-                        'rate' => $payload['rate'] ?? 1,
-                        'source' => $payload['source'] ?? 'manual',
+                        'business_id'    => $payload['business_id'] ?? null,
+                        'from_currency'  => $payload['from_currency'] ?? '',
+                        'to_currency'    => $payload['to_currency'] ?? '',
+                        'rate'           => $payload['rate'] ?? 1,
+                        'source'         => $payload['source'] ?? 'manual',
                         'set_by_user_id' => $payload['set_by_user_id'] ?? null,
-                        'locked' => $payload['locked'] ?? false,
-                        'valid_from' => $payload['valid_from'] ?? now(),
-                        'valid_until' => $payload['valid_until'] ?? null,
+                        'locked'         => $payload['locked'] ?? false,
+                        'valid_from'     => $payload['valid_from'] ?? now(),
+                        'valid_until'    => $payload['valid_until'] ?? null,
                     ]
                 );
                 break;
@@ -546,24 +547,49 @@ class SyncProcessor
                 break;
 
             case 'expenses':
+                // recorded_by_user_id is NOT NULL in the DB.
+                // Prefer the payload value; if absent/empty, fall back to the existing row's
+                // value so that cancellations and edits don't break on devices that pushed
+                // the expense before this field was always populated.
+                $recordedByUserId = ! empty($payload['recorded_by_user_id'])
+                    ? $payload['recorded_by_user_id']
+                    : Expense::find($uuid)?->recorded_by_user_id;
+
+                if (empty($recordedByUserId) && !empty($payload['business_id'])) {
+                    // Fall back to the first user in the business to avoid data loss
+                    $recordedByUserId = User::where('business_id', $payload['business_id'])->first()?->id;
+                }
+
+                if (empty($recordedByUserId)) {
+                    // Last resort fallback to any user in the system (e.g. super admin)
+                    $recordedByUserId = User::first()?->id;
+                }
+
+                if (empty($recordedByUserId)) {
+                    // Genuinely new record with no user and no fallback possible — cannot insert.
+                    throw new \RuntimeException(
+                        'expenses: recorded_by_user_id is required but was not provided in the payload and no fallback user found.'
+                    );
+                }
+
                 Expense::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'business_id' => $payload['business_id'] ?? null,
-                        'recorded_by_user_id' => $payload['recorded_by_user_id'] ?? null,
-                        'category' => $payload['category'] ?? '',
-                        'description' => $payload['description'] ?? null,
-                        'amount' => $payload['amount'] ?? 0,
-                        'currency_code' => $payload['currency_code'] ?? 'USD',
-                        'base_equivalent' => $payload['base_equivalent'] ?? 0,
-                        'exchange_rate' => $payload['exchange_rate'] ?? 1,
-                        'payment_method' => $payload['payment_method'] ?? 'cash',
-                        'mobile_provider' => $payload['mobile_provider'] ?? null,
-                        'payment_reference' => $payload['payment_reference'] ?? null,
-                        'receipt_path' => $payload['receipt_path'] ?? null,
-                        'notes' => $payload['notes'] ?? null,
-                        'expense_date' => $payload['expense_date'] ?? now(),
-                        'deleted_at' => $payload['deleted_at'] ?? null,
+                        'business_id'         => $payload['business_id'] ?? null,
+                        'recorded_by_user_id' => $recordedByUserId,
+                        'category'            => $payload['category'] ?? '',
+                        'description'         => $payload['description'] ?? null,
+                        'amount'              => $payload['amount'] ?? 0,
+                        'currency_code'       => $payload['currency_code'] ?? 'USD',
+                        'base_equivalent'     => $payload['base_equivalent'] ?? 0,
+                        'exchange_rate'       => $payload['exchange_rate'] ?? 1,
+                        'payment_method'      => $payload['payment_method'] ?? 'cash',
+                        'mobile_provider'     => $payload['mobile_provider'] ?? null,
+                        'payment_reference'   => $payload['payment_reference'] ?? null,
+                        'receipt_path'        => $payload['receipt_path'] ?? null,
+                        'notes'               => $payload['notes'] ?? null,
+                        'expense_date'        => $payload['expense_date'] ?? now(),
+                        'deleted_at'          => $payload['deleted_at'] ?? null,
                     ]
                 );
                 break;
@@ -793,8 +819,16 @@ class SyncProcessor
             'salary_payments'  => SalaryPayment::class,
         ];
 
+        $softDeleteIsActive = ['locations', 'categories', 'tax_rates', 'products', 'product_variants', 'suppliers', 'coupons'];
+
         if (isset($modelMap[$table])) {
-            $modelMap[$table]::where('id', $uuid)->delete();
+            if (in_array($table, $softDeleteIsActive)) {
+                $modelMap[$table]::where('id', $uuid)->update(['is_active' => false]);
+            } elseif ($table === 'employees') {
+                $modelMap[$table]::where('id', $uuid)->update(['status' => 'inactive']);
+            } else {
+                $modelMap[$table]::where('id', $uuid)->delete();
+            }
         }
 
         // Special case: product_tax_rates composite key

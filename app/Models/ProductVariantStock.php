@@ -6,15 +6,15 @@ use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-class ProductStock extends Model
+class ProductVariantStock extends Model
 {
     use HasUuids;
 
-    // Laravel pluralizes to 'product_stocks' by default; actual table is 'product_stock'.
-    protected $table = 'product_stock';
+    // Laravel pluralizes to 'product_variant_stocks' by default; actual table is 'product_variant_stock'.
+    protected $table = 'product_variant_stock';
 
     protected $fillable = [
-        'id', 'product_id', 'location_id', 'quantity', 'reserved_quantity',
+        'id', 'variant_id', 'location_id', 'quantity', 'reserved_quantity',
     ];
 
     protected function casts(): array
@@ -25,9 +25,9 @@ class ProductStock extends Model
         ];
     }
 
-    public function product(): BelongsTo
+    public function variant(): BelongsTo
     {
-        return $this->belongsTo(Product::class);
+        return $this->belongsTo(ProductVariant::class, 'variant_id');
     }
 
     public function location(): BelongsTo

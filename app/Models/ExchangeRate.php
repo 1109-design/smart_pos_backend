@@ -11,7 +11,7 @@ class ExchangeRate extends Model
 
 
     protected $fillable = [
-        'id', 'from_currency', 'to_currency', 'rate', 'source',
+        'id', 'business_id', 'from_currency', 'to_currency', 'rate', 'source',
         'set_by_user_id', 'locked', 'valid_from', 'valid_until',
     ];
 
