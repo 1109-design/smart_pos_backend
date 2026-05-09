@@ -11,7 +11,7 @@ class DatabaseSeeder extends Seeder
         $this->call([
             RolesAndPermissionsSeeder::class,
             SuperAdminSeeder::class,
-            TestBusinessSeeder::class,
+            // TestBusinessSeeder::class,
         ]);
     }
 }
