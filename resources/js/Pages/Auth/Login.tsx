@@ -264,27 +264,6 @@ export default function Login({
                                 )}
                             </button>
                         </form>
-
-                        {/* Divider + register link */}
-                        <div className="mt-8">
-                            <div className="relative">
-                                <div className="absolute inset-0 flex items-center">
-                                    <div className="w-full border-t border-white/10" />
-                                </div>
-                                <div className="relative flex justify-center">
-                                    <span className="bg-slate-950 px-3 text-xs uppercase tracking-wider text-slate-500">
-                                        New to SmartPOS?
-                                    </span>
-                                </div>
-                            </div>
-
-                            <Link
-                                href={route('register')}
-                                className="mt-5 flex w-full items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm font-semibold text-white transition-all duration-300 hover:border-white/20 hover:bg-white/[0.07]"
-                            >
-                                Create an account
-                            </Link>
-                        </div>
                     </div>
                 </div>
             </div>
