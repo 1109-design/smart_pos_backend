@@ -29,6 +29,7 @@ export default function BusinessForm({ business, tiers = [] }: Props) {
         business_name: business?.business_name ?? '',
         owner_email:   business?.owner_email ?? '',
         tier:          business?.tier ?? (tiers[0]?.key ?? 'starter'),
+        subscription_valid_until: '',
         country:       business?.country ?? '',
         currency_code: business?.currency_code ?? 'USD',
         admin_name:    '',
@@ -112,6 +113,23 @@ export default function BusinessForm({ business, tiers = [] }: Props) {
                             />
                         </div>
                     </div>
+
+                    {data.tier !== 'starter' && (
+                        <div>
+                            <label className="form-label">Subscription Valid Until</label>
+                            <input
+                                type="date"
+                                value={data.subscription_valid_until}
+                                onChange={(e) => setData('subscription_valid_until', e.target.value)}
+                                className="form-input"
+                                required
+                            />
+                            <p className="text-xs text-slate-400 mt-1.5">
+                                Required for paid tiers — the business can't pair a device until this is set.
+                            </p>
+                            {errors.subscription_valid_until && <p className="text-red-500 text-xs mt-1.5">{errors.subscription_valid_until}</p>}
+                        </div>
+                    )}
 
                     <div>
                         <label className="form-label">Country Code</label>

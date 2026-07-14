@@ -8,6 +8,8 @@ use App\Http\Controllers\BackOffice\UsersController as BackOfficeUsers;
 use App\Http\Controllers\BusinessController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DeviceController;
+use App\Http\Controllers\DownloadController;
+use App\Http\Controllers\PairController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\SubscriptionController;
 use App\Http\Controllers\TierController;
@@ -17,6 +19,12 @@ use Illuminate\Support\Facades\Route;
 Route::get('/', function () {
     return redirect()->route('dashboard');
 });
+
+// Public — no auth. Reached by scanning a QR code from a phone that isn't
+// logged into the BackOffice at all.
+Route::get('download', [DownloadController::class, 'show'])->name('download.show');
+Route::get('download/apk', [DownloadController::class, 'apk'])->name('download.apk');
+Route::get('pair/{tenant}', [PairController::class, 'show'])->name('pair.show');
 
 Route::get('/dashboard', DashboardController::class)->middleware(['auth', 'verified'])->name('dashboard');
 

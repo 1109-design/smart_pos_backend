@@ -27,6 +27,7 @@ interface Props {
     business: Business;
     devicesCount: number;
     setup_credentials?: SetupCredentials;
+    pairQrCode: string;
 }
 
 const tierVariant = (tier: string): 'violet' | 'amber' | 'gray' => {
@@ -35,7 +36,7 @@ const tierVariant = (tier: string): 'violet' | 'amber' | 'gray' => {
     return 'gray';
 };
 
-export default function BusinessShow({ business, devicesCount, setup_credentials }: Props) {
+export default function BusinessShow({ business, devicesCount, setup_credentials, pairQrCode }: Props) {
     const [credsDismissed, setCredsDismissed] = useState(false);
 
     return (
@@ -111,19 +112,27 @@ export default function BusinessShow({ business, devicesCount, setup_credentials
             <BusinessTabs businessId={business.id} active="overview" devicesCount={devicesCount} />
 
             <div className="space-y-5">
-                {/* Pairing Code */}
-                <div className="bg-gradient-to-br from-violet-600 to-purple-700 rounded-2xl p-6 text-white shadow-lg shadow-violet-200">
-                    <p className="text-xs font-semibold uppercase tracking-widest text-violet-200">Mobile App Pairing Code</p>
-                    <div className="flex items-center gap-5 mt-3">
-                        <p className="text-4xl font-bold tracking-widest font-mono">{business.pairing_code || '—'}</p>
-                        <button
-                            onClick={() => navigator.clipboard.writeText(business.pairing_code || '')}
-                            className="text-sm bg-white/15 hover:bg-white/25 px-4 py-1.5 rounded-xl transition-colors font-medium"
-                        >
-                            Copy
-                        </button>
+                {/* Pairing Code + QR */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="md:col-span-2 bg-gradient-to-br from-violet-600 to-purple-700 rounded-2xl p-6 text-white shadow-lg shadow-violet-200">
+                        <p className="text-xs font-semibold uppercase tracking-widest text-violet-200">Mobile App Pairing Code</p>
+                        <div className="flex items-center gap-5 mt-3">
+                            <p className="text-4xl font-bold tracking-widest font-mono">{business.pairing_code || '—'}</p>
+                            <button
+                                onClick={() => navigator.clipboard.writeText(business.pairing_code || '')}
+                                className="text-sm bg-white/15 hover:bg-white/25 px-4 py-1.5 rounded-xl transition-colors font-medium"
+                            >
+                                Copy
+                            </button>
+                        </div>
+                        <p className="text-xs text-violet-300 mt-3">Enter this code in the mobile app to connect this business</p>
                     </div>
-                    <p className="text-xs text-violet-300 mt-3">Enter this code in the mobile app to connect this business</p>
+
+                    <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5 flex flex-col items-center text-center">
+                        <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Scan to Pair a Device</p>
+                        <img src={pairQrCode} alt="QR code to pair a new device" className="w-28 h-28" />
+                        <p className="text-xs text-slate-400 mt-3">Opens SmartPOS pre-filled with this business's pairing code and admin email</p>
+                    </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-lg">

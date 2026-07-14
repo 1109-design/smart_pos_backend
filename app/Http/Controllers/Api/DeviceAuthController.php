@@ -10,6 +10,7 @@ use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 
 class DeviceAuthController extends Controller
 {
@@ -117,6 +118,16 @@ class DeviceAuthController extends Controller
         $user = User::where('email', $data['email'])->where('is_active', true)->first();
 
         if (! $user || ! $user->pin_hash || ! Hash::check($data['pin'], $user->pin_hash)) {
+            Log::warning('Device setup rejected: invalid email or PIN.', [
+                'tenant_id' => $tenant->id,
+                'email' => $data['email'],
+                'reason' => match (true) {
+                    ! $user => 'no active user with that email in this tenant',
+                    ! $user->pin_hash => 'user has no pin_hash set',
+                    default => 'pin did not match stored hash',
+                },
+            ]);
+
             tenancy()->end();
             return response()->json(['message' => 'Invalid email or PIN.'], 401);
         }

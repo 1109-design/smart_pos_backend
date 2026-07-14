@@ -2,9 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\SubscriptionHistory;
 use App\Models\Tenant;
 use App\Models\Tier;
 use App\Models\User;
+use App\Services\QrCodeGenerator;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -48,6 +50,7 @@ class BusinessController extends Controller
             'business_name' => 'required|string|max:255',
             'owner_email' => 'required|email|max:255',
             'tier' => "required|in:{$validTiers}",
+            'subscription_valid_until' => 'nullable|date|required_unless:tier,starter',
             'country' => 'nullable|string|size:2',
             'currency_code' => 'nullable|string|max:10',
             'admin_name' => 'required|string|max:255',
@@ -58,9 +61,20 @@ class BusinessController extends Controller
             'business_name' => $data['business_name'],
             'owner_email' => $data['owner_email'],
             'tier' => $data['tier'],
+            'subscription_valid_until' => $data['subscription_valid_until'] ?? null,
             'country' => $data['country'] ?? null,
             'currency_code' => $data['currency_code'] ?? 'USD',
         ]);
+
+        if ($data['tier'] !== 'starter') {
+            SubscriptionHistory::create([
+                'tenant_id' => $tenant->id,
+                'tier' => $data['tier'],
+                'event_type' => 'INITIAL_PURCHASE',
+                'subscription_valid_until' => $tenant->subscription_valid_until,
+                'metadata' => ['manual_override' => true, 'source' => 'business_creation'],
+            ]);
+        }
 
         $tenant->domains()->create(['domain' => Str::slug($data['business_name'])]);
 
@@ -97,6 +111,7 @@ class BusinessController extends Controller
             'business' => $business,
             'devicesCount' => $business->devices()->count(),
             'setup_credentials' => session('setup_credentials'),
+            'pairQrCode' => QrCodeGenerator::pngDataUri(route('pair.show', $business->id)),
         ]);
     }
 
