@@ -35,4 +35,11 @@ return [
         ],
     ],
 
+    'revenuecat' => [
+        // Set the same value as the Authorization header configured on the
+        // RevenueCat webhook. Requests without a matching header are rejected;
+        // if this is unset, the webhook rejects everything (fail closed).
+        'webhook_auth' => env('REVENUECAT_WEBHOOK_AUTH'),
+    ],
+
 ];

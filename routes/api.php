@@ -3,13 +3,17 @@
 use App\Http\Controllers\Api\DeviceAuthController;
 use App\Http\Controllers\Api\LocationController;
 use App\Http\Controllers\Api\StockTransferController;
+use App\Http\Controllers\Api\SubscriptionController;
 use App\Http\Controllers\Api\SyncController;
 use App\Http\Controllers\Api\WebhookController;
 use Illuminate\Support\Facades\Route;
 
-// POS device authentication (no tenant context needed yet — tenant resolved by business_code)
 Route::prefix('v1')->group(function () {
     Route::get('health', fn () => response()->json(['ok' => true]));
+});
+
+// POS device authentication (no tenant context needed yet — tenant resolved by business_code)
+Route::prefix('v1')->middleware(['throttle:device-auth'])->group(function () {
     Route::post('auth/device', [DeviceAuthController::class, 'login']);
     Route::post('auth/device/activate', [DeviceAuthController::class, 'activate']);
     Route::post('auth/setup', [DeviceAuthController::class, 'setup']);
@@ -22,6 +26,10 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::get('sync/status', [SyncController::class, 'status']);
     Route::get('sync/conflicts', [SyncController::class, 'conflicts']);
     Route::post('sync/conflicts/{id}/resolve', [SyncController::class, 'resolveConflict']);
+
+    // Subscription entitlement — heartbeat + activation code redemption
+    Route::get('subscription/status', [SubscriptionController::class, 'status']);
+    Route::post('subscription/redeem', [SubscriptionController::class, 'redeem']);
 
     // Locations
     Route::get('locations', [LocationController::class, 'index']);

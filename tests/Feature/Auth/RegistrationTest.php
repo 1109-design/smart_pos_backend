@@ -9,14 +9,19 @@ class RegistrationTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_registration_screen_can_be_rendered(): void
+    /**
+     * Public registration is intentionally disabled — any authenticated web
+     * user can manage subscriptions and activation codes for every business,
+     * so accounts must only be created deliberately by an administrator.
+     */
+    public function test_registration_screen_is_disabled(): void
     {
         $response = $this->get('/register');
 
-        $response->assertStatus(200);
+        $response->assertNotFound();
     }
 
-    public function test_new_users_can_register(): void
+    public function test_registration_submission_is_disabled(): void
     {
         $response = $this->post('/register', [
             'name' => 'Test User',
@@ -25,7 +30,8 @@ class RegistrationTest extends TestCase
             'password_confirmation' => 'password',
         ]);
 
-        $this->assertAuthenticated();
-        $response->assertRedirect(route('dashboard', absolute: false));
+        $response->assertNotFound();
+        $this->assertGuest();
+        $this->assertDatabaseMissing('users', ['email' => 'test@example.com']);
     }
 }

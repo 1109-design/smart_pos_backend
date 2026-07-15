@@ -18,9 +18,9 @@ class DeviceAuthController extends Controller
     {
         $data = $request->validate([
             'device_identifier' => 'required|uuid',
-            'device_name'       => 'required|string|max:255',
-            'pin'               => 'required|digits:4',
-            'business_code'     => 'required|string',
+            'device_name' => 'required|string|max:255',
+            'pin' => 'required|digits:4',
+            'business_code' => 'required|string',
         ]);
 
         // Resolve tenant by pairing_code or ID (business_code)
@@ -36,23 +36,37 @@ class DeviceAuthController extends Controller
             return response()->json(['message' => 'Subscription expired.'], 402);
         }
 
+        // A revoked device must not be able to re-authenticate with just the
+        // PIN — revocation (e.g. lost/stolen device) is only meaningful if a
+        // fresh activation code is required to bring it back. See activate().
+        $existingDevice = Device::where('tenant_id', $tenant->id)
+            ->where('device_identifier', $data['device_identifier'])
+            ->first();
+
+        if ($existingDevice?->is_revoked) {
+            return response()->json([
+                'message' => 'This device has been revoked. Ask the business owner for a new activation code.',
+            ], 403);
+        }
+
         // Find user by PIN in tenant context
         tenancy()->initialize($tenant);
 
         $user = User::where('is_active', true)->get()->first(
-            fn($u) => $u->pin_hash && Hash::check($data['pin'], $u->pin_hash)
+            fn ($u) => $u->pin_hash && Hash::check($data['pin'], $u->pin_hash)
         );
 
         if (! $user) {
             tenancy()->end();
+
             return response()->json(['message' => 'Invalid PIN.'], 401);
         }
 
         tenancy()->end();
 
         // Register or update device in central DB
-        $device = Device::firstOrNew([
-            'tenant_id'         => $tenant->id,
+        $device = $existingDevice ?? new Device([
+            'tenant_id' => $tenant->id,
             'device_identifier' => $data['device_identifier'],
         ]);
 
@@ -64,24 +78,24 @@ class DeviceAuthController extends Controller
         $token = $user->createToken($data['device_name'], ['*'], now()->addDays(90));
 
         $device->fill([
-            'name'        => $data['device_name'],
-            'token_id'    => $token->accessToken->id,
+            'name' => $data['device_name'],
+            'token_id' => $token->accessToken->id,
             'last_seen_at' => now(),
-            'is_revoked'  => false,
+            'is_revoked' => false,
         ])->save();
 
         return response()->json([
             'token' => $token->plainTextToken,
-            'user'  => [
-                'id'          => $user->id,
-                'name'        => $user->name,
-                'role'        => $user->roles->first()?->name,
+            'user' => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'role' => $user->roles->first()?->name,
                 'permissions' => $user->getAllPermissions()->pluck('name'),
             ],
             'business' => [
-                'id'            => $tenant->id,
-                'name'          => $tenant->business_name,
-                'tier'          => $tenant->tier,
+                'id' => $tenant->id,
+                'name' => $tenant->business_name,
+                'tier' => $tenant->tier,
                 'currency_code' => $tenant->currency_code,
             ],
         ]);
@@ -95,10 +109,10 @@ class DeviceAuthController extends Controller
     {
         $data = $request->validate([
             'device_identifier' => 'required|uuid',
-            'device_name'       => 'required|string|max:255',
-            'email'             => 'required|email',
-            'pin'               => 'required|digits:4',
-            'business_code'     => 'required|string',
+            'device_name' => 'required|string|max:255',
+            'email' => 'required|email',
+            'pin' => 'required|digits:4',
+            'business_code' => 'required|string',
         ]);
 
         $tenant = Tenant::where('pairing_code', $data['business_code'])
@@ -111,6 +125,16 @@ class DeviceAuthController extends Controller
 
         if (! $tenant->isSubscriptionActive()) {
             return response()->json(['message' => 'Subscription expired.'], 402);
+        }
+
+        $existingDevice = Device::where('tenant_id', $tenant->id)
+            ->where('device_identifier', $data['device_identifier'])
+            ->first();
+
+        if ($existingDevice?->is_revoked) {
+            return response()->json([
+                'message' => 'This device has been revoked. Ask the business owner for a new activation code.',
+            ], 403);
         }
 
         tenancy()->initialize($tenant);
@@ -129,13 +153,14 @@ class DeviceAuthController extends Controller
             ]);
 
             tenancy()->end();
+
             return response()->json(['message' => 'Invalid email or PIN.'], 401);
         }
 
         tenancy()->end();
 
-        $device = Device::firstOrNew([
-            'tenant_id'         => $tenant->id,
+        $device = $existingDevice ?? new Device([
+            'tenant_id' => $tenant->id,
             'device_identifier' => $data['device_identifier'],
         ]);
 
@@ -146,27 +171,27 @@ class DeviceAuthController extends Controller
         $token = $user->createToken($data['device_name'], ['*'], now()->addDays(90));
 
         $device->fill([
-            'name'         => $data['device_name'],
-            'token_id'     => $token->accessToken->id,
+            'name' => $data['device_name'],
+            'token_id' => $token->accessToken->id,
             'last_seen_at' => now(),
-            'is_revoked'   => false,
+            'is_revoked' => false,
         ])->save();
 
         return response()->json([
             'token' => $token->plainTextToken,
-            'user'  => [
-                'id'          => $user->id,
-                'name'        => $user->name,
-                'email'       => $user->email,
-                'role'        => $user->roles->first()?->name,
+            'user' => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'role' => $user->roles->first()?->name,
                 'permissions' => $user->getAllPermissions()->pluck('name'),
             ],
             'business' => [
-                'id'            => $tenant->id,
-                'name'          => $tenant->business_name,
-                'tier'          => $tenant->tier,
+                'id' => $tenant->id,
+                'name' => $tenant->business_name,
+                'tier' => $tenant->tier,
                 'currency_code' => $tenant->currency_code,
-                'pairing_code'  => $tenant->pairing_code,
+                'pairing_code' => $tenant->pairing_code,
             ],
         ]);
     }
@@ -175,9 +200,9 @@ class DeviceAuthController extends Controller
     {
         $data = $request->validate([
             'device_identifier' => 'required|uuid',
-            'device_name'       => 'required|string|max:255',
-            'activation_code'   => 'required|string|max:16',
-            'business_code'     => 'required|string',
+            'device_name' => 'required|string|max:255',
+            'activation_code' => 'required|string|max:16',
+            'business_code' => 'required|string',
         ]);
 
         // Resolve tenant by pairing_code or ID (business_code)
@@ -205,6 +230,7 @@ class DeviceAuthController extends Controller
 
         if (! $user) {
             tenancy()->end();
+
             return response()->json(['message' => 'No active user found for this business.'], 404);
         }
 
@@ -212,7 +238,7 @@ class DeviceAuthController extends Controller
 
         // Register or update device in central DB
         $device = Device::firstOrNew([
-            'tenant_id'         => $tenant->id,
+            'tenant_id' => $tenant->id,
             'device_identifier' => $data['device_identifier'],
         ]);
 
@@ -224,31 +250,31 @@ class DeviceAuthController extends Controller
         $token = $user->createToken($data['device_name'], ['*'], now()->addDays(90));
 
         $device->fill([
-            'name'        => $data['device_name'],
-            'token_id'    => $token->accessToken->id,
+            'name' => $data['device_name'],
+            'token_id' => $token->accessToken->id,
             'last_seen_at' => now(),
-            'is_revoked'  => false,
+            'is_revoked' => false,
         ])->save();
 
         // Mark activation code as used
         $activationCode->update([
             'device_id' => $device->id,
-            'used_at'   => now(),
-            'status'    => 'used',
+            'used_at' => now(),
+            'status' => 'used',
         ]);
 
         return response()->json([
             'token' => $token->plainTextToken,
-            'user'  => [
-                'id'          => $user->id,
-                'name'        => $user->name,
-                'role'        => $user->roles->first()?->name,
+            'user' => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'role' => $user->roles->first()?->name,
                 'permissions' => $user->getAllPermissions()->pluck('name'),
             ],
             'business' => [
-                'id'            => $tenant->id,
-                'name'          => $tenant->business_name,
-                'tier'          => $tenant->tier,
+                'id' => $tenant->id,
+                'name' => $tenant->business_name,
+                'tier' => $tenant->tier,
                 'currency_code' => $tenant->currency_code,
             ],
         ]);

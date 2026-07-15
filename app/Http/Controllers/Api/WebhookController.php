@@ -15,6 +15,16 @@ class WebhookController extends Controller
 {
     public function revenuecat(Request $request): JsonResponse
     {
+        // RevenueCat sends the Authorization header configured on the webhook
+        // verbatim. Fail closed when unconfigured — this endpoint can upgrade
+        // any tenant's tier, so it must never be open by default.
+        $expected = config('services.revenuecat.webhook_auth');
+
+        if (! is_string($expected) || $expected === ''
+            || ! hash_equals($expected, (string) $request->header('Authorization'))) {
+            return response()->json(['message' => 'Unauthorized.'], 401);
+        }
+
         $payload = $request->input('event');
 
         if (! $payload) {
@@ -91,6 +101,7 @@ class WebhookController extends Controller
         if (str_contains($productId, 'pro')) {
             return 'pro';
         }
+
         return 'starter';
     }
 
