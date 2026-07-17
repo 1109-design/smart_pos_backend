@@ -5,8 +5,10 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\ActivationCode;
 use App\Models\Device;
+use App\Models\SubscriptionHistory;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Services\BusinessProvisioner;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -14,6 +16,97 @@ use Illuminate\Support\Facades\Log;
 
 class DeviceAuthController extends Controller
 {
+    /**
+     * Public self-service registration.
+     *
+     * Creates a business on a short, full-featured trial and immediately pairs
+     * the calling device, so an owner goes from install to selling in a single
+     * request — no admin involvement. When the trial lapses the device locks
+     * (login/setup/status all report the subscription as inactive) until the
+     * owner pays and redeems an activation code via SubscriptionController.
+     */
+    public function register(Request $request, BusinessProvisioner $provisioner): JsonResponse
+    {
+        $data = $request->validate([
+            'device_identifier' => 'required|uuid',
+            'device_name' => 'required|string|max:255',
+            'business_name' => 'required|string|max:255',
+            'owner_name' => 'required|string|max:255',
+            'owner_email' => 'required|email|max:255',
+            'pin' => 'required|digits:4',
+            'country' => 'nullable|string|size:2',
+            'currency_code' => 'nullable|string|max:10',
+        ]);
+
+        // One free trial per owner email and per physical device — without this
+        // the trial can be farmed indefinitely by re-registering.
+        if (Tenant::where('owner_email', $data['owner_email'])->exists()) {
+            return response()->json([
+                'message' => 'A business is already registered with this email. Please sign in instead.',
+            ], 409);
+        }
+
+        if (Device::where('device_identifier', $data['device_identifier'])->exists()) {
+            return response()->json([
+                'message' => 'This device is already registered to a business.',
+            ], 409);
+        }
+
+        $trialEndsAt = now()->addDays((int) config('trial.duration_days'));
+
+        $tenant = $provisioner->provision([
+            'business_name' => $data['business_name'],
+            'owner_email' => $data['owner_email'],
+            'tier' => config('trial.tier'),
+            'subscription_valid_until' => $trialEndsAt,
+            'country' => $data['country'] ?? null,
+            'currency_code' => $data['currency_code'] ?? 'USD',
+            'admin_name' => $data['owner_name'],
+            'admin_pin' => $data['pin'],
+        ]);
+
+        SubscriptionHistory::create([
+            'tenant_id' => $tenant->id,
+            'tier' => $tenant->tier,
+            'event_type' => 'TRIAL_STARTED',
+            'subscription_valid_until' => $trialEndsAt,
+            'metadata' => ['source' => 'self_registration'],
+        ]);
+
+        // Pair the calling device to the freshly created owner and mint a token.
+        $owner = $tenant->run(fn () => User::where('is_active', true)->first());
+
+        $token = $owner->createToken($data['device_name'], ['*'], now()->addDays(90));
+
+        Device::create([
+            'tenant_id' => $tenant->id,
+            'name' => $data['device_name'],
+            'device_identifier' => $data['device_identifier'],
+            'token_id' => $token->accessToken->id,
+            'last_seen_at' => now(),
+            'is_revoked' => false,
+        ]);
+
+        return response()->json([
+            'token' => $token->plainTextToken,
+            'user' => [
+                'id' => $owner->id,
+                'name' => $owner->name,
+                'email' => $owner->email,
+                'role' => $owner->roles->first()?->name,
+                'permissions' => $owner->getAllPermissions()->pluck('name'),
+            ],
+            'business' => [
+                'id' => $tenant->id,
+                'name' => $tenant->business_name,
+                'tier' => $tenant->tier,
+                'currency_code' => $tenant->currency_code,
+                'pairing_code' => $tenant->pairing_code,
+                'subscription_valid_until' => $tenant->subscription_valid_until?->toIso8601String(),
+            ],
+        ], 201);
+    }
+
     public function login(Request $request): JsonResponse
     {
         $data = $request->validate([

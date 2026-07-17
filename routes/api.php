@@ -14,6 +14,7 @@ Route::prefix('v1')->group(function () {
 
 // POS device authentication (no tenant context needed yet — tenant resolved by business_code)
 Route::prefix('v1')->middleware(['throttle:device-auth'])->group(function () {
+    Route::post('auth/register', [DeviceAuthController::class, 'register']);
     Route::post('auth/device', [DeviceAuthController::class, 'login']);
     Route::post('auth/device/activate', [DeviceAuthController::class, 'activate']);
     Route::post('auth/setup', [DeviceAuthController::class, 'setup']);

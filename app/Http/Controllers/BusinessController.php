@@ -5,12 +5,10 @@ namespace App\Http\Controllers;
 use App\Models\SubscriptionHistory;
 use App\Models\Tenant;
 use App\Models\Tier;
-use App\Models\User;
+use App\Services\BusinessProvisioner;
 use App\Services\QrCodeGenerator;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Str;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -42,7 +40,7 @@ class BusinessController extends Controller
         ]);
     }
 
-    public function store(Request $request): RedirectResponse
+    public function store(Request $request, BusinessProvisioner $provisioner): RedirectResponse
     {
         $validTiers = Tier::pluck('key')->implode(',');
 
@@ -57,14 +55,7 @@ class BusinessController extends Controller
             'admin_pin' => 'required|digits:4',
         ]);
 
-        $tenant = Tenant::create([
-            'business_name' => $data['business_name'],
-            'owner_email' => $data['owner_email'],
-            'tier' => $data['tier'],
-            'subscription_valid_until' => $data['subscription_valid_until'] ?? null,
-            'country' => $data['country'] ?? null,
-            'currency_code' => $data['currency_code'] ?? 'USD',
-        ]);
+        $tenant = $provisioner->provision($data);
 
         if ($data['tier'] !== 'starter') {
             SubscriptionHistory::create([
@@ -75,23 +66,6 @@ class BusinessController extends Controller
                 'metadata' => ['manual_override' => true, 'source' => 'business_creation'],
             ]);
         }
-
-        $tenant->domains()->create(['domain' => Str::slug($data['business_name'])]);
-
-        // Bootstrap the first admin user in the tenant database
-        tenancy()->initialize($tenant);
-
-        $admin = User::create([
-            'name' => $data['admin_name'],
-            'email' => $data['owner_email'],
-            'password' => Hash::make(Str::random(24)),
-            'pin_hash' => Hash::make($data['admin_pin']),
-            'is_active' => true,
-        ]);
-
-        $admin->assignRole('business_owner');
-
-        tenancy()->end();
 
         return redirect()->route('businesses.show', $tenant->id)
             ->with('success', 'Business created.')

@@ -2,12 +2,29 @@
 
 namespace App\Models;
 
-use Stancl\Tenancy\Database\Models\Tenant as BaseTenant;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Stancl\Tenancy\Contracts\TenantWithDatabase;
 use Stancl\Tenancy\Database\Concerns\HasDatabase;
 use Stancl\Tenancy\Database\Concerns\HasDomains;
-use Illuminate\Database\Eloquent\Relations\HasMany;
+use Stancl\Tenancy\Database\Models\Tenant as BaseTenant;
 
+/**
+ * A tenant — one "business" in SmartPOS.
+ *
+ * IMPORTANT: tenancy here is effectively SINGLE-DATABASE. Although this model
+ * implements TenantWithDatabase, no per-tenant database is created and
+ * `tenancy()->initialize()` does NOT switch database connections — it only
+ * records which tenant is "current". Data is therefore NOT isolated by the
+ * database itself; every tenant-owned model MUST be scoped by `business_id`
+ * (which equals this tenant's id).
+ *
+ * The sync layer does this explicitly (see SyncProcessor/SyncController) and
+ * the User model does it via a global scope (see App\Models\User). When you
+ * add a new tenant-owned model, or write a raw query over tenant data, apply
+ * the same `business_id` scoping. Relying on `tenancy()->initialize()` alone
+ * to keep businesses apart is a bug — that assumption is exactly what caused
+ * the cross-tenant auth leak the User scope now guards against.
+ */
 class Tenant extends BaseTenant implements TenantWithDatabase
 {
     use HasDatabase, HasDomains;
@@ -60,8 +77,8 @@ class Tenant extends BaseTenant implements TenantWithDatabase
 
     public function getDatabaseName(): string
     {
-        return config('tenancy.database.prefix') .
-            $this->getKey() .
+        return config('tenancy.database.prefix').
+            $this->getKey().
             config('tenancy.database.suffix');
     }
 
@@ -80,6 +97,7 @@ class Tenant extends BaseTenant implements TenantWithDatabase
         if ($this->tier === 'starter') {
             return true;
         }
+
         return $this->subscription_valid_until?->isFuture() ?? false;
     }
 }
