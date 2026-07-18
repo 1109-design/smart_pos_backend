@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Middleware\AuthenticateBackOfficeUser;
+use App\Http\Middleware\EnsurePlatformAdmin;
 use App\Http\Middleware\HandleInertiaRequests;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -22,6 +23,7 @@ return Application::configure(basePath: dirname(__DIR__))
 
         $middleware->alias([
             'auth.backoffice' => AuthenticateBackOfficeUser::class,
+            'platform.admin' => EnsurePlatformAdmin::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

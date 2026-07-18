@@ -76,6 +76,81 @@ class SubscriptionActivationTest extends TestCase
         ]);
     }
 
+    public function test_activate_revives_revoked_device_and_expired_subscription(): void
+    {
+        $tenantId = 'tenant-activate-1';
+        $this->makeDeviceToken($tenantId, [
+            'tier' => 'pro',
+            'subscription_valid_until' => now()->subDay(),
+        ], revoked: true);
+
+        $device = Device::where('tenant_id', $tenantId)->first();
+        $device->update(['token_id' => null]);
+
+        // Activation resolves the business owner inside tenant context, which
+        // scopes users by business_id in the single-database architecture.
+        User::factory()->create(['business_id' => $tenantId, 'is_active' => true]);
+
+        $expires = now()->addMonth();
+        $code = ActivationCode::create([
+            'tenant_id' => $tenantId,
+            'code' => 'REVIVE1234ABCD56',
+            'tier' => 'pro',
+            'expires_at' => $expires,
+            'status' => 'pending',
+        ]);
+
+        $response = $this->postJson('/api/v1/auth/device/activate', [
+            'device_identifier' => $device->device_identifier,
+            'device_name' => 'Revived Device',
+            'activation_code' => $code->code,
+            'business_code' => $tenantId,
+        ]);
+
+        $response->assertOk();
+        $response->assertJsonStructure(['token', 'user', 'business', 'server_time']);
+        $this->assertNotEmpty($response->json('token'));
+        $this->assertSame('pro', $response->json('business.tier'));
+        $this->assertNotNull($response->json('business.subscription_valid_until'));
+
+        // The device is un-revoked and the subscription revived.
+        $this->assertDatabaseHas('devices', [
+            'id' => $device->id,
+            'is_revoked' => false,
+        ]);
+        $this->assertDatabaseHas('tenants', [
+            'id' => $tenantId,
+            'tier' => 'pro',
+        ]);
+        $this->assertTrue(
+            Tenant::find($tenantId)->subscription_valid_until->isFuture(),
+        );
+        $this->assertDatabaseHas('activation_codes', [
+            'id' => $code->id,
+            'status' => 'used',
+        ]);
+        $this->assertDatabaseHas('subscription_history', [
+            'tenant_id' => $tenantId,
+            'event_type' => 'ACTIVATION_REDEEMED',
+        ]);
+    }
+
+    public function test_activate_rejects_invalid_code(): void
+    {
+        $tenantId = 'tenant-activate-2';
+        $this->makeDeviceToken($tenantId, ['tier' => 'starter']);
+
+        $response = $this->postJson('/api/v1/auth/device/activate', [
+            'device_identifier' => str()->uuid()->toString(),
+            'device_name' => 'Some Device',
+            'activation_code' => 'DOESNOTEXIST0000',
+            'business_code' => $tenantId,
+        ]);
+
+        $response->assertStatus(400);
+        $this->assertDatabaseHas('tenants', ['id' => $tenantId, 'tier' => 'starter']);
+    }
+
     public function test_redeem_rejects_code_belonging_to_another_tenant(): void
     {
         $token = $this->makeDeviceToken('tenant-redeem-2', ['tier' => 'starter']);

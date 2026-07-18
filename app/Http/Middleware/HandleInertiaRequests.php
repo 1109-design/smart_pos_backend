@@ -36,6 +36,9 @@ class HandleInertiaRequests extends Middleware
             'auth' => [
                 'user' => $request->user(),
             ],
+            'flash' => [
+                'success' => $request->session()->get('success'),
+            ],
             'backoffice_auth' => $backoffice ? [
                 'user_name' => $backoffice['user_name'],
                 'user_email' => $backoffice['user_email'],

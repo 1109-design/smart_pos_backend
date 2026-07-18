@@ -10,6 +10,7 @@ use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DeviceController;
 use App\Http\Controllers\DownloadController;
 use App\Http\Controllers\PairController;
+use App\Http\Controllers\PaymentSettingsController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\SubscriptionController;
 use App\Http\Controllers\TierController;
@@ -26,9 +27,9 @@ Route::get('download', [DownloadController::class, 'show'])->name('download.show
 Route::get('download/apk', [DownloadController::class, 'apk'])->name('download.apk');
 Route::get('pair/{tenant}', [PairController::class, 'show'])->name('pair.show');
 
-Route::get('/dashboard', DashboardController::class)->middleware(['auth', 'verified'])->name('dashboard');
+Route::get('/dashboard', DashboardController::class)->middleware(['auth', 'verified', 'platform.admin'])->name('dashboard');
 
-Route::middleware(['auth', 'verified'])->group(function () {
+Route::middleware(['auth', 'verified', 'platform.admin'])->group(function () {
     // Business (Tenant) management
     Route::resource('businesses', BusinessController::class);
 
@@ -51,6 +52,10 @@ Route::middleware(['auth', 'verified'])->group(function () {
     // Activation Codes
     Route::get('businesses/{business}/activation-codes', [ActivationCodeController::class, 'index'])->name('businesses.activation-codes.index');
     Route::post('businesses/{business}/activation-codes', [ActivationCodeController::class, 'store'])->name('businesses.activation-codes.store');
+
+    // Payment settings (EcoCash / WhatsApp shown on the app's lock screen)
+    Route::get('settings/payments', [PaymentSettingsController::class, 'edit'])->name('settings.payments.edit');
+    Route::put('settings/payments', [PaymentSettingsController::class, 'update'])->name('settings.payments.update');
 
     // Tiers
     Route::get('tiers', [TierController::class, 'index'])->name('tiers.index');

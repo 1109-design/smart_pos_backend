@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\ActivationCode;
 use App\Models\Device;
+use App\Models\Setting;
 use App\Models\SubscriptionHistory;
 use App\Models\Tenant;
 use Illuminate\Http\JsonResponse;
@@ -47,6 +48,9 @@ class SubscriptionController extends Controller
             'subscription_valid_until' => $tenant->subscription_valid_until?->toIso8601String(),
             'is_active' => $tenant->isSubscriptionActive(),
             'server_time' => now()->toIso8601String(),
+            // Manual renewal details (EcoCash + WhatsApp) — the app caches
+            // these so the lock screen can show them even when offline.
+            'payment_info' => Setting::paymentInfo(),
         ]);
     }
 

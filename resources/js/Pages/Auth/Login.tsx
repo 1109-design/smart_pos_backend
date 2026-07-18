@@ -263,6 +263,16 @@ export default function Login({
                                     </>
                                 )}
                             </button>
+
+                            <p className="text-center text-sm text-slate-400">
+                                Business owner or employee?{' '}
+                                <Link
+                                    href={route('office.login')}
+                                    className="font-medium text-indigo-300 transition-colors hover:text-indigo-200"
+                                >
+                                    Sign in to your Back Office
+                                </Link>
+                            </p>
                         </form>
                     </div>
                 </div>

@@ -356,6 +356,29 @@ class DeviceAuthController extends Controller
             'status' => 'used',
         ]);
 
+        // Apply the code's entitlement to the business — activation must be
+        // able to revive an expired subscription, exactly like redeem().
+        // Without this, a locked-out device re-pairs but stays locked.
+        $previousTier = $tenant->tier;
+
+        $tenant->update([
+            'tier' => $activationCode->tier,
+            'subscription_valid_until' => $activationCode->expires_at,
+        ]);
+
+        SubscriptionHistory::create([
+            'tenant_id' => $tenant->id,
+            'tier' => $activationCode->tier,
+            'event_type' => 'ACTIVATION_REDEEMED',
+            'previous_tier' => $previousTier !== $activationCode->tier ? $previousTier : null,
+            'subscription_valid_until' => $activationCode->expires_at,
+            'metadata' => [
+                'activation_code_id' => $activationCode->id,
+                'redeemed_by_device_id' => $device->id,
+                'source' => 'device_activate',
+            ],
+        ]);
+
         return response()->json([
             'token' => $token->plainTextToken,
             'user' => [
@@ -369,7 +392,9 @@ class DeviceAuthController extends Controller
                 'name' => $tenant->business_name,
                 'tier' => $tenant->tier,
                 'currency_code' => $tenant->currency_code,
+                'subscription_valid_until' => $tenant->subscription_valid_until?->toIso8601String(),
             ],
+            'server_time' => now()->toIso8601String(),
         ]);
     }
 }
