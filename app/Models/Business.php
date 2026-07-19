@@ -2,13 +2,12 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
+use Illuminate\Database\Eloquent\Model;
 
 class Business extends Model
 {
     use HasUuids;
-
 
     protected $fillable = [
         'id',
@@ -17,12 +16,15 @@ class Business extends Model
         'phone',
         'email',
         'tax_number',
+        'tin',
         'currency_code',
         'logo_path',
         'metadata',
+        'fiscalisation_enabled',
     ];
 
     protected $casts = [
         'metadata' => 'array',
+        'fiscalisation_enabled' => 'boolean',
     ];
 }

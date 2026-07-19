@@ -8,11 +8,10 @@ use App\Models\Coupon;
 use App\Models\CreditTransaction;
 use App\Models\Currency;
 use App\Models\Customer;
-use App\Models\ExchangeRate;
 use App\Models\Employee;
+use App\Models\ExchangeRate;
 use App\Models\Expense;
 use App\Models\Location;
-use App\Models\SalaryPayment;
 use App\Models\LoyaltyTransaction;
 use App\Models\Payment;
 use App\Models\PoAuditLog;
@@ -24,6 +23,7 @@ use App\Models\ProductVariantStock;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
 use App\Models\RolePermission;
+use App\Models\SalaryPayment;
 use App\Models\Shift;
 use App\Models\StockMovement;
 use App\Models\StockTake;
@@ -36,6 +36,7 @@ use App\Models\Transaction;
 use App\Models\TransactionItem;
 use App\Models\TransactionTax;
 use App\Models\User;
+use App\Services\Zimra\ZimraSalesService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 
@@ -66,15 +67,15 @@ class SyncProcessor
                     ['id' => $uuid],
                     [
                         'business_id' => $payload['business_id'] ?? null,
-                        'parent_id'   => $payload['parent_id'] ?? null,
-                        'name'        => $payload['name'] ?? '',
-                        'type'        => $payload['type'] ?? 'shop',
-                        'address'     => $payload['address'] ?? null,
-                        'phone'       => $payload['phone'] ?? null,
-                        'email'       => $payload['email'] ?? null,
-                        'can_sell'    => $payload['can_sell'] ?? true,
+                        'parent_id' => $payload['parent_id'] ?? null,
+                        'name' => $payload['name'] ?? '',
+                        'type' => $payload['type'] ?? 'shop',
+                        'address' => $payload['address'] ?? null,
+                        'phone' => $payload['phone'] ?? null,
+                        'email' => $payload['email'] ?? null,
+                        'can_sell' => $payload['can_sell'] ?? true,
                         'can_receive' => $payload['can_receive'] ?? true,
-                        'is_active'   => $payload['is_active'] ?? true,
+                        'is_active' => $payload['is_active'] ?? true,
                     ]
                 );
                 break;
@@ -83,8 +84,8 @@ class SyncProcessor
                 ProductStock::updateOrCreate(
                     ['product_id' => $payload['product_id'] ?? $uuid, 'location_id' => $payload['location_id'] ?? ''],
                     [
-                        'id'                => $uuid,
-                        'quantity'          => $payload['quantity'] ?? 0,
+                        'id' => $uuid,
+                        'quantity' => $payload['quantity'] ?? 0,
                         'reserved_quantity' => $payload['reserved_quantity'] ?? 0,
                     ]
                 );
@@ -94,8 +95,8 @@ class SyncProcessor
                 ProductVariantStock::updateOrCreate(
                     ['variant_id' => $payload['variant_id'] ?? $uuid, 'location_id' => $payload['location_id'] ?? ''],
                     [
-                        'id'                => $uuid,
-                        'quantity'          => $payload['quantity'] ?? 0,
+                        'id' => $uuid,
+                        'quantity' => $payload['quantity'] ?? 0,
                         'reserved_quantity' => $payload['reserved_quantity'] ?? 0,
                     ]
                 );
@@ -105,17 +106,17 @@ class SyncProcessor
                 StockTransfer::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'business_id'          => $payload['business_id'] ?? null,
-                        'transfer_number'      => $payload['transfer_number'] ?? '',
-                        'from_location_id'     => $payload['from_location_id'] ?? null,
-                        'to_location_id'       => $payload['to_location_id'] ?? null,
-                        'status'               => $payload['status'] ?? 'pending',
-                        'notes'                => $payload['notes'] ?? null,
+                        'business_id' => $payload['business_id'] ?? null,
+                        'transfer_number' => $payload['transfer_number'] ?? '',
+                        'from_location_id' => $payload['from_location_id'] ?? null,
+                        'to_location_id' => $payload['to_location_id'] ?? null,
+                        'status' => $payload['status'] ?? 'pending',
+                        'notes' => $payload['notes'] ?? null,
                         'requested_by_user_id' => $payload['requested_by_user_id'] ?? null,
-                        'approved_by_user_id'  => $payload['approved_by_user_id'] ?? null,
-                        'approved_at'          => $payload['approved_at'] ?? null,
-                        'dispatched_at'        => $payload['dispatched_at'] ?? null,
-                        'received_at'          => $payload['received_at'] ?? null,
+                        'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
+                        'approved_at' => $payload['approved_at'] ?? null,
+                        'dispatched_at' => $payload['dispatched_at'] ?? null,
+                        'received_at' => $payload['received_at'] ?? null,
                     ]
                 );
                 break;
@@ -125,13 +126,13 @@ class SyncProcessor
                     ['id' => $uuid],
                     [
                         'stock_transfer_id' => $payload['stock_transfer_id'] ?? null,
-                        'product_id'        => $payload['product_id'] ?? null,
-                        'variant_id'        => $payload['variant_id'] ?? null,
-                        'product_name'      => $payload['product_name'] ?? '',
-                        'qty_requested'     => $payload['qty_requested'] ?? 0,
-                        'qty_sent'          => $payload['qty_sent'] ?? 0,
-                        'qty_received'      => $payload['qty_received'] ?? 0,
-                        'notes'             => $payload['notes'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'variant_id' => $payload['variant_id'] ?? null,
+                        'product_name' => $payload['product_name'] ?? '',
+                        'qty_requested' => $payload['qty_requested'] ?? 0,
+                        'qty_sent' => $payload['qty_sent'] ?? 0,
+                        'qty_received' => $payload['qty_received'] ?? 0,
+                        'notes' => $payload['notes'] ?? null,
                     ]
                 );
                 break;
@@ -158,9 +159,11 @@ class SyncProcessor
                         'phone' => $payload['phone'] ?? null,
                         'email' => $payload['email'] ?? null,
                         'tax_number' => $payload['vat_number'] ?? $payload['tax_number'] ?? null,
+                        'tin' => $payload['tin'] ?? null,
                         'currency_code' => $payload['base_currency_code'] ?? 'USD',
                         'logo_path' => $payload['logo_path'] ?? null,
                         'metadata' => $payload['metadata'] ?? null,
+                        'fiscalisation_enabled' => $payload['fiscalisation_enabled'] ?? false,
                     ]
                 );
                 break;
@@ -203,20 +206,23 @@ class SyncProcessor
                 ExchangeRate::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'business_id'    => $payload['business_id'] ?? null,
-                        'from_currency'  => $payload['from_currency'] ?? '',
-                        'to_currency'    => $payload['to_currency'] ?? '',
-                        'rate'           => $payload['rate'] ?? 1,
-                        'source'         => $payload['source'] ?? 'manual',
+                        'business_id' => $payload['business_id'] ?? null,
+                        'from_currency' => $payload['from_currency'] ?? '',
+                        'to_currency' => $payload['to_currency'] ?? '',
+                        'rate' => $payload['rate'] ?? 1,
+                        'source' => $payload['source'] ?? 'manual',
                         'set_by_user_id' => $payload['set_by_user_id'] ?? null,
-                        'locked'         => $payload['locked'] ?? false,
-                        'valid_from'     => $payload['valid_from'] ?? now(),
-                        'valid_until'    => $payload['valid_until'] ?? null,
+                        'locked' => $payload['locked'] ?? false,
+                        'valid_from' => $payload['valid_from'] ?? now(),
+                        'valid_until' => $payload['valid_until'] ?? null,
                     ]
                 );
                 break;
 
             case 'products':
+                $productExisted = Product::where('id', $uuid)->exists();
+                $openingStock = (float) ($payload['stock_quantity'] ?? 0);
+
                 $product = Product::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -240,6 +246,19 @@ class SyncProcessor
                         'is_active' => $payload['is_active'] ?? true,
                     ]
                 );
+                // First time this product is created with an opening quantity: give it
+                // a ledger entry, same as every other stock change, so take-on has an
+                // audit trail instead of being a bare column write nothing can trace.
+                if (! $productExisted && $openingStock != 0) {
+                    StockMovement::create([
+                        'business_id' => $payload['business_id'] ?? null,
+                        'product_id' => $uuid,
+                        'type' => 'opening_stock',
+                        'quantity_change' => $openingStock,
+                        'reason' => 'Opening stock (take-on)',
+                        'user_id' => $payload['user_id'] ?? null,
+                    ]);
+                }
                 // If any movements exist for this product, recompute from the ledger
                 // so concurrent pushes from multiple devices converge correctly.
                 $this->recomputeProductStock($uuid);
@@ -300,24 +319,31 @@ class SyncProcessor
             case 'transactions':
                 $txExists = Transaction::where('id', $uuid)->exists();
                 $txData = [
-                    'business_id'    => $payload['business_id'] ?? null,
-                    'location_id'    => $payload['location_id'] ?? null,
-                    'user_id'        => $payload['user_id'] ?? null,
-                    'customer_id'    => $payload['customer_id'] ?? null,
-                    'subtotal'       => $payload['subtotal'] ?? 0,
-                    'tax_total'      => $payload['tax_total'] ?? 0,
+                    'business_id' => $payload['business_id'] ?? null,
+                    'location_id' => $payload['location_id'] ?? null,
+                    'user_id' => $payload['user_id'] ?? null,
+                    'customer_id' => $payload['customer_id'] ?? null,
+                    'subtotal' => $payload['subtotal'] ?? 0,
+                    'tax_total' => $payload['tax_total'] ?? 0,
                     'discount_total' => $payload['discount_total'] ?? 0,
-                    'total'          => $payload['total'] ?? 0,
-                    'base_currency'  => $payload['base_currency'] ?? 'USD',
-                    'status'         => $payload['status'] ?? 'completed',
-                    'sale_number'    => $payload['sale_number'] ?? null,
-                    'notes'          => $payload['notes'] ?? null,
+                    'total' => $payload['total'] ?? 0,
+                    'base_currency' => $payload['base_currency'] ?? 'USD',
+                    'status' => $payload['status'] ?? 'completed',
+                    'sale_number' => $payload['sale_number'] ?? null,
+                    'notes' => $payload['notes'] ?? null,
                 ];
                 if (! $txExists && isset($payload['created_at'])) {
                     // Preserve the device's sale timestamp on first insert
                     $txData['created_at'] = $payload['created_at'];
                 }
-                Transaction::updateOrCreate(['id' => $uuid], $txData);
+                $tx = Transaction::updateOrCreate(['id' => $uuid], $txData);
+
+                // Queue ZIMRA fiscalisation for new completed sales. The service
+                // itself gates on the business's fiscalisation_enabled switch and
+                // the environment guard, so this is a no-op unless configured.
+                if (! $txExists && $tx->status === 'completed') {
+                    app(ZimraSalesService::class)->queueFiscalisation($tx);
+                }
                 break;
 
             case 'transaction_items':
@@ -372,29 +398,32 @@ class SyncProcessor
                 StockMovement::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'business_id'     => $payload['business_id'] ?? null,
-                        'location_id'     => $payload['location_id'] ?? null,
-                        'to_location_id'  => $payload['to_location_id'] ?? null,
-                        'product_id'      => $payload['product_id'] ?? null,
-                        'type'            => $payload['type'] ?? 'adjustment',
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'to_location_id' => $payload['to_location_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'type' => $payload['type'] ?? 'adjustment',
                         'quantity_change' => $payload['quantity_change'] ?? 0,
-                        'unit_cost'       => $payload['unit_cost'] ?? null,
+                        'unit_cost' => $payload['unit_cost'] ?? null,
                         'running_avg_cost' => $payload['running_avg_cost'] ?? null,
-                        'reason'          => $payload['reason'] ?? null,
-                        'reference_id'    => $payload['reference_id'] ?? null,
+                        'reason' => $payload['reason'] ?? null,
+                        'reference_id' => $payload['reference_id'] ?? null,
                         'attachment_path' => $payload['attachment_path'] ?? null,
-                        'user_id'         => $payload['user_id'] ?? null,
+                        'user_id' => $payload['user_id'] ?? null,
                     ]
                 );
-                // Recompute the product's stock from the full movement ledger, per location.
-                // This makes concurrent pushes from multiple devices converge.
+                // Recompute the product's stock from the full movement ledger.
+                // Both must run: recomputeLocationStock keeps the per-location ledger
+                // (product_stock) accurate, and recomputeProductStock keeps the legacy
+                // flat field (products.stock_quantity) as the cross-location total in
+                // sync with it. They are two views of the same ledger, never independent
+                // writes — letting either drift is what caused inventory reads to disagree.
                 if (! empty($payload['product_id'])) {
                     $locationId = $payload['location_id'] ?? null;
                     if ($locationId) {
                         $this->recomputeLocationStock($payload['product_id'], $locationId);
-                    } else {
-                        $this->recomputeProductStock($payload['product_id']);
                     }
+                    $this->recomputeProductStock($payload['product_id']);
                 }
                 break;
 
@@ -455,20 +484,20 @@ class SyncProcessor
                 PurchaseOrder::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'business_id'           => $payload['business_id'] ?? null,
+                        'business_id' => $payload['business_id'] ?? null,
                         'receiving_location_id' => $payload['receiving_location_id'] ?? null,
-                        'supplier_id'           => $payload['supplier_id'] ?? null,
-                        'supplier_name'         => $payload['supplier_name'] ?? null,
-                        'po_number'             => $payload['po_number'] ?? '',
-                        'status'                => $payload['status'] ?? 'draft',
+                        'supplier_id' => $payload['supplier_id'] ?? null,
+                        'supplier_name' => $payload['supplier_name'] ?? null,
+                        'po_number' => $payload['po_number'] ?? '',
+                        'status' => $payload['status'] ?? 'draft',
                         // total_ordered/total_received accepted from payload for initial insert.
                         // They will be overridden below if items exist (multi-device safe).
-                        'total_ordered'         => $payload['total_ordered'] ?? 0,
-                        'total_received'        => $payload['total_received'] ?? 0,
-                        'notes'                 => $payload['notes'] ?? null,
-                        'expected_date'         => $payload['expected_date'] ?? null,
+                        'total_ordered' => $payload['total_ordered'] ?? 0,
+                        'total_received' => $payload['total_received'] ?? 0,
+                        'notes' => $payload['notes'] ?? null,
+                        'expected_date' => $payload['expected_date'] ?? null,
                         'additional_costs_json' => $payload['additional_costs_json'] ?? null,
-                        'created_by_user_id'    => $payload['created_by_user_id'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
                     ]
                 );
                 $this->recomputePurchaseOrderTotals($uuid);
@@ -523,7 +552,7 @@ class SyncProcessor
                     [
                         'business_id' => $payload['business_id'] ?? null,
                         'location_id' => $payload['location_id'] ?? null,
-                        'cashier_id'  => $payload['cashier_id'] ?? null,
+                        'cashier_id' => $payload['cashier_id'] ?? null,
                         'opened_at' => $payload['opened_at'] ?? now(),
                         'closed_at' => $payload['closed_at'] ?? null,
                         'status' => $payload['status'] ?? 'open',
@@ -555,7 +584,7 @@ class SyncProcessor
                     ? $payload['recorded_by_user_id']
                     : Expense::find($uuid)?->recorded_by_user_id;
 
-                if (empty($recordedByUserId) && !empty($payload['business_id'])) {
+                if (empty($recordedByUserId) && ! empty($payload['business_id'])) {
                     // Fall back to the first user in the business to avoid data loss
                     $recordedByUserId = User::where('business_id', $payload['business_id'])->first()?->id;
                 }
@@ -575,37 +604,47 @@ class SyncProcessor
                 Expense::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'business_id'         => $payload['business_id'] ?? null,
+                        'business_id' => $payload['business_id'] ?? null,
                         'recorded_by_user_id' => $recordedByUserId,
-                        'category'            => $payload['category'] ?? '',
-                        'description'         => $payload['description'] ?? null,
-                        'amount'              => $payload['amount'] ?? 0,
-                        'currency_code'       => $payload['currency_code'] ?? 'USD',
-                        'base_equivalent'     => $payload['base_equivalent'] ?? 0,
-                        'exchange_rate'       => $payload['exchange_rate'] ?? 1,
-                        'payment_method'      => $payload['payment_method'] ?? 'cash',
-                        'mobile_provider'     => $payload['mobile_provider'] ?? null,
-                        'payment_reference'   => $payload['payment_reference'] ?? null,
-                        'receipt_path'        => $payload['receipt_path'] ?? null,
-                        'notes'               => $payload['notes'] ?? null,
-                        'expense_date'        => $payload['expense_date'] ?? now(),
-                        'deleted_at'          => $payload['deleted_at'] ?? null,
+                        'category' => $payload['category'] ?? '',
+                        'description' => $payload['description'] ?? null,
+                        'amount' => $payload['amount'] ?? 0,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'base_equivalent' => $payload['base_equivalent'] ?? 0,
+                        'exchange_rate' => $payload['exchange_rate'] ?? 1,
+                        'payment_method' => $payload['payment_method'] ?? 'cash',
+                        'mobile_provider' => $payload['mobile_provider'] ?? null,
+                        'payment_reference' => $payload['payment_reference'] ?? null,
+                        'receipt_path' => $payload['receipt_path'] ?? null,
+                        'notes' => $payload['notes'] ?? null,
+                        'expense_date' => $payload['expense_date'] ?? now(),
+                        'deleted_at' => $payload['deleted_at'] ?? null,
                     ]
                 );
                 break;
 
             case 'stock_takes':
+                $currentStatus = StockTake::where('id', $uuid)->value('status');
+                $incomingStatus = $payload['status'] ?? 'draft';
+
+                if (! StockTake::isValidTransition($currentStatus, $incomingStatus)) {
+                    throw new \RuntimeException(
+                        "Invalid stock take transition: '{$currentStatus}' -> '{$incomingStatus}'"
+                    );
+                }
+
                 StockTake::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'business_id'         => $payload['business_id'] ?? null,
-                        'location_id'         => $payload['location_id'] ?? null,
-                        'title'               => $payload['title'] ?? '',
-                        'status'              => $payload['status'] ?? 'draft',
-                        'notes'               => $payload['notes'] ?? null,
-                        'created_by_user_id'  => $payload['created_by_user_id'] ?? null,
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'title' => $payload['title'] ?? '',
+                        'status' => $incomingStatus,
+                        'notes' => $payload['notes'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
                         'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
-                        'approved_at'         => $payload['approved_at'] ?? null,
+                        'approved_at' => $payload['approved_at'] ?? null,
+                        'review_comment' => $payload['review_comment'] ?? null,
                     ]
                 );
                 break;
@@ -655,25 +694,25 @@ class SyncProcessor
                 Employee::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'business_id'              => $payload['business_id'] ?? null,
-                        'user_id'                  => $payload['user_id'] ?? null,
-                        'name'                     => $payload['name'] ?? '',
-                        'job_title'                => $payload['job_title'] ?? null,
-                        'department'               => $payload['department'] ?? null,
-                        'phone'                    => $payload['phone'] ?? null,
-                        'email'                    => $payload['email'] ?? null,
-                        'national_id'              => $payload['national_id'] ?? null,
-                        'address'                  => $payload['address'] ?? null,
-                        'emergency_contact_name'   => $payload['emergency_contact_name'] ?? null,
-                        'emergency_contact_phone'  => $payload['emergency_contact_phone'] ?? null,
-                        'pay_type'                 => $payload['pay_type'] ?? 'monthly',
-                        'salary_amount'            => $payload['salary_amount'] ?? 0,
-                        'currency_code'            => $payload['currency_code'] ?? 'USD',
-                        'hire_date'                => $payload['hire_date'] ?? null,
-                        'termination_date'         => $payload['termination_date'] ?? null,
-                        'notes'                    => $payload['notes'] ?? null,
-                        'status'                   => $payload['status'] ?? 'active',
-                        'photo_path'               => $payload['photo_path'] ?? null,
+                        'business_id' => $payload['business_id'] ?? null,
+                        'user_id' => $payload['user_id'] ?? null,
+                        'name' => $payload['name'] ?? '',
+                        'job_title' => $payload['job_title'] ?? null,
+                        'department' => $payload['department'] ?? null,
+                        'phone' => $payload['phone'] ?? null,
+                        'email' => $payload['email'] ?? null,
+                        'national_id' => $payload['national_id'] ?? null,
+                        'address' => $payload['address'] ?? null,
+                        'emergency_contact_name' => $payload['emergency_contact_name'] ?? null,
+                        'emergency_contact_phone' => $payload['emergency_contact_phone'] ?? null,
+                        'pay_type' => $payload['pay_type'] ?? 'monthly',
+                        'salary_amount' => $payload['salary_amount'] ?? 0,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'hire_date' => $payload['hire_date'] ?? null,
+                        'termination_date' => $payload['termination_date'] ?? null,
+                        'notes' => $payload['notes'] ?? null,
+                        'status' => $payload['status'] ?? 'active',
+                        'photo_path' => $payload['photo_path'] ?? null,
                     ]
                 );
                 break;
@@ -682,18 +721,18 @@ class SyncProcessor
                 SalaryPayment::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'business_id'    => $payload['business_id'] ?? null,
-                        'employee_id'    => $payload['employee_id'] ?? null,
-                        'period'         => $payload['period'] ?? '',
-                        'amount'         => $payload['amount'] ?? 0,
-                        'currency_code'  => $payload['currency_code'] ?? 'USD',
+                        'business_id' => $payload['business_id'] ?? null,
+                        'employee_id' => $payload['employee_id'] ?? null,
+                        'period' => $payload['period'] ?? '',
+                        'amount' => $payload['amount'] ?? 0,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
                         'base_equivalent' => $payload['base_equivalent'] ?? 0,
-                        'exchange_rate'  => $payload['exchange_rate'] ?? 1,
+                        'exchange_rate' => $payload['exchange_rate'] ?? 1,
                         'payment_method' => $payload['payment_method'] ?? 'cash',
-                        'reference'      => $payload['reference'] ?? null,
-                        'notes'          => $payload['notes'] ?? null,
+                        'reference' => $payload['reference'] ?? null,
+                        'notes' => $payload['notes'] ?? null,
                         'paid_by_user_id' => $payload['paid_by_user_id'] ?? null,
-                        'paid_at'        => $payload['paid_at'] ?? now(),
+                        'paid_at' => $payload['paid_at'] ?? now(),
                     ]
                 );
                 break;
@@ -799,24 +838,24 @@ class SyncProcessor
         }
 
         $modelMap = [
-            'businesses'      => Business::class,
-            'locations'       => Location::class,
-            'categories'      => Category::class,
-            'tax_rates'       => TaxRate::class,
-            'exchange_rates'  => ExchangeRate::class,
-            'products'        => Product::class,
+            'businesses' => Business::class,
+            'locations' => Location::class,
+            'categories' => Category::class,
+            'tax_rates' => TaxRate::class,
+            'exchange_rates' => ExchangeRate::class,
+            'products' => Product::class,
             'product_variants' => ProductVariant::class,
-            'customers'       => Customer::class,
-            'transactions'    => Transaction::class,
-            'suppliers'       => Supplier::class,
+            'customers' => Customer::class,
+            'transactions' => Transaction::class,
+            'suppliers' => Supplier::class,
             'purchase_orders' => PurchaseOrder::class,
             'stock_transfers' => StockTransfer::class,
-            'coupons'         => Coupon::class,
-            'shifts'          => Shift::class,
-            'expenses'         => Expense::class,
-            'stock_takes'      => StockTake::class,
-            'employees'        => Employee::class,
-            'salary_payments'  => SalaryPayment::class,
+            'coupons' => Coupon::class,
+            'shifts' => Shift::class,
+            'expenses' => Expense::class,
+            'stock_takes' => StockTake::class,
+            'employees' => Employee::class,
+            'salary_payments' => SalaryPayment::class,
         ];
 
         $softDeleteIsActive = ['locations', 'categories', 'tax_rates', 'products', 'product_variants', 'suppliers', 'coupons'];

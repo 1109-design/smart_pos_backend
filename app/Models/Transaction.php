@@ -14,15 +14,16 @@ class Transaction extends Model
         'id', 'business_id', 'location_id', 'user_id', 'customer_id',
         'subtotal', 'tax_total', 'discount_total', 'total',
         'base_currency', 'status', 'sale_number', 'notes',
+        'fiscal_status', 'fiscal_receipt_number', 'fiscal_qr_code',
     ];
 
     protected function casts(): array
     {
         return [
-            'subtotal'       => 'decimal:4',
-            'tax_total'      => 'decimal:4',
+            'subtotal' => 'decimal:4',
+            'tax_total' => 'decimal:4',
             'discount_total' => 'decimal:4',
-            'total'          => 'decimal:4',
+            'total' => 'decimal:4',
         ];
     }
 
