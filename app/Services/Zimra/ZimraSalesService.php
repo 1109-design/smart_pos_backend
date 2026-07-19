@@ -412,12 +412,28 @@ class ZimraSalesService
             'table_name' => 'transactions',
             'record_uuid' => $transaction->id,
             'operation' => 'upsert',
-            'payload' => $transaction->only([
-                'business_id', 'location_id', 'user_id', 'customer_id',
-                'subtotal', 'tax_total', 'discount_total', 'total',
-                'base_currency', 'status', 'sale_number', 'notes',
-                'fiscal_status', 'fiscal_receipt_number', 'fiscal_qr_code',
-            ]),
+            // Built as plain literals, not $transaction->only(): Transaction
+            // casts subtotal/tax_total/discount_total/total as decimal:N,
+            // which Eloquent renders as a STRING to avoid float precision
+            // loss. Left unchanged, that string lands in the sync payload's
+            // JSON and breaks the device's `as num?` cast on pull.
+            'payload' => [
+                'business_id' => $transaction->business_id,
+                'location_id' => $transaction->location_id,
+                'user_id' => $transaction->user_id,
+                'customer_id' => $transaction->customer_id,
+                'subtotal' => (float) $transaction->subtotal,
+                'tax_total' => (float) $transaction->tax_total,
+                'discount_total' => (float) $transaction->discount_total,
+                'total' => (float) $transaction->total,
+                'base_currency' => $transaction->base_currency,
+                'status' => $transaction->status,
+                'sale_number' => $transaction->sale_number,
+                'notes' => $transaction->notes,
+                'fiscal_status' => $transaction->fiscal_status,
+                'fiscal_receipt_number' => $transaction->fiscal_receipt_number,
+                'fiscal_qr_code' => $transaction->fiscal_qr_code,
+            ],
             'source_updated_at' => now(),
             'synced_at' => now(),
         ]);

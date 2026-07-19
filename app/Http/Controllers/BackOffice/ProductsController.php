@@ -67,12 +67,30 @@ class ProductsController extends Controller
     {
         $existing = Product::findOrFail($product);
 
-        $payload = $existing->only([
-            'business_id', 'category_id', 'name', 'item_type', 'sku', 'barcode',
-            'price', 'min_price', 'discount_percent', 'cost_price', 'unit',
-            'track_stock', 'stock_quantity', 'low_stock_threshold', 'image_path',
-        ]);
-        $payload['is_active'] = ! $existing->is_active;
+        // Built as plain literals, not $existing->only(): Product casts every
+        // price/quantity field as decimal:N, which Eloquent renders as a
+        // STRING (e.g. "120.0000") to avoid float precision loss. Put through
+        // ->only() unchanged, that string lands in the sync payload's JSON
+        // and breaks the device's `as num?` cast on pull. Casting back to
+        // float/int here keeps the payload numeric on the wire.
+        $payload = [
+            'business_id' => $existing->business_id,
+            'category_id' => $existing->category_id,
+            'name' => $existing->name,
+            'item_type' => $existing->item_type,
+            'sku' => $existing->sku,
+            'barcode' => $existing->barcode,
+            'price' => (float) $existing->price,
+            'min_price' => $existing->min_price !== null ? (float) $existing->min_price : null,
+            'discount_percent' => $existing->discount_percent !== null ? (float) $existing->discount_percent : null,
+            'cost_price' => (float) $existing->cost_price,
+            'unit' => $existing->unit,
+            'track_stock' => (bool) $existing->track_stock,
+            'stock_quantity' => (float) $existing->stock_quantity,
+            'low_stock_threshold' => (float) $existing->low_stock_threshold,
+            'image_path' => $existing->image_path,
+            'is_active' => ! $existing->is_active,
+        ];
 
         $processor->process('products', $product, 'upsert', $payload);
         $this->publishSyncRecord($product, $payload);
