@@ -34,6 +34,7 @@ class DeviceAuthController extends Controller
             'owner_name' => 'required|string|max:255',
             'owner_email' => 'required|email|max:255',
             'pin' => 'required|digits:4',
+            'password' => 'required|string|min:8|max:255',
             'country' => 'nullable|string|size:2',
             'currency_code' => 'nullable|string|max:10',
         ]);
@@ -63,6 +64,7 @@ class DeviceAuthController extends Controller
             'currency_code' => $data['currency_code'] ?? 'USD',
             'admin_name' => $data['owner_name'],
             'admin_pin' => $data['pin'],
+            'admin_password' => $data['password'],
         ]);
 
         SubscriptionHistory::create([

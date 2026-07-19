@@ -278,7 +278,12 @@ class ZimraClient
                 $request = $request->withOptions([
                     'cert' => $certFile,
                     'ssl_key' => $keyFile,
-                    'verify' => false,
+                    // Production MUST verify ZIMRA's TLS certificate — skipping
+                    // verification on the fiscal channel invites MITM. The test
+                    // environment keeps the relaxed behaviour because ZIMRA's
+                    // test endpoint has historically presented an incomplete
+                    // certificate chain.
+                    'verify' => $this->config->isProduction(),
                 ]);
             }
 

@@ -26,20 +26,23 @@ class ProcessZimraFiscalisationJob implements ShouldBeUnique, ShouldQueue
 
     public int $tries = 3;
 
-    /**
-     * The sync push wraps each batch in a DB transaction; the receipt's items
-     * and payments arrive in that same batch, so the job must not start until
-     * the whole batch is committed.
-     */
-    public bool $afterCommit = true;
-
     /** @return array<int, int> */
     public function backoff(): array
     {
         return [60, 300, 900];
     }
 
-    public function __construct(public string $deviceId) {}
+    /**
+     * afterCommit: the sync push wraps each batch in a DB transaction and the
+     * receipt's items/payments arrive in that same batch, so the job must not
+     * start until the whole batch is committed. (Set here rather than as a
+     * typed property — Queueable already declares $afterCommit untyped, and a
+     * typed redeclaration is a fatal composition error.)
+     */
+    public function __construct(public string $deviceId)
+    {
+        $this->afterCommit = true;
+    }
 
     public function uniqueId(): string
     {

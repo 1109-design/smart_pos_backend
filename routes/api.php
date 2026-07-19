@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\BackOfficeAccessController;
 use App\Http\Controllers\Api\DeviceAuthController;
 use App\Http\Controllers\Api\LocationController;
 use App\Http\Controllers\Api\StockTransferController;
@@ -27,6 +28,10 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::get('sync/status', [SyncController::class, 'status']);
     Route::get('sync/conflicts', [SyncController::class, 'conflicts']);
     Route::post('sync/conflicts/{id}/resolve', [SyncController::class, 'resolveConflict']);
+
+    // Back Office access — portal details + owner/manager password set/reset
+    Route::get('backoffice/info', [BackOfficeAccessController::class, 'info']);
+    Route::post('backoffice/password', [BackOfficeAccessController::class, 'setPassword']);
 
     // Subscription entitlement — heartbeat + activation code redemption
     Route::get('subscription/status', [SubscriptionController::class, 'status']);

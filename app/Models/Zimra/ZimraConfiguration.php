@@ -34,6 +34,11 @@ class ZimraConfiguration extends Model
         return $this->environment === 'test';
     }
 
+    public function isProduction(): bool
+    {
+        return $this->environment === 'production';
+    }
+
     /**
      * Seconds allowed to establish the TCP/TLS connection to ZIMRA. Falls back
      * to the request timeout so connections are never capped at Guzzle's 10s

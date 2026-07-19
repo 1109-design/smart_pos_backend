@@ -35,10 +35,26 @@ const IconSignOut = () => (
     </svg>
 );
 
+const IconReceipt = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+        <path fillRule="evenodd" d="M4.93 1.31a41.401 41.401 0 0 1 10.14 0C16.194 1.45 17 2.414 17 3.517V18.25a.75.75 0 0 1-1.075.676l-2.8-1.344-2.8 1.344a.75.75 0 0 1-.65 0l-2.8-1.344-2.8 1.344A.75.75 0 0 1 3 18.25V3.517c0-1.103.806-2.068 1.93-2.207Zm4.822 5.997a.75.75 0 1 0-1.004-1.114l-2.5 2.25a.75.75 0 0 0 0 1.114l2.5 2.25a.75.75 0 0 0 1.004-1.114L8.704 9.75h4.546a.75.75 0 0 0 0-1.5H8.704l1.048-.943Z" clipRule="evenodd" />
+    </svg>
+);
+
+const IconBox = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+        <path d="M3.75 3A1.75 1.75 0 0 0 2 4.75v3.26a3.235 3.235 0 0 1 1.75-.51h12.5c.644 0 1.245.188 1.75.51V4.75A1.75 1.75 0 0 0 16.25 3H3.75Z" />
+        <path fillRule="evenodd" d="M3.75 9a1.75 1.75 0 0 0-1.75 1.75v4.5c0 .966.784 1.75 1.75 1.75h12.5a1.75 1.75 0 0 0 1.75-1.75v-4.5A1.75 1.75 0 0 0 16.25 9H3.75Zm4 3.5a.75.75 0 0 0 0 1.5h4.5a.75.75 0 0 0 0-1.5h-4.5Z" clipRule="evenodd" />
+    </svg>
+);
+
 const ALL_NAV = [
-    { label: 'Dashboard', href: '/office/dashboard', Icon: IconChart,          roles: null },
-    { label: 'Reports',   href: '/office/reports',   Icon: IconDocumentReport, roles: null },
-    { label: 'Users',     href: '/office/users',     Icon: IconUsers,          roles: ['business_owner', 'manager'] },
+    { label: 'Dashboard',    href: '/office/dashboard',    Icon: IconChart,          roles: null },
+    { label: 'Transactions', href: '/office/transactions', Icon: IconReceipt,        roles: null },
+    { label: 'Products',     href: '/office/products',     Icon: IconBox,            roles: ['business_owner', 'manager'] },
+    { label: 'Combos',       href: '/office/combos',       Icon: IconBox,            roles: ['business_owner', 'manager'] },
+    { label: 'Reports',      href: '/office/reports',      Icon: IconDocumentReport, roles: null },
+    { label: 'Users',        href: '/office/users',        Icon: IconUsers,          roles: ['business_owner', 'manager'] },
 ];
 
 export default function BackOfficeLayout({ children }: PropsWithChildren) {

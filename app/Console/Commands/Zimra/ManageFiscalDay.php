@@ -11,14 +11,40 @@ class ManageFiscalDay extends Command
 {
     protected $signature = 'zimra:fiscal-day
         {action : open or close}
-        {device_id : ZIMRA device ID}';
+        {device_id? : ZIMRA device ID}
+        {--all : Run the action for every active fiscal device (used by the scheduler)}';
 
     protected $description = 'Open or close the fiscal day for a ZIMRA device';
 
     public function handle(ZimraClient $client, ZimraCloseDayPayloadBuilder $builder): int
     {
         $action = (string) $this->argument('action');
+
+        if ($this->option('all')) {
+            $devices = ZimraDevice::where('is_active', true)->get();
+            if ($devices->isEmpty()) {
+                $this->info('No active fiscal devices.');
+
+                return self::SUCCESS;
+            }
+
+            $failures = 0;
+            foreach ($devices as $device) {
+                $this->info("— device {$device->device_id}:");
+                if ($this->runForDevice($client, $builder, $action, $device) !== self::SUCCESS) {
+                    $failures++;
+                }
+            }
+
+            return $failures === 0 ? self::SUCCESS : self::FAILURE;
+        }
+
         $deviceId = (string) $this->argument('device_id');
+        if ($deviceId === '') {
+            $this->error('Provide a device_id or use --all.');
+
+            return self::INVALID;
+        }
 
         $device = ZimraDevice::where('device_id', $deviceId)->first();
         if (! $device) {
@@ -26,6 +52,13 @@ class ManageFiscalDay extends Command
 
             return self::FAILURE;
         }
+
+        return $this->runForDevice($client, $builder, $action, $device);
+    }
+
+    private function runForDevice(ZimraClient $client, ZimraCloseDayPayloadBuilder $builder, string $action, ZimraDevice $device): int
+    {
+        $deviceId = (string) $device->device_id;
 
         $status = $client->getStatus($deviceId, $device);
         if (! $status['success']) {

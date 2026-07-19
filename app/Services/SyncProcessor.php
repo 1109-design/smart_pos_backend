@@ -2,6 +2,8 @@
 
 namespace App\Services;
 
+use App\Models\Bundle;
+use App\Models\BundleItem;
 use App\Models\Business;
 use App\Models\Category;
 use App\Models\Coupon;
@@ -39,6 +41,7 @@ use App\Models\User;
 use App\Services\Zimra\ZimraSalesService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
 
 class SyncProcessor
 {
@@ -229,6 +232,7 @@ class SyncProcessor
                         'business_id' => $payload['business_id'] ?? null,
                         'category_id' => $payload['category_id'] ?? null,
                         'name' => $payload['name'] ?? '',
+                        'item_type' => $payload['item_type'] ?? 'product',
                         'sku' => $payload['sku'] ?? null,
                         'barcode' => $payload['barcode'] ?? null,
                         'price' => $payload['price'] ?? 0,
@@ -262,6 +266,30 @@ class SyncProcessor
                 // If any movements exist for this product, recompute from the ledger
                 // so concurrent pushes from multiple devices converge correctly.
                 $this->recomputeProductStock($uuid);
+                break;
+
+            case 'bundles':
+                Bundle::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'name' => $payload['name'] ?? '',
+                        'description' => $payload['description'] ?? null,
+                        'is_active' => $payload['is_active'] ?? true,
+                    ]
+                );
+                break;
+
+            case 'bundle_items':
+                BundleItem::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'bundle_id' => $payload['bundle_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'quantity' => $payload['quantity'] ?? 1,
+                        'sort_order' => $payload['sort_order'] ?? 0,
+                    ]
+                );
                 break;
 
             case 'product_tax_rates':
@@ -745,12 +773,20 @@ class SyncProcessor
             'business_id' => $payload['business_id'] ?? null,
             'name' => $payload['name'] ?? '',
             'email' => $payload['email'] ?? $uuid.'@pos.local',
-            'password' => $payload['password'] ?? Hash::make('password'),
             'pin_hash' => $payload['pin_hash'] ?? null,
             'role' => $payload['role'] ?? 'cashier',
             'is_active' => $payload['is_active'] ?? true,
             'biometric_enabled' => $payload['biometric_enabled'] ?? false,
         ];
+
+        // Passwords are never synced from devices. New users get an unusable
+        // random hash — BackOffice access requires a password set deliberately
+        // (registration or the in-app reset), never a guessable default. On
+        // updates the stored password is left untouched so a deliberately-set
+        // password survives routine user syncs.
+        if (! User::where('id', $uuid)->exists()) {
+            $userData['password'] = Hash::make(Str::random(40));
+        }
 
         $user = User::updateOrCreate(['id' => $uuid], $userData);
 
@@ -844,6 +880,8 @@ class SyncProcessor
             'tax_rates' => TaxRate::class,
             'exchange_rates' => ExchangeRate::class,
             'products' => Product::class,
+            'bundles' => Bundle::class,
+            'bundle_items' => BundleItem::class,
             'product_variants' => ProductVariant::class,
             'customers' => Customer::class,
             'transactions' => Transaction::class,

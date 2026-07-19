@@ -25,6 +25,7 @@ class BusinessProvisioner
      *   currency_code?: string|null,
      *   admin_name: string,
      *   admin_pin: string,
+     *   admin_password?: string|null,
      * }  $data
      */
     public function provision(array $data): Tenant
@@ -52,7 +53,9 @@ class BusinessProvisioner
                 'business_id' => $tenant->id,
                 'name' => $data['admin_name'],
                 'email' => $data['owner_email'],
-                'password' => Hash::make(Str::random(24)),
+                // The owner's BackOffice password. When not supplied (legacy
+                // callers), an unusable random hash — never a guessable value.
+                'password' => Hash::make($data['admin_password'] ?? Str::random(40)),
                 'pin_hash' => Hash::make($data['admin_pin']),
                 'is_active' => true,
             ]);

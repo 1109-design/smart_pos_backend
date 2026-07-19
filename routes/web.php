@@ -1,9 +1,13 @@
 <?php
 
 use App\Http\Controllers\ActivationCodeController;
+use App\Http\Controllers\BackOffice\BundlesController as BackOfficeBundles;
+use App\Http\Controllers\BackOffice\CategoriesController as BackOfficeCategories;
 use App\Http\Controllers\BackOffice\DashboardController as BackOfficeDashboard;
+use App\Http\Controllers\BackOffice\ProductsController as BackOfficeProducts;
 use App\Http\Controllers\BackOffice\ReportsController as BackOfficeReports;
 use App\Http\Controllers\BackOffice\SessionController as BackOfficeSession;
+use App\Http\Controllers\BackOffice\TransactionsController as BackOfficeTransactions;
 use App\Http\Controllers\BackOffice\UsersController as BackOfficeUsers;
 use App\Http\Controllers\BusinessController;
 use App\Http\Controllers\DashboardController;
@@ -17,8 +21,12 @@ use App\Http\Controllers\TierController;
 use App\Http\Controllers\UserController;
 use Illuminate\Support\Facades\Route;
 
+// The BackOffice (business portal) is the default destination. Platform
+// admins reach their console directly via /dashboard.
 Route::get('/', function () {
-    return redirect()->route('dashboard');
+    return session()->has('backoffice')
+        ? redirect()->route('office.dashboard')
+        : redirect()->route('office.login');
 });
 
 // Public — no auth. Reached by scanning a QR code from a phone that isn't
@@ -72,12 +80,26 @@ Route::middleware(['auth', 'verified', 'platform.admin'])->group(function () {
 // ── Back-Office (Business Employee Portal) ─────────────────────────────────
 Route::prefix('office')->name('office.')->group(function () {
     Route::get('login', [BackOfficeSession::class, 'create'])->name('login');
-    Route::post('login', [BackOfficeSession::class, 'store'])->name('login.store');
+    Route::post('login', [BackOfficeSession::class, 'store'])
+        ->middleware('throttle:10,1')
+        ->name('login.store');
     Route::post('logout', [BackOfficeSession::class, 'destroy'])->name('logout');
 
     Route::middleware('auth.backoffice')->group(function () {
         Route::get('dashboard', BackOfficeDashboard::class)->name('dashboard');
         Route::get('reports', BackOfficeReports::class)->name('reports');
+        Route::get('transactions', BackOfficeTransactions::class)->name('transactions');
+        Route::get('products', [BackOfficeProducts::class, 'index'])->name('products.index');
+        Route::post('products', [BackOfficeProducts::class, 'store'])->name('products.store');
+        Route::put('products/{product}', [BackOfficeProducts::class, 'update'])->name('products.update');
+        Route::patch('products/{product}/toggle-active', [BackOfficeProducts::class, 'toggleActive'])->name('products.toggle-active');
+        Route::post('categories', [BackOfficeCategories::class, 'store'])->name('categories.store');
+        Route::put('categories/{category}', [BackOfficeCategories::class, 'update'])->name('categories.update');
+        Route::patch('categories/{category}/toggle-active', [BackOfficeCategories::class, 'toggleActive'])->name('categories.toggle-active');
+        Route::get('combos', [BackOfficeBundles::class, 'index'])->name('combos.index');
+        Route::post('combos', [BackOfficeBundles::class, 'store'])->name('combos.store');
+        Route::put('combos/{bundle}', [BackOfficeBundles::class, 'update'])->name('combos.update');
+        Route::patch('combos/{bundle}/toggle-active', [BackOfficeBundles::class, 'toggleActive'])->name('combos.toggle-active');
         Route::get('users', [BackOfficeUsers::class, 'index'])->name('users.index');
         Route::put('users/{user}', [BackOfficeUsers::class, 'update'])->name('users.update');
         Route::put('users/{user}/password', [BackOfficeUsers::class, 'changePassword'])->name('users.change-password');
