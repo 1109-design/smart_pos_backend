@@ -38,7 +38,7 @@ class WebhookController extends Controller
             ? Carbon::createFromTimestampMs($payload['expiration_at_ms'])
             : null;
 
-        if (! $appUserId) {
+        if (! $appUserId || ! $type) {
             return response()->json(['ok' => true]);
         }
 

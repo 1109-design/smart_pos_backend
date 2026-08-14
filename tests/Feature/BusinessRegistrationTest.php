@@ -30,6 +30,7 @@ class BusinessRegistrationTest extends TestCase
                 'owner_name' => 'Nyasha M',
                 'owner_email' => 'nyasha@shop.co.zw',
                 'pin' => '1234',
+                'password' => 'trial-password-123',
                 'country' => 'ZW',
                 'currency_code' => 'USD',
             ], $overrides));

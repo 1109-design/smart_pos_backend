@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\Device;
 use App\Models\Product;
+use App\Models\StockMovement;
 use App\Models\Tenant;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -16,7 +17,7 @@ class SyncStockMovementTest extends TestCase
 
     private function actingDeviceToken(string $tenantId): string
     {
-        Tenant::create(['id' => $tenantId]);
+        Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);
 
         $user = User::factory()->create([
             'id' => '99999999-9999-4999-9999-999999999999',
@@ -52,6 +53,17 @@ class SyncStockMovementTest extends TestCase
             'name' => 'Test Product',
             'price' => 10,
             'stock_quantity' => 20,
+        ]);
+
+        // Ledger-driven stock is recomputed purely from stock_movements, so the
+        // opening balance for this location needs its own movement — matching
+        // how a real device would have recorded take-on stock at this location.
+        StockMovement::create([
+            'business_id' => $tenantId,
+            'location_id' => $locationId,
+            'product_id' => $productId,
+            'type' => 'opening_stock',
+            'quantity_change' => 20,
         ]);
 
         $response = $this->withHeader('Authorization', 'Bearer '.$token)

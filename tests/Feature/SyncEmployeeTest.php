@@ -27,22 +27,22 @@ class SyncEmployeeTest extends TestCase
         $id = '11111111-1111-1111-1111-111111111111';
 
         $this->processor->process('employees', $id, 'upsert', [
-            'business_id'   => 'biz-001',
-            'name'          => 'Jane Doe',
-            'job_title'     => 'Cashier',
-            'department'    => 'Sales',
-            'pay_type'      => 'monthly',
+            'business_id' => 'biz-001',
+            'name' => 'Jane Doe',
+            'job_title' => 'Cashier',
+            'department' => 'Sales',
+            'pay_type' => 'monthly',
             'salary_amount' => 500.00,
             'currency_code' => 'USD',
-            'status'        => 'active',
+            'status' => 'active',
         ]);
 
         $this->assertDatabaseHas('employees', [
-            'id'        => $id,
-            'name'      => 'Jane Doe',
+            'id' => $id,
+            'name' => 'Jane Doe',
             'job_title' => 'Cashier',
-            'status'    => 'active',
-            'pay_type'  => 'monthly',
+            'status' => 'active',
+            'pay_type' => 'monthly',
         ]);
     }
 
@@ -51,24 +51,24 @@ class SyncEmployeeTest extends TestCase
         $id = '22222222-2222-2222-2222-222222222222';
 
         Employee::create([
-            'id'            => $id,
-            'business_id'   => 'biz-001',
-            'name'          => 'Old Name',
+            'id' => $id,
+            'business_id' => 'biz-001',
+            'name' => 'Old Name',
             'salary_amount' => 300,
             'currency_code' => 'USD',
         ]);
 
         $this->processor->process('employees', $id, 'upsert', [
-            'business_id'   => 'biz-001',
-            'name'          => 'Jane Updated',
+            'business_id' => 'biz-001',
+            'name' => 'Jane Updated',
             'salary_amount' => 600.00,
             'currency_code' => 'USD',
-            'status'        => 'on_leave',
+            'status' => 'on_leave',
         ]);
 
         $this->assertDatabaseHas('employees', [
-            'id'     => $id,
-            'name'   => 'Jane Updated',
+            'id' => $id,
+            'name' => 'Jane Updated',
             'status' => 'on_leave',
         ]);
     }
@@ -78,16 +78,18 @@ class SyncEmployeeTest extends TestCase
         $id = '33333333-3333-3333-3333-333333333333';
 
         Employee::create([
-            'id'            => $id,
-            'business_id'   => 'biz-001',
-            'name'          => 'To Delete',
+            'id' => $id,
+            'business_id' => 'biz-001',
+            'name' => 'To Delete',
             'salary_amount' => 0,
             'currency_code' => 'USD',
         ]);
 
         $this->processor->process('employees', $id, 'delete', []);
 
-        $this->assertDatabaseMissing('employees', ['id' => $id]);
+        // Employees are soft-deactivated, not hard-deleted, so payroll/audit
+        // history referencing them (e.g. salary_payments) stays intact.
+        $this->assertDatabaseHas('employees', ['id' => $id, 'status' => 'inactive']);
     }
 
     // ── Salary payment upsert ─────────────────────────────────────────────────
@@ -98,30 +100,30 @@ class SyncEmployeeTest extends TestCase
         $payId = '55555555-5555-5555-5555-555555555555';
 
         Employee::create([
-            'id'            => $empId,
-            'business_id'   => 'biz-001',
-            'name'          => 'John Smith',
+            'id' => $empId,
+            'business_id' => 'biz-001',
+            'name' => 'John Smith',
             'salary_amount' => 500,
             'currency_code' => 'USD',
         ]);
 
         $this->processor->process('salary_payments', $payId, 'upsert', [
-            'business_id'     => 'biz-001',
-            'employee_id'     => $empId,
-            'period'          => '2026-05',
-            'amount'          => 500.00,
-            'currency_code'   => 'USD',
+            'business_id' => 'biz-001',
+            'employee_id' => $empId,
+            'period' => '2026-05',
+            'amount' => 500.00,
+            'currency_code' => 'USD',
             'base_equivalent' => 500.00,
-            'exchange_rate'   => 1.0,
-            'payment_method'  => 'cash',
+            'exchange_rate' => 1.0,
+            'payment_method' => 'cash',
             'paid_by_user_id' => 'user-001',
-            'paid_at'         => '2026-05-31T10:00:00.000000Z',
+            'paid_at' => '2026-05-31T10:00:00.000000Z',
         ]);
 
         $this->assertDatabaseHas('salary_payments', [
-            'id'             => $payId,
-            'employee_id'    => $empId,
-            'period'         => '2026-05',
+            'id' => $payId,
+            'employee_id' => $empId,
+            'period' => '2026-05',
             'payment_method' => 'cash',
         ]);
     }
@@ -132,23 +134,23 @@ class SyncEmployeeTest extends TestCase
         $payId = '77777777-7777-7777-7777-777777777777';
 
         Employee::create([
-            'id'            => $empId,
-            'business_id'   => 'biz-001',
-            'name'          => 'Del Employee',
+            'id' => $empId,
+            'business_id' => 'biz-001',
+            'name' => 'Del Employee',
             'salary_amount' => 0,
             'currency_code' => 'USD',
         ]);
 
         SalaryPayment::create([
-            'id'              => $payId,
-            'business_id'     => 'biz-001',
-            'employee_id'     => $empId,
-            'period'          => '2026-04',
-            'amount'          => 400,
-            'currency_code'   => 'USD',
+            'id' => $payId,
+            'business_id' => 'biz-001',
+            'employee_id' => $empId,
+            'period' => '2026-04',
+            'amount' => 400,
+            'currency_code' => 'USD',
             'base_equivalent' => 400,
             'paid_by_user_id' => 'user-001',
-            'paid_at'         => now(),
+            'paid_at' => now(),
         ]);
 
         $this->processor->process('salary_payments', $payId, 'delete', []);
@@ -162,7 +164,7 @@ class SyncEmployeeTest extends TestCase
 
         $this->processor->process('employees', $id, 'upsert', [
             'business_id' => 'biz-002',
-            'name'        => 'Minimal Employee',
+            'name' => 'Minimal Employee',
         ]);
 
         $employee = Employee::find($id);

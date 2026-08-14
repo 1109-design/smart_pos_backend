@@ -16,7 +16,7 @@ class SyncConflictResolutionTest extends TestCase
 
     private function actingDeviceToken(string $tenantId): string
     {
-        Tenant::create(['id' => $tenantId]);
+        Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);
 
         $user = User::factory()->create([
             'id' => '99999999-9999-4999-9999-999999999999',

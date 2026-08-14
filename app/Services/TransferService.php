@@ -21,26 +21,26 @@ class TransferService
     {
         return DB::transaction(function () use ($data) {
             $transfer = StockTransfer::create([
-                'id'                    => Str::uuid(),
-                'business_id'           => $data['business_id'],
-                'transfer_number'       => $this->nextTransferNumber($data['business_id']),
-                'from_location_id'      => $data['from_location_id'],
-                'to_location_id'        => $data['to_location_id'],
-                'status'                => 'pending',
-                'notes'                 => $data['notes'] ?? null,
-                'requested_by_user_id'  => $data['requested_by_user_id'],
+                'id' => Str::uuid(),
+                'business_id' => $data['business_id'],
+                'transfer_number' => $this->nextTransferNumber($data['business_id']),
+                'from_location_id' => $data['from_location_id'],
+                'to_location_id' => $data['to_location_id'],
+                'status' => 'pending',
+                'notes' => $data['notes'] ?? null,
+                'requested_by_user_id' => $data['requested_by_user_id'],
             ]);
 
             foreach ($data['items'] as $item) {
                 StockTransferItem::create([
-                    'id'               => Str::uuid(),
+                    'id' => Str::uuid(),
                     'stock_transfer_id' => $transfer->id,
-                    'product_id'       => $item['product_id'],
-                    'variant_id'       => $item['variant_id'] ?? null,
-                    'product_name'     => $item['product_name'],
-                    'qty_requested'    => $item['qty_requested'],
-                    'qty_sent'         => 0,
-                    'qty_received'     => 0,
+                    'product_id' => $item['product_id'],
+                    'variant_id' => $item['variant_id'] ?? null,
+                    'product_name' => $item['product_name'],
+                    'qty_requested' => $item['qty_requested'],
+                    'qty_sent' => 0,
+                    'qty_received' => 0,
                 ]);
             }
 
@@ -60,9 +60,9 @@ class TransferService
         }
 
         $transfer->update([
-            'status'               => 'approved',
-            'approved_by_user_id'  => $approvedByUserId,
-            'approved_at'          => now(),
+            'status' => 'approved',
+            'approved_by_user_id' => $approvedByUserId,
+            'approved_at' => now(),
         ]);
 
         return $transfer->fresh('items');
@@ -99,10 +99,10 @@ class TransferService
             }
 
             $transfer->update([
-                'status'                => 'in_transit',
-                'approved_by_user_id'  => $transfer->approved_by_user_id ?? $dispatchedByUserId,
-                'approved_at'          => $transfer->approved_at ?? now(),
-                'dispatched_at'        => now(),
+                'status' => 'in_transit',
+                'approved_by_user_id' => $transfer->approved_by_user_id ?? $dispatchedByUserId,
+                'approved_at' => $transfer->approved_at ?? now(),
+                'dispatched_at' => now(),
             ]);
 
             return $transfer->fresh('items');
@@ -134,46 +134,66 @@ class TransferService
                     continue;
                 }
 
-                // Deduct from source (also releases the reservation)
-                $this->stock->releaseReservation($item->product_id, $transfer->from_location_id, (float) $item->qty_sent);
-                $this->stock->deductStock($item->product_id, $transfer->from_location_id, $qtyReceived);
+                $qtySent = (float) $item->qty_sent;
+                $shortfall = max(0.0, $qtySent - $qtyReceived);
 
-                // Add to destination
+                // Release the full reservation and remove the full dispatched qty from
+                // source — it physically left the premises regardless of how much arrived.
+                $this->stock->releaseReservation($item->product_id, $transfer->from_location_id, $qtySent);
+                $this->stock->deductStock($item->product_id, $transfer->from_location_id, $qtySent);
+
+                // Add to destination only what actually arrived
                 $this->stock->addStock($item->product_id, $transfer->to_location_id, $qtyReceived);
 
                 // Audit trail at source
                 StockMovement::create([
-                    'id'              => Str::uuid(),
-                    'business_id'     => $transfer->business_id,
-                    'location_id'     => $transfer->from_location_id,
-                    'to_location_id'  => $transfer->to_location_id,
-                    'product_id'      => $item->product_id,
-                    'type'            => 'transfer_out',
-                    'quantity_change' => -$qtyReceived,
-                    'reason'          => "Transfer {$transfer->transfer_number}",
-                    'reference_id'    => $transfer->id,
-                    'user_id'         => $receivedByUserId,
+                    'id' => Str::uuid(),
+                    'business_id' => $transfer->business_id,
+                    'location_id' => $transfer->from_location_id,
+                    'to_location_id' => $transfer->to_location_id,
+                    'product_id' => $item->product_id,
+                    'type' => 'transfer_out',
+                    'quantity_change' => -$qtySent,
+                    'reason' => "Transfer {$transfer->transfer_number}",
+                    'reference_id' => $transfer->id,
+                    'user_id' => $receivedByUserId,
                 ]);
 
                 // Audit trail at destination
                 StockMovement::create([
-                    'id'              => Str::uuid(),
-                    'business_id'     => $transfer->business_id,
-                    'location_id'     => $transfer->to_location_id,
-                    'to_location_id'  => null,
-                    'product_id'      => $item->product_id,
-                    'type'            => 'transfer_in',
+                    'id' => Str::uuid(),
+                    'business_id' => $transfer->business_id,
+                    'location_id' => $transfer->to_location_id,
+                    'to_location_id' => null,
+                    'product_id' => $item->product_id,
+                    'type' => 'transfer_in',
                     'quantity_change' => $qtyReceived,
-                    'reason'          => "Transfer {$transfer->transfer_number}",
-                    'reference_id'    => $transfer->id,
-                    'user_id'         => $receivedByUserId,
+                    'reason' => "Transfer {$transfer->transfer_number}",
+                    'reference_id' => $transfer->id,
+                    'user_id' => $receivedByUserId,
                 ]);
+
+                // Audit trail for anything lost/damaged in transit
+                if ($shortfall > 0) {
+                    StockMovement::create([
+                        'id' => Str::uuid(),
+                        'business_id' => $transfer->business_id,
+                        'location_id' => $transfer->to_location_id,
+                        'to_location_id' => null,
+                        'product_id' => $item->product_id,
+                        'type' => 'transfer_loss',
+                        'quantity_change' => 0,
+                        'reason' => "Transfer {$transfer->transfer_number}: {$shortfall} short on receipt",
+                        'reference_id' => $transfer->id,
+                        'user_id' => $receivedByUserId,
+                    ]);
+                }
 
                 $item->update(['qty_received' => $qtyReceived]);
             }
 
             $transfer->update([
-                'status'      => 'received',
+                'status' => 'received',
                 'received_at' => now(),
             ]);
 

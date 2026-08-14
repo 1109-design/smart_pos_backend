@@ -4,7 +4,7 @@ namespace App\Services;
 
 use App\Models\Location;
 use App\Models\ProductStock;
-use App\Models\ProductVariantStock;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 
 class LocationService
@@ -55,12 +55,12 @@ class LocationService
             ->where('product_id', $productId)
             ->get()
             ->map(fn ($row) => [
-                'location_id'   => $row->location_id,
+                'location_id' => $row->location_id,
                 'location_name' => $row->location?->name ?? '—',
                 'location_type' => $row->location?->type ?? 'shop',
-                'quantity'      => (float) $row->quantity,
-                'reserved'      => (float) $row->reserved_quantity,
-                'available'     => max(0.0, (float) $row->quantity - (float) $row->reserved_quantity),
+                'quantity' => (float) $row->quantity,
+                'reserved' => (float) $row->reserved_quantity,
+                'available' => max(0.0, (float) $row->quantity - (float) $row->reserved_quantity),
             ])
             ->all();
     }
@@ -111,8 +111,12 @@ class LocationService
     public function reserveStock(string $productId, string $locationId, float $qty): void
     {
         DB::transaction(function () use ($productId, $locationId, $qty) {
-            $row = $this->getStock($productId, $locationId);
-            $row->refresh()->lockForUpdate();
+            $this->getStock($productId, $locationId);
+
+            $row = ProductStock::where('product_id', $productId)
+                ->where('location_id', $locationId)
+                ->lockForUpdate()
+                ->first();
 
             $available = max(0.0, (float) $row->quantity - (float) $row->reserved_quantity);
 
@@ -142,7 +146,6 @@ class LocationService
      * Recompute a product's per-location stock from the movement ledger.
      * Called after syncing stock_movements to keep product_stock consistent.
      *
-     * @param  string  $productId
      * @param  string|null  $locationId  null = recompute all locations for this product
      */
     public function recomputeFromMovements(string $productId, ?string $locationId = null): void
@@ -168,9 +171,9 @@ class LocationService
     /**
      * Get all active locations for a business.
      *
-     * @return \Illuminate\Database\Eloquent\Collection<int, Location>
+     * @return Collection<int, Location>
      */
-    public function forBusiness(string $businessId): \Illuminate\Database\Eloquent\Collection
+    public function forBusiness(string $businessId): Collection
     {
         return Location::where('business_id', $businessId)
             ->where('is_active', true)

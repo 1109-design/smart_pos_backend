@@ -8,10 +8,10 @@ use App\Models\SyncConflict;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
 use App\Services\SyncProcessor;
-use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 
 class SyncController extends Controller
 {
@@ -19,13 +19,13 @@ class SyncController extends Controller
     public function push(Request $request, SyncProcessor $processor): JsonResponse
     {
         $data = $request->validate([
-            'records'             => 'required|array|max:50',
-            'records.*.table'     => 'required|string',
+            'records' => 'required|array|max:50',
+            'records.*.table' => 'required|string',
             // uuid is relaxed to string to support composite keys (e.g. "productId|taxRateId")
             // and numeric IDs (e.g. po_audit_logs). The processor handles each table's key format.
-            'records.*.uuid'      => 'required|string|max:255',
+            'records.*.uuid' => 'required|string|max:255',
             'records.*.operation' => 'required|in:insert,update,upsert,delete',
-            'records.*.payload'   => 'nullable|array',
+            'records.*.payload' => 'nullable|array',
             'records.*.updated_at' => 'required|date',
         ]);
 
@@ -59,24 +59,19 @@ class SyncController extends Controller
                             $conflict = $this->recordConflict(
                                 $device,
                                 $record,
-                                'Auto-resolved (Server Wins): Newer version exists on server.',
+                                'Newer version exists on server; manual review required.',
                                 'version_conflict',
                                 $existing?->payload
                             );
-                            
-                            $conflict->update([
-                                'status' => 'resolved',
-                                'resolution_action' => 'accept_server',
-                                'resolved_at' => now(),
-                            ]);
 
-                            // Mark as accepted so client removes from its push queue
-                            $acceptedInGroup[] = [
+                            // Left pending for manual review via the conflicts/resolve
+                            // endpoint — do not apply or accept the older record yet.
+                            $conflictsInGroup[] = [
+                                'id' => $conflict->id,
                                 'table' => $record['table'],
                                 'uuid' => $record['uuid'],
                             ];
-                            
-                            // Skip processing this older record
+
                             continue;
                         }
 
@@ -122,6 +117,7 @@ class SyncController extends Controller
             } catch (\Throwable $e) {
                 if (! empty($conflictsInGroup)) {
                     $conflicts = [...$conflicts, ...$conflictsInGroup];
+
                     continue;
                 }
 
@@ -294,7 +290,7 @@ class SyncController extends Controller
 
             if ($action === 'retry_local') {
                 $payload = $conflict->local_payload ?? [];
-                
+
                 // Enrich payload with server-known context
                 $enrichedPayload = array_merge([
                     'business_id' => $device?->tenant_id,
@@ -317,11 +313,9 @@ class SyncController extends Controller
                     'synced_at' => now(),
                     'device_id' => $device?->id,
                 ]);
-            }
-
-            elseif ($action === 'merged') {
+            } elseif ($action === 'merged') {
                 $payload = $data['merged_payload'] ?? [];
-                
+
                 // Enrich payload with server-known context
                 $enrichedPayload = array_merge([
                     'business_id' => $device?->tenant_id,
@@ -389,8 +383,7 @@ class SyncController extends Controller
             $payload = $record['payload'] ?? [];
             $key = match ($table) {
                 'transactions' => 'tx:'.$record['uuid'],
-                'transaction_items', 'transaction_taxes', 'payments' =>
-                    'tx:'.($payload['transaction_id'] ?? $record['uuid']),
+                'transaction_items', 'transaction_taxes', 'payments' => 'tx:'.($payload['transaction_id'] ?? $record['uuid']),
                 default => $table.':'.$record['uuid'],
             };
 
@@ -412,15 +405,15 @@ class SyncController extends Controller
         return SyncConflict::updateOrCreate(
             [
                 'business_id' => $device?->tenant_id,
-                'table_name'  => $record['table'] ?? '',
+                'table_name' => $record['table'] ?? '',
                 'record_uuid' => mb_substr($record['uuid'] ?? '', 0, 255),
-                'status'      => 'pending',
+                'status' => 'pending',
             ],
             [
-                'device_id'      => $device?->id,
-                'reason'         => $truncatedReason,
-                'conflict_type'  => $type,
-                'local_payload'  => $record['payload'] ?? [],
+                'device_id' => $device?->id,
+                'reason' => $truncatedReason,
+                'conflict_type' => $type,
+                'local_payload' => $record['payload'] ?? [],
                 'server_payload' => $serverPayload,
             ]
         );

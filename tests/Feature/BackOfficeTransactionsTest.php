@@ -25,7 +25,7 @@ class BackOfficeTransactionsTest extends TestCase
     {
         $this->withoutMiddleware(AuthenticateBackOfficeUser::class);
 
-        Tenant::create(['id' => $tenantId, 'pairing_code' => '123456']);
+        Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com', 'pairing_code' => '123456']);
 
         $user = User::factory()->create([
             'id' => (string) Str::uuid(),
@@ -37,6 +37,10 @@ class BackOfficeTransactionsTest extends TestCase
             'backoffice' => [
                 'tenant_id' => $tenantId,
                 'user_id' => $user->id,
+                'user_name' => $user->name,
+                'user_email' => $user->email,
+                'role' => 'business_owner',
+                'business_name' => $tenantId,
                 'currency_code' => 'USD',
             ],
         ]);

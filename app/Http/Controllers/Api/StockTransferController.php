@@ -51,19 +51,19 @@ class StockTransferController extends Controller
         $device = $this->resolveDevice($request);
 
         $data = $request->validate([
-            'from_location_id'      => 'required|uuid|exists:locations,id',
-            'to_location_id'        => 'required|uuid|exists:locations,id|different:from_location_id',
-            'notes'                 => 'nullable|string|max:1000',
-            'items'                 => 'required|array|min:1',
-            'items.*.product_id'    => 'required|uuid|exists:products,id',
-            'items.*.variant_id'    => 'nullable|uuid|exists:product_variants,id',
-            'items.*.product_name'  => 'required|string',
+            'from_location_id' => 'required|uuid|exists:locations,id',
+            'to_location_id' => 'required|uuid|exists:locations,id|different:from_location_id',
+            'notes' => 'nullable|string|max:1000',
+            'items' => 'required|array|min:1',
+            'items.*.product_id' => 'required|uuid|exists:products,id',
+            'items.*.variant_id' => 'nullable|uuid|exists:product_variants,id',
+            'items.*.product_name' => 'required|string',
             'items.*.qty_requested' => 'required|numeric|min:0.0001',
         ]);
 
         $transfer = $this->transferService->request([
             ...$data,
-            'business_id'          => $device?->tenant_id,
+            'business_id' => $device?->tenant_id,
             'requested_by_user_id' => $request->user()?->id,
         ]);
 
@@ -80,9 +80,9 @@ class StockTransferController extends Controller
     public function dispatch(Request $request, string $id): JsonResponse
     {
         $data = $request->validate([
-            'items'              => 'required|array|min:1',
-            'items.*.item_id'    => 'required|uuid',
-            'items.*.qty_sent'   => 'required|numeric|min:0.0001',
+            'items' => 'required|array|min:1',
+            'items.*.item_id' => 'required|uuid',
+            'items.*.qty_sent' => 'required|numeric|min:0.0001',
         ]);
 
         $transfer = $this->transferService->dispatch($id, $data['items'], $request->user()?->id);
@@ -93,9 +93,9 @@ class StockTransferController extends Controller
     public function receive(Request $request, string $id): JsonResponse
     {
         $data = $request->validate([
-            'items'                   => 'required|array|min:1',
-            'items.*.item_id'         => 'required|uuid',
-            'items.*.qty_received'    => 'required|numeric|min:0',
+            'items' => 'required|array|min:1',
+            'items.*.item_id' => 'required|uuid',
+            'items.*.qty_received' => 'required|numeric|min:0',
         ]);
 
         $transfer = $this->transferService->receive($id, $data['items'], $request->user()?->id);
@@ -112,6 +112,13 @@ class StockTransferController extends Controller
 
     private function resolveDevice(Request $request): ?Device
     {
-        return $request->user()?->device ?? null;
+        $token = $request->bearerToken();
+        if (! $token) {
+            return null;
+        }
+
+        $tokenId = explode('|', $token)[0] ?? null;
+
+        return Device::where('token_id', $tokenId)->first();
     }
 }

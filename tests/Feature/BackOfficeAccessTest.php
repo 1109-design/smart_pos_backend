@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\Device;
 use App\Models\Tenant;
 use App\Models\User;
+use Database\Seeders\RolesAndPermissionsSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
@@ -13,6 +14,13 @@ use Tests\TestCase;
 class BackOfficeAccessTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->seed(RolesAndPermissionsSeeder::class);
+    }
 
     private function pairedDeviceToken(string $tenantId, User $user): string
     {
@@ -33,15 +41,15 @@ class BackOfficeAccessTest extends TestCase
     public function test_owner_can_set_backoffice_password_from_paired_device(): void
     {
         $tenantId = 'tenant-access-1';
-        Tenant::create(['id' => $tenantId, 'pairing_code' => 'AB12CD']);
+        Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com', 'pairing_code' => 'AB12CD']);
 
         $owner = User::factory()->create([
             'id' => (string) Str::uuid(),
             'business_id' => $tenantId,
             'email' => 'owner-access@example.com',
             'is_active' => true,
-            'role' => 'business_owner',
         ]);
+        $owner->assignRole('business_owner');
         $token = $this->pairedDeviceToken($tenantId, $owner);
 
         $info = $this->withHeader('Authorization', 'Bearer '.$token)
@@ -63,22 +71,22 @@ class BackOfficeAccessTest extends TestCase
     public function test_cashier_cannot_get_a_backoffice_password(): void
     {
         $tenantId = 'tenant-access-2';
-        Tenant::create(['id' => $tenantId, 'pairing_code' => 'EF34GH']);
+        Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com', 'pairing_code' => 'EF34GH']);
 
         $owner = User::factory()->create([
             'id' => (string) Str::uuid(),
             'business_id' => $tenantId,
             'email' => 'owner-access-2@example.com',
             'is_active' => true,
-            'role' => 'business_owner',
         ]);
+        $owner->assignRole('business_owner');
         $cashier = User::factory()->create([
             'id' => (string) Str::uuid(),
             'business_id' => $tenantId,
             'email' => 'cashier-access@example.com',
             'is_active' => true,
-            'role' => 'cashier',
         ]);
+        $cashier->assignRole('cashier');
         $token = $this->pairedDeviceToken($tenantId, $owner);
 
         $response = $this->withHeader('Authorization', 'Bearer '.$token)
@@ -93,23 +101,23 @@ class BackOfficeAccessTest extends TestCase
     public function test_password_cannot_be_set_for_a_user_in_another_business(): void
     {
         $tenantId = 'tenant-access-3';
-        Tenant::create(['id' => $tenantId, 'pairing_code' => 'IJ56KL']);
-        Tenant::create(['id' => 'tenant-access-other', 'pairing_code' => 'MN78OP']);
+        Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com', 'pairing_code' => 'IJ56KL']);
+        Tenant::create(['id' => 'tenant-access-other', 'business_name' => 'tenant-access-other', 'owner_email' => 'tenant-access-other@example.com', 'pairing_code' => 'MN78OP']);
 
         $owner = User::factory()->create([
             'id' => (string) Str::uuid(),
             'business_id' => $tenantId,
             'email' => 'owner-access-3@example.com',
             'is_active' => true,
-            'role' => 'business_owner',
         ]);
+        $owner->assignRole('business_owner');
         $outsider = User::factory()->create([
             'id' => (string) Str::uuid(),
             'business_id' => 'tenant-access-other',
             'email' => 'outsider@example.com',
             'is_active' => true,
-            'role' => 'business_owner',
         ]);
+        $outsider->assignRole('business_owner');
         $token = $this->pairedDeviceToken($tenantId, $owner);
 
         $response = $this->withHeader('Authorization', 'Bearer '.$token)

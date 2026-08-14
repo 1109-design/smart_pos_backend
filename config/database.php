@@ -45,7 +45,11 @@ return [
         ],
 
         'central' => [
-            'driver' => 'mysql',
+            // Driven by DB_CONNECTION so phpunit.xml's `DB_CONNECTION=sqlite` /
+            // `DB_DATABASE=:memory:` overrides actually take effect for tests —
+            // production/dev .env sets DB_CONNECTION=mysql, so behavior there
+            // is unchanged.
+            'driver' => env('DB_CONNECTION', 'mysql'),
             'url' => env('DB_URL'),
             'host' => env('DB_HOST', '127.0.0.1'),
             'port' => env('DB_PORT', '3306'),

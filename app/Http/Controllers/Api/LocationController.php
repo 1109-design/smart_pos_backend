@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Device;
 use App\Models\Location;
+use App\Models\Product;
 use App\Services\LocationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -32,18 +33,18 @@ class LocationController extends Controller
         $device = $this->resolveDevice($request);
 
         $data = $request->validate([
-            'name'         => 'required|string|max:255',
-            'type'         => 'required|in:shop,warehouse',
-            'parent_id'    => 'nullable|uuid|exists:locations,id',
-            'address'      => 'nullable|string|max:500',
-            'phone'        => 'nullable|string|max:50',
-            'email'        => 'nullable|email',
-            'can_sell'     => 'boolean',
-            'can_receive'  => 'boolean',
+            'name' => 'required|string|max:255',
+            'type' => 'required|in:shop,warehouse',
+            'parent_id' => 'nullable|uuid|exists:locations,id',
+            'address' => 'nullable|string|max:500',
+            'phone' => 'nullable|string|max:50',
+            'email' => 'nullable|email',
+            'can_sell' => 'boolean',
+            'can_receive' => 'boolean',
         ]);
 
         $location = Location::create([
-            'id'          => Str::uuid(),
+            'id' => Str::uuid(),
             'business_id' => $device?->tenant_id,
             ...$data,
         ]);
@@ -68,15 +69,15 @@ class LocationController extends Controller
         $location = Location::where('business_id', $device?->tenant_id)->findOrFail($id);
 
         $data = $request->validate([
-            'name'        => 'sometimes|string|max:255',
-            'type'        => 'sometimes|in:shop,warehouse',
-            'parent_id'   => 'nullable|uuid|exists:locations,id',
-            'address'     => 'nullable|string|max:500',
-            'phone'       => 'nullable|string|max:50',
-            'email'       => 'nullable|email',
-            'can_sell'    => 'boolean',
+            'name' => 'sometimes|string|max:255',
+            'type' => 'sometimes|in:shop,warehouse',
+            'parent_id' => 'nullable|uuid|exists:locations,id',
+            'address' => 'nullable|string|max:500',
+            'phone' => 'nullable|string|max:50',
+            'email' => 'nullable|email',
+            'can_sell' => 'boolean',
             'can_receive' => 'boolean',
-            'is_active'   => 'boolean',
+            'is_active' => 'boolean',
         ]);
 
         $location->update($data);
@@ -95,13 +96,13 @@ class LocationController extends Controller
 
         $stock = $location->productStock()->with('product:id,name,sku,barcode,track_stock')->get()
             ->map(fn ($row) => [
-                'product_id'       => $row->product_id,
-                'product_name'     => $row->product?->name,
-                'sku'              => $row->product?->sku,
-                'barcode'          => $row->product?->barcode,
-                'quantity'         => (float) $row->quantity,
-                'reserved'         => (float) $row->reserved_quantity,
-                'available'        => max(0.0, (float) $row->quantity - (float) $row->reserved_quantity),
+                'product_id' => $row->product_id,
+                'product_name' => $row->product?->name,
+                'sku' => $row->product?->sku,
+                'barcode' => $row->product?->barcode,
+                'quantity' => (float) $row->quantity,
+                'reserved' => (float) $row->reserved_quantity,
+                'available' => max(0.0, (float) $row->quantity - (float) $row->reserved_quantity),
             ]);
 
         return response()->json(['data' => $stock]);
@@ -114,13 +115,22 @@ class LocationController extends Controller
     {
         $device = $this->resolveDevice($request);
 
-        $breakdown = $this->locationService->stockByLocation($productId);
+        $product = Product::where('business_id', $device?->tenant_id)->findOrFail($productId);
+
+        $breakdown = $this->locationService->stockByLocation($product->id);
 
         return response()->json(['data' => $breakdown]);
     }
 
     private function resolveDevice(Request $request): ?Device
     {
-        return $request->user()?->device ?? null;
+        $token = $request->bearerToken();
+        if (! $token) {
+            return null;
+        }
+
+        $tokenId = explode('|', $token)[0] ?? null;
+
+        return Device::where('token_id', $tokenId)->first();
     }
 }

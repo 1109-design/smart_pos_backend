@@ -9,6 +9,7 @@ use App\Models\SubscriptionHistory;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Services\BusinessProvisioner;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -55,17 +56,26 @@ class DeviceAuthController extends Controller
 
         $trialEndsAt = now()->addDays((int) config('trial.duration_days'));
 
-        $tenant = $provisioner->provision([
-            'business_name' => $data['business_name'],
-            'owner_email' => $data['owner_email'],
-            'tier' => config('trial.tier'),
-            'subscription_valid_until' => $trialEndsAt,
-            'country' => $data['country'] ?? null,
-            'currency_code' => $data['currency_code'] ?? 'USD',
-            'admin_name' => $data['owner_name'],
-            'admin_pin' => $data['pin'],
-            'admin_password' => $data['password'],
-        ]);
+        // The exists() check above is a fast path, not the real guard — it has
+        // a race window under concurrent requests. tenants.owner_email carries
+        // a DB-level unique constraint, so a genuine race collides here instead.
+        try {
+            $tenant = $provisioner->provision([
+                'business_name' => $data['business_name'],
+                'owner_email' => $data['owner_email'],
+                'tier' => config('trial.tier'),
+                'subscription_valid_until' => $trialEndsAt,
+                'country' => $data['country'] ?? null,
+                'currency_code' => $data['currency_code'] ?? 'USD',
+                'admin_name' => $data['owner_name'],
+                'admin_pin' => $data['pin'],
+                'admin_password' => $data['password'],
+            ]);
+        } catch (UniqueConstraintViolationException $e) {
+            return response()->json([
+                'message' => 'A business is already registered with this email. Please sign in instead.',
+            ], 409);
+        }
 
         SubscriptionHistory::create([
             'tenant_id' => $tenant->id,

@@ -19,6 +19,13 @@ class HandleInertiaRequests extends Middleware
      */
     public function version(Request $request): ?string
     {
+        // Asset-version cache-busting depends on whatever happens to be built
+        // in public/build on the machine running the suite — that's incidental
+        // state, not something tests should be sensitive to.
+        if (app()->environment('testing')) {
+            return null;
+        }
+
         return parent::version($request);
     }
 

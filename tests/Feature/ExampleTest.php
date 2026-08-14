@@ -8,12 +8,13 @@ use Tests\TestCase;
 class ExampleTest extends TestCase
 {
     /**
-     * A basic test example.
+     * The root route has no standalone page — it always redirects into the
+     * BackOffice (login, or the dashboard if already signed in).
      */
-    public function test_the_application_returns_a_successful_response(): void
+    public function test_the_application_redirects_to_the_backoffice_login(): void
     {
         $response = $this->get('/');
 
-        $response->assertStatus(200);
+        $response->assertRedirect(route('office.login'));
     }
 }
