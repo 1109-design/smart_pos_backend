@@ -45,11 +45,14 @@ return [
         ],
 
         'central' => [
-            // Driven by DB_CONNECTION so phpunit.xml's `DB_CONNECTION=sqlite` /
-            // `DB_DATABASE=:memory:` overrides actually take effect for tests —
-            // production/dev .env sets DB_CONNECTION=mysql, so behavior there
-            // is unchanged.
-            'driver' => env('DB_CONNECTION', 'mysql'),
+            // Driven by DB_CENTRAL_DRIVER (not DB_CONNECTION) so phpunit.xml's
+            // `DB_CENTRAL_DRIVER=sqlite` override takes effect for tests without
+            // depending on DB_CONNECTION holding an actual PDO driver name.
+            // Laravel Cloud sets DB_CONNECTION to this app's connection name
+            // ("central") rather than a driver, which broke this when it read
+            // DB_CONNECTION directly — see config/queue.php below for the one
+            // place DB_CONNECTION is legitimately used as a connection name.
+            'driver' => env('DB_CENTRAL_DRIVER', 'mysql'),
             'url' => env('DB_URL'),
             'host' => env('DB_HOST', '127.0.0.1'),
             'port' => env('DB_PORT', '3306'),
