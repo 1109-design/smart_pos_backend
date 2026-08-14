@@ -113,5 +113,58 @@ class UserManagementIsolationTest extends TestCase
             'email' => 'cashier1@example.com',
             'business_id' => 'biz-a',
         ]);
+
+        $this->assertDatabaseHas('sync_records', [
+            'business_id' => 'biz-a',
+            'table_name' => 'users',
+            'operation' => 'upsert',
+        ]);
+    }
+
+    public function test_updating_user_publishes_sync_record(): void
+    {
+        $this->business('biz-a');
+        $alice = $this->userIn('biz-a', 'Alice');
+        $alice->assignRole('cashier');
+
+        $this->put("/businesses/biz-a/users/{$alice->id}", [
+            'name' => 'Alice Updated',
+            'email' => 'alice.updated@example.com',
+            'role' => 'manager',
+            'is_active' => true,
+            'pin' => '5555',
+        ])->assertRedirect();
+
+        $this->assertDatabaseHas('users', [
+            'id' => $alice->id,
+            'name' => 'Alice Updated',
+            'email' => 'alice.updated@example.com',
+        ]);
+
+        $this->assertDatabaseHas('sync_records', [
+            'business_id' => 'biz-a',
+            'table_name' => 'users',
+            'record_uuid' => $alice->id,
+            'operation' => 'upsert',
+        ]);
+    }
+
+    public function test_deleting_user_publishes_delete_sync_record(): void
+    {
+        $this->business('biz-a');
+        $alice = $this->userIn('biz-a', 'Alice');
+
+        $this->delete("/businesses/biz-a/users/{$alice->id}")->assertRedirect();
+
+        $this->assertDatabaseMissing('users', [
+            'id' => $alice->id,
+        ]);
+
+        $this->assertDatabaseHas('sync_records', [
+            'business_id' => 'biz-a',
+            'table_name' => 'users',
+            'record_uuid' => $alice->id,
+            'operation' => 'delete',
+        ]);
     }
 }

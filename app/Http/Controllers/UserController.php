@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Tenant;
 use App\Models\User;
+use App\Models\SyncRecord;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -68,6 +69,24 @@ class UserController extends Controller
 
         $user->assignRole($data['role']);
 
+        SyncRecord::create([
+            'business_id' => $tenant->id,
+            'table_name' => 'users',
+            'record_uuid' => $user->id,
+            'operation' => 'upsert',
+            'payload' => [
+                'business_id' => $tenant->id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'pin_hash' => $user->pin_hash,
+                'role' => $data['role'] === 'business_owner' ? 'owner' : $data['role'],
+                'is_active' => true,
+                'biometric_enabled' => false,
+            ],
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+        ]);
+
         tenancy()->end();
 
         return redirect()->route('businesses.users.index', $business)
@@ -96,6 +115,24 @@ class UserController extends Controller
             'pin_hash' => isset($data['pin']) ? Hash::make($data['pin']) : $user->pin_hash,
         ]);
         $user->syncRoles([$data['role']]);
+
+        SyncRecord::create([
+            'business_id' => $tenant->id,
+            'table_name' => 'users',
+            'record_uuid' => $user->id,
+            'operation' => 'upsert',
+            'payload' => [
+                'business_id' => $tenant->id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'pin_hash' => $user->pin_hash,
+                'role' => $data['role'] === 'business_owner' ? 'owner' : $data['role'],
+                'is_active' => (bool) $user->is_active,
+                'biometric_enabled' => false,
+            ],
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+        ]);
 
         tenancy()->end();
 
@@ -128,7 +165,19 @@ class UserController extends Controller
         $tenant = Tenant::findOrFail($business);
 
         tenancy()->initialize($tenant);
-        User::findOrFail($userId)->delete();
+        $user = User::findOrFail($userId);
+        $user->delete();
+
+        SyncRecord::create([
+            'business_id' => $tenant->id,
+            'table_name' => 'users',
+            'record_uuid' => $userId,
+            'operation' => 'delete',
+            'payload' => null,
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+        ]);
+
         tenancy()->end();
 
         return redirect()->route('businesses.users.index', $business)

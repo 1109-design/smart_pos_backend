@@ -4,6 +4,7 @@ namespace App\Http\Controllers\BackOffice;
 
 use App\Http\Controllers\Controller;
 use App\Models\User;
+use App\Models\SyncRecord;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -76,7 +77,28 @@ class UsersController extends Controller
 
         if (isset($data['role'])) {
             $user->syncRoles([$data['role']]);
+            $roleName = $data['role'];
+        } else {
+            $roleName = $user->roles->first()?->name ?? 'cashier';
         }
+
+        SyncRecord::create([
+            'business_id' => $user->business_id,
+            'table_name' => 'users',
+            'record_uuid' => $user->id,
+            'operation' => 'upsert',
+            'payload' => [
+                'business_id' => $user->business_id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'pin_hash' => $user->pin_hash,
+                'role' => $roleName === 'business_owner' ? 'owner' : $roleName,
+                'is_active' => (bool) $user->is_active,
+                'biometric_enabled' => false,
+            ],
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+        ]);
 
         return redirect()->route('office.users.index')
             ->with('success', 'User updated.');
@@ -107,6 +129,26 @@ class UsersController extends Controller
         abort_if($user->id === $currentUserId, 403, 'You cannot deactivate your own account.');
 
         $user->update(['is_active' => ! $user->is_active]);
+
+        $roleName = $user->roles->first()?->name ?? 'cashier';
+
+        SyncRecord::create([
+            'business_id' => $user->business_id,
+            'table_name' => 'users',
+            'record_uuid' => $user->id,
+            'operation' => 'upsert',
+            'payload' => [
+                'business_id' => $user->business_id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'pin_hash' => $user->pin_hash,
+                'role' => $roleName === 'business_owner' ? 'owner' : $roleName,
+                'is_active' => (bool) $user->is_active,
+                'biometric_enabled' => false,
+            ],
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+        ]);
 
         return redirect()->route('office.users.index')
             ->with('success', $user->is_active ? 'User activated.' : 'User deactivated.');
