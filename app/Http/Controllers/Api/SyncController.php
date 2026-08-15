@@ -35,45 +35,63 @@ class SyncController extends Controller
         $errors = [];
 
         foreach ($this->groupPushRecords($data['records']) as $groupRecords) {
+            // Version-conflict detection runs first and is recorded independently
+            // of the processing transaction below — a conflict row must survive
+            // even if a later record in this same group fails to process. (A
+            // conflict recorded *inside* that transaction would be rolled back
+            // along with everything else if a sibling record threw, leaving the
+            // response pointing at a conflict id that no longer exists.)
+            $recordsToProcess = [];
+
+            foreach ($groupRecords as $record) {
+                // Normalize insert/update to upsert — the processor treats them identically
+                if (in_array($record['operation'], ['insert', 'update'])) {
+                    $record['operation'] = 'upsert';
+                }
+
+                $incomingUpdatedAt = $this->resolveIncomingUpdatedAt($record);
+
+                $existing = SyncRecord::where('business_id', $device?->tenant_id)
+                    ->where('table_name', $record['table'])
+                    ->where('record_uuid', $record['uuid'])
+                    ->latest('synced_at')
+                    ->first();
+
+                $existingVersion = $existing?->source_updated_at ?? $existing?->synced_at;
+                if ($existingVersion && $existingVersion->gt($incomingUpdatedAt)) {
+                    $conflict = $this->recordConflict(
+                        $device,
+                        $record,
+                        'Newer version exists on server; manual review required.',
+                        'version_conflict',
+                        $existing?->payload
+                    );
+
+                    // Left pending for manual review via the conflicts/resolve
+                    // endpoint — do not apply or accept the older record yet.
+                    $conflicts[] = [
+                        'id' => $conflict->id,
+                        'table' => $record['table'],
+                        'uuid' => $record['uuid'],
+                    ];
+
+                    continue;
+                }
+
+                $recordsToProcess[] = ['record' => $record, 'incomingUpdatedAt' => $incomingUpdatedAt];
+            }
+
+            if (empty($recordsToProcess)) {
+                continue;
+            }
+
             $acceptedInGroup = [];
-            $conflictsInGroup = [];
 
             try {
-                DB::transaction(function () use ($groupRecords, $device, $processor, &$acceptedInGroup, &$conflictsInGroup) {
-                    foreach ($groupRecords as $record) {
-                        // Normalize insert/update to upsert — the processor treats them identically
-                        if (in_array($record['operation'], ['insert', 'update'])) {
-                            $record['operation'] = 'upsert';
-                        }
-
-                        $incomingUpdatedAt = $this->resolveIncomingUpdatedAt($record);
-
-                        $existing = SyncRecord::where('business_id', $device?->tenant_id)
-                            ->where('table_name', $record['table'])
-                            ->where('record_uuid', $record['uuid'])
-                            ->latest('synced_at')
-                            ->first();
-
-                        $existingVersion = $existing?->source_updated_at ?? $existing?->synced_at;
-                        if ($existingVersion && $existingVersion->gt($incomingUpdatedAt)) {
-                            $conflict = $this->recordConflict(
-                                $device,
-                                $record,
-                                'Newer version exists on server; manual review required.',
-                                'version_conflict',
-                                $existing?->payload
-                            );
-
-                            // Left pending for manual review via the conflicts/resolve
-                            // endpoint — do not apply or accept the older record yet.
-                            $conflictsInGroup[] = [
-                                'id' => $conflict->id,
-                                'table' => $record['table'],
-                                'uuid' => $record['uuid'],
-                            ];
-
-                            continue;
-                        }
+                DB::transaction(function () use ($recordsToProcess, $device, $processor, &$acceptedInGroup) {
+                    foreach ($recordsToProcess as $item) {
+                        $record = $item['record'];
+                        $incomingUpdatedAt = $item['incomingUpdatedAt'];
 
                         // Enrich payload with server-known context so old queued records
                         // (created before clients included all fields) still process correctly.
@@ -113,25 +131,18 @@ class SyncController extends Controller
                 });
 
                 $accepted = [...$accepted, ...$acceptedInGroup];
-                $conflicts = [...$conflicts, ...$conflictsInGroup];
             } catch (\Throwable $e) {
-                if (! empty($conflictsInGroup)) {
-                    $conflicts = [...$conflicts, ...$conflictsInGroup];
-
-                    continue;
-                }
-
-                foreach ($groupRecords as $record) {
+                foreach ($recordsToProcess as $item) {
                     $conflict = $this->recordConflict(
                         $device,
-                        $record,
+                        $item['record'],
                         $e->getMessage(),
                         'processing_error'
                     );
                     $errors[] = [
                         'id' => $conflict->id,
-                        'table' => $record['table'],
-                        'uuid' => $record['uuid'],
+                        'table' => $item['record']['table'],
+                        'uuid' => $item['record']['uuid'],
                         'reason' => $e->getMessage(),
                     ];
                 }

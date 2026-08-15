@@ -30,7 +30,7 @@ class CategoriesController extends Controller
 
     public function update(Request $request, string $category, SyncProcessor $processor): RedirectResponse
     {
-        $existing = Category::findOrFail($category);
+        $existing = Category::where('business_id', $this->tenantId())->findOrFail($category);
 
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
@@ -51,7 +51,7 @@ class CategoriesController extends Controller
 
     public function toggleActive(string $category, SyncProcessor $processor): RedirectResponse
     {
-        $existing = Category::findOrFail($category);
+        $existing = Category::where('business_id', $this->tenantId())->findOrFail($category);
 
         $this->applyCategory($processor, $existing->id, [
             'parent_id' => $existing->parent_id,
@@ -73,7 +73,7 @@ class CategoriesController extends Controller
      */
     private function applyCategory(SyncProcessor $processor, string $uuid, array $data): void
     {
-        $data['business_id'] = session('backoffice')['tenant_id'] ?? null;
+        $data['business_id'] = $this->tenantId();
 
         $processor->process('categories', $uuid, 'upsert', $data);
 
@@ -86,5 +86,10 @@ class CategoriesController extends Controller
             'source_updated_at' => now(),
             'synced_at' => now(),
         ]);
+    }
+
+    private function tenantId(): ?string
+    {
+        return session('backoffice')['tenant_id'] ?? null;
     }
 }

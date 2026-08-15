@@ -85,7 +85,7 @@ class SyncEmployeeTest extends TestCase
             'currency_code' => 'USD',
         ]);
 
-        $this->processor->process('employees', $id, 'delete', []);
+        $this->processor->process('employees', $id, 'delete', ['business_id' => 'biz-001']);
 
         // Employees are soft-deactivated, not hard-deleted, so payroll/audit
         // history referencing them (e.g. salary_payments) stays intact.
@@ -153,7 +153,7 @@ class SyncEmployeeTest extends TestCase
             'paid_at' => now(),
         ]);
 
-        $this->processor->process('salary_payments', $payId, 'delete', []);
+        $this->processor->process('salary_payments', $payId, 'delete', ['business_id' => 'biz-001']);
 
         $this->assertDatabaseMissing('salary_payments', ['id' => $payId]);
     }

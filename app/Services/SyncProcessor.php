@@ -51,8 +51,63 @@ class SyncProcessor
         'transaction_items', 'transaction_taxes', 'payments', 'po_audit_logs',
     ];
 
+    // Tables with their own business_id column, guarded in assertOwnership().
+    // `users` is included here even though the model also carries its own
+    // Eloquent global scope — that scope only applies when tenancy() has been
+    // initialized, which never happens on the device sync API path, so it is
+    // inert for push()/pull() and this explicit check is the real protection
+    // there.
+    private const TENANT_SCOPED_MODELS = [
+        'locations' => Location::class,
+        'categories' => Category::class,
+        'tax_rates' => TaxRate::class,
+        'exchange_rates' => ExchangeRate::class,
+        'customers' => Customer::class,
+        'transactions' => Transaction::class,
+        'stock_movements' => StockMovement::class,
+        'suppliers' => Supplier::class,
+        'purchase_orders' => PurchaseOrder::class,
+        'coupons' => Coupon::class,
+        'shifts' => Shift::class,
+        'expenses' => Expense::class,
+        'stock_takes' => StockTake::class,
+        'employees' => Employee::class,
+        'salary_payments' => SalaryPayment::class,
+        'bundles' => Bundle::class,
+        'products' => Product::class,
+        'stock_transfers' => StockTransfer::class,
+        'users' => User::class,
+    ];
+
+    // Child tables scoped only through a parent record: table => [own model,
+    // own FK column pointing at the parent]. assertOwnership() resolves each
+    // parent id to a business_id via resolveParentOwner() below.
+    private const CHILD_SCOPED_MODELS = [
+        'product_stock' => [ProductStock::class, 'product_id'],
+        'product_variants' => [ProductVariant::class, 'product_id'],
+        'product_variant_stock' => [ProductVariantStock::class, 'variant_id'],
+        'stock_transfer_items' => [StockTransferItem::class, 'stock_transfer_id'],
+        'bundle_items' => [BundleItem::class, 'bundle_id'],
+        'transaction_items' => [TransactionItem::class, 'transaction_id'],
+        'transaction_taxes' => [TransactionTax::class, 'transaction_id'],
+        'payments' => [Payment::class, 'transaction_id'],
+        'loyalty_transactions' => [LoyaltyTransaction::class, 'customer_id'],
+        'credit_transactions' => [CreditTransaction::class, 'customer_id'],
+        'purchase_order_items' => [PurchaseOrderItem::class, 'purchase_order_id'],
+        'stock_take_items' => [StockTakeItem::class, 'stock_take_id'],
+        'po_audit_logs' => [PoAuditLog::class, 'po_id'],
+    ];
+
+    // Deliberately unguarded, and why:
+    //  - currencies: shared reference data, keyed by currency code, not owned by any one business.
+    //  - role_permissions: updateOrCreate() is keyed on (business_id, role) together, so a mismatched
+    //    business_id can only create/update the caller's OWN row — it can never touch another
+    //    tenant's row of the same role name. Safe by construction.
+
     public function process(string $table, string $uuid, string $operation, array $payload): void
     {
+        $this->assertOwnership($table, $uuid, $payload);
+
         if ($operation === 'delete') {
             $this->handleDelete($table, $uuid);
 
@@ -60,6 +115,122 @@ class SyncProcessor
         }
 
         $this->handleUpsert($table, $uuid, $payload);
+    }
+
+    /**
+     * Reject a write/delete that would touch another business's record.
+     * updateOrCreate()/delete() below key purely on `id` (or a parent FK, for
+     * child tables), with no tenant check of their own — this is the one
+     * place that stands between an authenticated device and another tenant's
+     * data.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    protected function assertOwnership(string $table, string $uuid, array $payload): void
+    {
+        $businessId = $payload['business_id'] ?? null;
+
+        if ($table === 'businesses') {
+            if ($businessId === null || $uuid !== $businessId) {
+                throw new \RuntimeException('businesses: a device may only sync its own business record.');
+            }
+
+            return;
+        }
+
+        if ($table === 'product_tax_rates') {
+            $this->assertProductTaxRateOwnership($uuid, $payload, $businessId);
+
+            return;
+        }
+
+        if ($model = self::TENANT_SCOPED_MODELS[$table] ?? null) {
+            if (empty($businessId)) {
+                throw new \RuntimeException("{$table}: business_id is required to sync this record.");
+            }
+
+            $existingBusinessId = $model::where('id', $uuid)->value('business_id');
+
+            if ($existingBusinessId !== null && (string) $existingBusinessId !== (string) $businessId) {
+                throw new \RuntimeException("{$table}: record belongs to a different business.");
+            }
+
+            return;
+        }
+
+        [$childModel, $fkColumn] = self::CHILD_SCOPED_MODELS[$table] ?? [null, null];
+        if (! $childModel) {
+            return;
+        }
+
+        if (empty($businessId)) {
+            throw new \RuntimeException("{$table}: business_id is required to sync this record.");
+        }
+
+        // 1. If this child record already exists, its CURRENT parent must belong to
+        // the caller — otherwise a device could hijack an existing child row by
+        // re-parenting it to a parent it owns.
+        $currentParentId = $childModel::where('id', $uuid)->value($fkColumn);
+        if ($currentParentId) {
+            $currentOwner = $this->resolveParentOwner($table, $currentParentId);
+            if ($currentOwner !== null && (string) $currentOwner !== (string) $businessId) {
+                throw new \RuntimeException("{$table}: record belongs to a different business.");
+            }
+        }
+
+        // 2. The parent referenced in the INCOMING payload must belong to the caller —
+        // otherwise a device could attach a new (or re-point an existing) child at a
+        // parent it doesn't own.
+        $incomingParentId = $payload[$fkColumn] ?? null;
+        if ($incomingParentId) {
+            $targetOwner = $this->resolveParentOwner($table, $incomingParentId);
+            if ($targetOwner === null || (string) $targetOwner !== (string) $businessId) {
+                throw new \RuntimeException("{$table}: referenced parent does not belong to this business.");
+            }
+        }
+    }
+
+    protected function resolveParentOwner(string $table, string $parentId): ?string
+    {
+        return match ($table) {
+            'product_stock', 'product_variants' => Product::where('id', $parentId)->value('business_id'),
+            'product_variant_stock' => Product::query()
+                ->join('product_variants', 'product_variants.product_id', '=', 'products.id')
+                ->where('product_variants.id', $parentId)
+                ->value('products.business_id'),
+            'stock_transfer_items' => StockTransfer::where('id', $parentId)->value('business_id'),
+            'bundle_items' => Bundle::where('id', $parentId)->value('business_id'),
+            'transaction_items', 'transaction_taxes', 'payments' => Transaction::where('id', $parentId)->value('business_id'),
+            'loyalty_transactions', 'credit_transactions' => Customer::where('id', $parentId)->value('business_id'),
+            'purchase_order_items', 'po_audit_logs' => PurchaseOrder::where('id', $parentId)->value('business_id'),
+            'stock_take_items' => StockTake::where('id', $parentId)->value('business_id'),
+            default => null,
+        };
+    }
+
+    /**
+     * product_tax_rates uses a composite (product_id, tax_rate_id) key instead
+     * of a single uuid, so it can't share the generic child-table path above.
+     */
+    protected function assertProductTaxRateOwnership(string $uuid, array $payload, ?string $businessId): void
+    {
+        if (empty($businessId)) {
+            throw new \RuntimeException('product_tax_rates: business_id is required to sync this record.');
+        }
+
+        $parts = explode('|', $uuid);
+        $productId = count($parts) === 2 ? $parts[0] : ($payload['product_id'] ?? '');
+        $taxRateId = count($parts) === 2 ? $parts[1] : ($payload['tax_rate_id'] ?? '');
+
+        $productOwner = $productId ? Product::where('id', $productId)->value('business_id') : null;
+        if ($productOwner === null || (string) $productOwner !== (string) $businessId) {
+            throw new \RuntimeException('product_tax_rates: referenced product does not belong to this business.');
+        }
+
+        $taxRateOwner = $taxRateId ? TaxRate::where('id', $taxRateId)->value('business_id') : null;
+        if ($taxRateOwner === null || (string) $taxRateOwner !== (string) $businessId) {
+            throw new \RuntimeException('product_tax_rates: referenced tax rate does not belong to this business.');
+        }
     }
 
     protected function handleUpsert(string $table, string $uuid, array $payload): void

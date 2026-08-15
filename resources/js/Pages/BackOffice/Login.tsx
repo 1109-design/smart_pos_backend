@@ -1,16 +1,20 @@
 import React from 'react';
 import { Head, useForm } from '@inertiajs/react';
 
+const PAIRING_CODE_STORAGE_KEY = 'smartpos.office.pairing_code';
+
 export default function BackOfficeLogin() {
     const { data, setData, post, processing, errors } = useForm({
-        pairing_code: '',
+        pairing_code: localStorage.getItem(PAIRING_CODE_STORAGE_KEY) ?? '',
         email:        '',
         password:     '',
     });
 
     const submit = (e: React.FormEvent) => {
         e.preventDefault();
-        post('/office/login');
+        post('/office/login', {
+            onSuccess: () => localStorage.setItem(PAIRING_CODE_STORAGE_KEY, data.pairing_code),
+        });
     };
 
     return (

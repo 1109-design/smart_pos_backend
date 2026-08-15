@@ -18,7 +18,10 @@ class BundlesController extends Controller
 {
     public function index(): Response
     {
+        $tenantId = $this->tenantId();
+
         $bundles = Bundle::with('items.product:id,name,item_type,price')
+            ->where('business_id', $tenantId)
             ->orderBy('name')
             ->get()
             ->map(fn (Bundle $bundle) => [
@@ -38,7 +41,8 @@ class BundlesController extends Controller
 
         return Inertia::render('BackOffice/Bundles', [
             'bundles' => $bundles,
-            'catalog' => Product::where('is_active', true)
+            'catalog' => Product::where('business_id', $tenantId)
+                ->where('is_active', true)
                 ->orderBy('name')
                 ->get(['id', 'name', 'item_type', 'price']),
         ]);
@@ -55,7 +59,7 @@ class BundlesController extends Controller
 
     public function update(Request $request, string $bundle, SyncProcessor $processor): RedirectResponse
     {
-        $existing = Bundle::with('items')->findOrFail($bundle);
+        $existing = Bundle::with('items')->where('business_id', $this->tenantId())->findOrFail($bundle);
         $data = $this->validatePayload($request);
 
         $this->applyBundle($processor, $bundle, $data, $existing);
@@ -65,7 +69,7 @@ class BundlesController extends Controller
 
     public function toggleActive(string $bundle, SyncProcessor $processor): RedirectResponse
     {
-        $existing = Bundle::findOrFail($bundle);
+        $existing = Bundle::where('business_id', $this->tenantId())->findOrFail($bundle);
 
         $payload = [
             'business_id' => $existing->business_id,
@@ -102,7 +106,7 @@ class BundlesController extends Controller
      */
     private function applyBundle(SyncProcessor $processor, string $bundleId, array $data, ?Bundle $existing): void
     {
-        $businessId = session('backoffice')['tenant_id'] ?? null;
+        $businessId = $this->tenantId();
 
         $bundlePayload = [
             'business_id' => $businessId,
@@ -118,7 +122,7 @@ class BundlesController extends Controller
         // the new set. Deletions are mirrored as sync deletes.
         if ($existing) {
             foreach ($existing->items as $oldItem) {
-                $processor->process('bundle_items', $oldItem->id, 'delete', []);
+                $processor->process('bundle_items', $oldItem->id, 'delete', ['business_id' => $businessId]);
                 SyncRecord::create([
                     'business_id' => $businessId,
                     'table_name' => 'bundle_items',
@@ -134,6 +138,7 @@ class BundlesController extends Controller
         foreach (array_values($data['items']) as $index => $item) {
             $itemId = (string) Str::uuid();
             $itemPayload = [
+                'business_id' => $businessId,
                 'bundle_id' => $bundleId,
                 'product_id' => $item['product_id'],
                 'quantity' => (float) $item['quantity'],
@@ -150,7 +155,7 @@ class BundlesController extends Controller
     private function publishSyncRecord(string $table, string $uuid, array $payload): void
     {
         SyncRecord::create([
-            'business_id' => $payload['business_id'] ?? session('backoffice')['tenant_id'] ?? null,
+            'business_id' => $payload['business_id'] ?? $this->tenantId(),
             'table_name' => $table,
             'record_uuid' => $uuid,
             'operation' => 'upsert',
@@ -158,5 +163,10 @@ class BundlesController extends Controller
             'source_updated_at' => now(),
             'synced_at' => now(),
         ]);
+    }
+
+    private function tenantId(): ?string
+    {
+        return session('backoffice')['tenant_id'] ?? null;
     }
 }

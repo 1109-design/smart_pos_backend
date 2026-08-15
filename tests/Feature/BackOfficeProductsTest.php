@@ -3,11 +3,15 @@
 namespace Tests\Feature;
 
 use App\Http\Middleware\AuthenticateBackOfficeUser;
+use App\Models\Category;
+use App\Models\Device;
 use App\Models\Product;
+use App\Models\SyncCursor;
 use App\Models\SyncRecord;
 use App\Models\Tenant;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -19,11 +23,12 @@ class BackOfficeProductsTest extends TestCase
     {
         $this->withoutMiddleware(AuthenticateBackOfficeUser::class);
 
-        Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com', 'pairing_code' => '123456']);
+        Tenant::firstOrCreate(['id' => $tenantId], ['business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com', 'pairing_code' => substr(md5($tenantId), 0, 6)]);
 
         $user = User::factory()->create([
             'id' => (string) Str::uuid(),
-            'email' => 'office-products@example.com',
+            'business_id' => $tenantId,
+            'email' => $tenantId.'-user@example.com',
             'is_active' => true,
         ]);
 
@@ -136,5 +141,218 @@ class BackOfficeProductsTest extends TestCase
         $this->assertNotNull($syncRecord);
         $this->assertSame('Keep My Name', $syncRecord->payload['name']);
         $this->assertFalse((bool) $syncRecord->payload['is_active']);
+    }
+
+    public function test_index_reports_how_many_of_the_business_devices_have_synced_each_product(): void
+    {
+        $tenantId = 'tenant-office-prod-4';
+        $this->actingBackOfficeSession($tenantId);
+
+        $caughtUpDevice = Device::create(['tenant_id' => $tenantId, 'name' => 'Till 1', 'device_identifier' => (string) Str::uuid(), 'last_seen_at' => now()]);
+        $behindDevice = Device::create(['tenant_id' => $tenantId, 'name' => 'Till 2', 'device_identifier' => (string) Str::uuid(), 'last_seen_at' => now()]);
+        Device::create(['tenant_id' => $tenantId, 'name' => 'Revoked Phone', 'device_identifier' => (string) Str::uuid(), 'last_seen_at' => now(), 'is_revoked' => true]);
+        Device::create(['tenant_id' => $tenantId, 'name' => 'Abandoned Till', 'device_identifier' => (string) Str::uuid(), 'last_seen_at' => now()->subDays(30)]);
+
+        $productId = (string) Str::uuid();
+        Product::create([
+            'id' => $productId,
+            'business_id' => $tenantId,
+            'name' => 'Synced Item',
+            'item_type' => 'product',
+            'price' => 5,
+            'stock_quantity' => 10,
+        ]);
+        $syncedAt = now();
+        SyncRecord::create([
+            'business_id' => $tenantId,
+            'table_name' => 'products',
+            'record_uuid' => $productId,
+            'operation' => 'upsert',
+            'payload' => ['name' => 'Synced Item'],
+            'source_updated_at' => $syncedAt,
+            'synced_at' => $syncedAt,
+        ]);
+
+        // Only one active device has pulled products since this record went out.
+        SyncCursor::create(['device_id' => $caughtUpDevice->id, 'table_name' => 'products', 'last_pulled_at' => $syncedAt->clone()->addMinute()]);
+        SyncCursor::create(['device_id' => $behindDevice->id, 'table_name' => 'products', 'last_pulled_at' => $syncedAt->clone()->subMinute()]);
+
+        $unsyncedProductId = (string) Str::uuid();
+        Product::create([
+            'id' => $unsyncedProductId,
+            'business_id' => $tenantId,
+            'name' => 'Brand New Item',
+            'item_type' => 'product',
+            'price' => 5,
+            'stock_quantity' => 10,
+        ]);
+        // No sync_records row at all for this one — unknown status.
+
+        $response = $this->get('/office/products');
+
+        $response->assertOk();
+        $products = collect($response->viewData('page')['props']['products']['data']);
+
+        $synced = $products->firstWhere('name', 'Synced Item');
+        $this->assertSame(1, $synced['synced_devices']);
+        $this->assertSame(2, $synced['total_devices']); // revoked device and long-idle device excluded
+
+        $unsynced = $products->firstWhere('name', 'Brand New Item');
+        $this->assertNull($unsynced['synced_devices']);
+    }
+
+    public function test_long_idle_devices_do_not_drag_down_the_sync_count(): void
+    {
+        // Regression: a business with several old/abandoned devices on record,
+        // and exactly one phone actually in use, must not show every new item
+        // as "0/4 synced" just because the abandoned ones will never pull again.
+        $tenantId = 'tenant-office-prod-idle';
+        $this->actingBackOfficeSession($tenantId);
+
+        Device::create(['tenant_id' => $tenantId, 'name' => 'Old Till A', 'device_identifier' => (string) Str::uuid(), 'last_seen_at' => now()->subMonths(3)]);
+        Device::create(['tenant_id' => $tenantId, 'name' => 'Old Till B', 'device_identifier' => (string) Str::uuid(), 'last_seen_at' => now()->subMonth()]);
+        Device::create(['tenant_id' => $tenantId, 'name' => 'Never Opened', 'device_identifier' => (string) Str::uuid()]); // last_seen_at null
+        $activeDevice = Device::create(['tenant_id' => $tenantId, 'name' => 'My Phone', 'device_identifier' => (string) Str::uuid(), 'last_seen_at' => now()]);
+
+        $productId = (string) Str::uuid();
+        Product::create(['id' => $productId, 'business_id' => $tenantId, 'name' => 'Just Added', 'item_type' => 'product', 'price' => 5]);
+        SyncRecord::create([
+            'business_id' => $tenantId,
+            'table_name' => 'products',
+            'record_uuid' => $productId,
+            'operation' => 'upsert',
+            'payload' => ['name' => 'Just Added'],
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+        ]);
+        SyncCursor::create(['device_id' => $activeDevice->id, 'table_name' => 'products', 'last_pulled_at' => now()->addMinute()]);
+
+        $response = $this->get('/office/products');
+
+        $row = collect($response->viewData('page')['props']['products']['data'])->firstWhere('name', 'Just Added');
+
+        $this->assertSame(1, $row['total_devices']); // only "My Phone" counts
+        $this->assertSame(1, $row['synced_devices']);
+    }
+
+    public function test_index_only_lists_products_belonging_to_the_current_tenant(): void
+    {
+        $otherTenantId = 'tenant-office-prod-other';
+        Tenant::firstOrCreate(['id' => $otherTenantId], ['business_name' => $otherTenantId, 'owner_email' => $otherTenantId.'@example.com', 'pairing_code' => substr(md5($otherTenantId), 0, 6)]);
+        Product::create(['id' => (string) Str::uuid(), 'business_id' => $otherTenantId, 'name' => 'Other Business Item', 'item_type' => 'product', 'price' => 1]);
+
+        $tenantId = 'tenant-office-prod-5';
+        $this->actingBackOfficeSession($tenantId);
+        Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'My Item', 'item_type' => 'product', 'price' => 1]);
+
+        $response = $this->get('/office/products');
+
+        $response->assertOk();
+        $names = collect($response->viewData('page')['props']['products']['data'])->pluck('name');
+
+        $this->assertContains('My Item', $names);
+        $this->assertNotContains('Other Business Item', $names);
+    }
+
+    public function test_update_and_toggle_active_cannot_touch_another_tenants_product(): void
+    {
+        $otherTenantId = 'tenant-office-prod-other2';
+        Tenant::firstOrCreate(['id' => $otherTenantId], ['business_name' => $otherTenantId, 'owner_email' => $otherTenantId.'@example.com', 'pairing_code' => substr(md5($otherTenantId), 0, 6)]);
+        $foreignProductId = (string) Str::uuid();
+        Product::create(['id' => $foreignProductId, 'business_id' => $otherTenantId, 'name' => 'Not Yours', 'item_type' => 'product', 'price' => 1]);
+
+        $this->actingBackOfficeSession('tenant-office-prod-6');
+
+        $this->put("/office/products/{$foreignProductId}", ['name' => 'Hijacked', 'item_type' => 'product', 'price' => 1])
+            ->assertNotFound();
+
+        $this->patch("/office/products/{$foreignProductId}/toggle-active")
+            ->assertNotFound();
+
+        $this->assertDatabaseHas('products', ['id' => $foreignProductId, 'name' => 'Not Yours', 'is_active' => true]);
+    }
+
+    public function test_import_creates_and_updates_products_from_csv(): void
+    {
+        $tenantId = 'tenant-office-prod-7';
+        $this->actingBackOfficeSession($tenantId);
+
+        $existingId = (string) Str::uuid();
+        Product::create([
+            'id' => $existingId,
+            'business_id' => $tenantId,
+            'name' => 'Old Name',
+            'item_type' => 'product',
+            'price' => 1,
+            'sku' => 'EXIST1',
+            'stock_quantity' => 42,
+        ]);
+        Category::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Beverages']);
+
+        $csv = "name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,stock_quantity,low_stock_threshold\n"
+            ."Updated Name,product,2.50,1.00,EXIST1,,Beverages,piece,yes,999,5\n"
+            ."Brand New Soda,product,3.00,1.50,NEWSKU,,Beverages,piece,yes,20,5\n";
+
+        $file = UploadedFile::fake()->createWithContent('import.csv', $csv);
+
+        $response = $this->post('/office/products/import', ['file' => $file]);
+
+        $response->assertRedirect();
+        $response->assertSessionHas('success');
+        $response->assertSessionMissing('import_errors');
+
+        $this->assertDatabaseHas('products', ['id' => $existingId, 'name' => 'Updated Name', 'sku' => 'EXIST1']);
+        // Stock is ledger-owned after creation — the CSV's 999 must be ignored for an existing item.
+        $this->assertDatabaseHas('products', ['id' => $existingId, 'stock_quantity' => 42]);
+
+        $newProduct = Product::where('sku', 'NEWSKU')->first();
+        $this->assertNotNull($newProduct);
+        $this->assertSame('Brand New Soda', $newProduct->name);
+        $this->assertSame(20.0, (float) $newProduct->stock_quantity);
+        $this->assertDatabaseHas('sync_records', ['table_name' => 'products', 'record_uuid' => $newProduct->id]);
+    }
+
+    public function test_import_reports_row_errors_without_dropping_the_whole_batch(): void
+    {
+        $tenantId = 'tenant-office-prod-8';
+        $this->actingBackOfficeSession($tenantId);
+
+        $csv = "name,item_type,price\n"
+            .",product,5\n" // missing name -> invalid
+            ."Valid Item,product,5\n";
+
+        $file = UploadedFile::fake()->createWithContent('import.csv', $csv);
+
+        $response = $this->post('/office/products/import', ['file' => $file]);
+
+        $response->assertRedirect();
+        $response->assertSessionHas('import_errors');
+
+        $this->assertDatabaseHas('products', ['name' => 'Valid Item']);
+        $this->assertDatabaseMissing('products', ['price' => 5, 'name' => '']);
+    }
+
+    public function test_import_rejects_file_missing_required_columns(): void
+    {
+        $this->actingBackOfficeSession('tenant-office-prod-9');
+
+        $file = UploadedFile::fake()->createWithContent('import.csv', "name,price\nThing,5\n");
+
+        $this->post('/office/products/import', ['file' => $file])
+            ->assertSessionHasErrors('file');
+    }
+
+    public function test_template_download_has_the_expected_headers(): void
+    {
+        $this->actingBackOfficeSession('tenant-office-prod-10');
+
+        $response = $this->get('/office/products/import/template');
+
+        $response->assertOk();
+        $response->assertHeader('content-type', 'text/csv; charset=UTF-8');
+        $this->assertStringStartsWith(
+            'name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,stock_quantity,low_stock_threshold',
+            $response->streamedContent()
+        );
     }
 }

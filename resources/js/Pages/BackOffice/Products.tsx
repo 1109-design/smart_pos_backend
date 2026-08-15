@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Head, Link, router, useForm } from '@inertiajs/react';
+import React, { useRef, useState } from 'react';
+import { Head, Link, router, useForm, usePage } from '@inertiajs/react';
 import BackOfficeLayout from '@/Layouts/BackOfficeLayout';
 import Modal from '@/Components/Modal';
 
@@ -17,6 +17,8 @@ interface ProductRow {
     low_stock_threshold: string;
     category_id: string | null;
     is_active: boolean;
+    synced_devices: number | null;
+    total_devices: number;
 }
 
 interface CategoryRow {
@@ -52,16 +54,45 @@ const EMPTY_FORM = {
     is_active: true as boolean,
 };
 
+function SyncBadge({ synced, total }: { synced: number | null; total: number }) {
+    if (total === 0) {
+        return <span className="text-xs text-slate-400" title="No devices have connected in the last 14 days">No active devices</span>;
+    }
+
+    if (synced === null) {
+        return <span className="text-xs text-slate-400">—</span>;
+    }
+
+    const fullySynced = synced === total;
+
+    return (
+        <span
+            className={`inline-flex items-center gap-1.5 text-xs font-medium ${fullySynced ? 'text-emerald-600' : 'text-amber-600'}`}
+            title="Counts devices seen in the last 14 days — long-idle devices aren't included"
+        >
+            <span className={`w-1.5 h-1.5 rounded-full ${fullySynced ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+            {synced}/{total} synced
+        </span>
+    );
+}
+
 export default function BackOfficeProducts({ products, categories, filters }: Props) {
     const [search, setSearch] = useState(filters.search);
     const [editing, setEditing] = useState<ProductRow | null>(null);
     const [showForm, setShowForm] = useState(false);
     const [showCategories, setShowCategories] = useState(false);
+    const [showImport, setShowImport] = useState(false);
     const [newCategoryName, setNewCategoryName] = useState('');
     const [renamingId, setRenamingId] = useState<string | null>(null);
     const [renameValue, setRenameValue] = useState('');
+    const importFileInput = useRef<HTMLInputElement>(null);
+
+    const { flash } = usePage().props as unknown as {
+        flash: { success: string | null; import_errors: string[] | null };
+    };
 
     const form = useForm({ ...EMPTY_FORM });
+    const importForm = useForm<{ file: File | null }>({ file: null });
     const activeCategories = categories.filter((c) => c.is_active);
 
     const addCategory = () => {
@@ -128,6 +159,25 @@ export default function BackOfficeProducts({ products, categories, filters }: Pr
 
     const isService = form.data.item_type === 'service';
 
+    const submitImport = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!importForm.data.file) return;
+        importForm.post('/office/products/import', {
+            preserveScroll: true,
+            onSuccess: () => {
+                importForm.setData('file', null);
+                if (importFileInput.current) importFileInput.current.value = '';
+            },
+        });
+    };
+
+    const closeImport = () => {
+        setShowImport(false);
+        importForm.clearErrors();
+        importForm.setData('file', null);
+        if (importFileInput.current) importFileInput.current.value = '';
+    };
+
     return (
         <BackOfficeLayout>
             <Head title="Products & Services" />
@@ -146,9 +196,32 @@ export default function BackOfficeProducts({ products, categories, filters }: Pr
                     >
                         Categories
                     </button>
+                    <button
+                        onClick={() => setShowImport(true)}
+                        className="text-sm px-4 py-2 rounded-xl border border-slate-200 text-slate-600 hover:border-emerald-300"
+                    >
+                        Import CSV
+                    </button>
                     <button onClick={openCreate} className="btn-primary py-2">+ Add Item</button>
                 </div>
             </div>
+
+            {flash?.success && (
+                <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+                    {flash.success}
+                </div>
+            )}
+
+            {flash?.import_errors && flash.import_errors.length > 0 && (
+                <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                    <p className="text-sm font-semibold text-amber-800 mb-1">Rows that need attention</p>
+                    <ul className="text-xs text-amber-700 space-y-0.5 list-disc list-inside">
+                        {flash.import_errors.map((message, i) => (
+                            <li key={i}>{message}</li>
+                        ))}
+                    </ul>
+                </div>
+            )}
 
             <div className="flex flex-wrap items-center gap-2 mb-4">
                 {[
@@ -192,6 +265,7 @@ export default function BackOfficeProducts({ products, categories, filters }: Pr
                                 <th className="table-th text-right">Price</th>
                                 <th className="table-th text-right">In Stock</th>
                                 <th className="table-th">Status</th>
+                                <th className="table-th">Synced</th>
                                 <th className="table-th text-right">Actions</th>
                             </tr>
                         </thead>
@@ -216,6 +290,9 @@ export default function BackOfficeProducts({ products, categories, filters }: Pr
                                             {row.is_active ? 'Active' : 'Archived'}
                                         </span>
                                     </td>
+                                    <td className="table-td">
+                                        <SyncBadge synced={row.synced_devices} total={row.total_devices} />
+                                    </td>
                                     <td className="table-td text-right whitespace-nowrap">
                                         <button onClick={() => openEdit(row)} className="text-xs font-semibold text-emerald-600 hover:text-emerald-800 mr-3">Edit</button>
                                         <button
@@ -229,7 +306,7 @@ export default function BackOfficeProducts({ products, categories, filters }: Pr
                             ))}
                             {products.data.length === 0 && (
                                 <tr>
-                                    <td colSpan={7} className="px-6 py-10 text-center text-sm text-slate-400">
+                                    <td colSpan={8} className="px-6 py-10 text-center text-sm text-slate-400">
                                         No items yet — add your first product or service above.
                                     </td>
                                 </tr>
@@ -460,6 +537,55 @@ export default function BackOfficeProducts({ products, categories, filters }: Pr
                         </button>
                     </div>
                 </div>
+            </Modal>
+
+            {/* Bulk import */}
+            <Modal show={showImport} onClose={closeImport} maxWidth="lg">
+                <form onSubmit={submitImport} className="p-6">
+                    <p className="text-base font-semibold text-slate-800 mb-1">Import Products &amp; Services</p>
+                    <p className="text-sm text-slate-500 mb-4">
+                        Download the template, fill in your items, then upload it here. New rows are added, and rows whose SKU or barcode
+                        matches an existing item update it instead. Everything syncs to your connected devices automatically once it's in.
+                    </p>
+
+                    <div className="rounded-xl bg-slate-50 border border-slate-100 px-4 py-3 mb-4">
+                        <p className="text-xs font-semibold text-slate-600 uppercase tracking-wide mb-2">Format</p>
+                        <ul className="text-xs text-slate-600 space-y-1 list-disc list-inside">
+                            <li><span className="font-mono">name</span>, <span className="font-mono">item_type</span> (product or service) and <span className="font-mono">price</span> are required.</li>
+                            <li><span className="font-mono">cost_price</span>, <span className="font-mono">sku</span>, <span className="font-mono">barcode</span>, <span className="font-mono">unit</span> and <span className="font-mono">low_stock_threshold</span> are optional.</li>
+                            <li><span className="font-mono">category</span> must match an existing category name exactly, or leave it blank.</li>
+                            <li><span className="font-mono">track_stock</span> is yes/no; ignored for services.</li>
+                            <li><span className="font-mono">stock_quantity</span> sets opening stock for new items only — it's ignored when updating an existing item, same as editing by hand.</li>
+                        </ul>
+                        <a
+                            href="/office/products/import/template"
+                            className="inline-block mt-3 text-xs font-semibold text-emerald-600 hover:text-emerald-800"
+                        >
+                            Download template (.csv) →
+                        </a>
+                    </div>
+
+                    <div>
+                        <label className="text-xs font-semibold text-slate-500">CSV file</label>
+                        <input
+                            ref={importFileInput}
+                            type="file"
+                            accept=".csv,text/csv"
+                            onChange={(e) => importForm.setData('file', e.target.files?.[0] ?? null)}
+                            className="mt-1 w-full text-sm text-slate-600 file:mr-3 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100"
+                        />
+                        {importForm.errors.file && <p className="text-xs text-red-500 mt-1">{importForm.errors.file}</p>}
+                    </div>
+
+                    <div className="mt-6 flex justify-end gap-2">
+                        <button type="button" onClick={closeImport} className="text-sm px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100">
+                            Cancel
+                        </button>
+                        <button type="submit" disabled={importForm.processing || !importForm.data.file} className="btn-primary py-2 disabled:opacity-50">
+                            {importForm.processing ? 'Uploading…' : 'Upload & Sync'}
+                        </button>
+                    </div>
+                </form>
             </Modal>
         </BackOfficeLayout>
     );

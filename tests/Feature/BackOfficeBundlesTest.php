@@ -142,4 +142,38 @@ class BackOfficeBundlesTest extends TestCase
         $response->assertSessionHasErrors('items');
         $this->assertDatabaseMissing('bundles', ['name' => 'Empty Combo']);
     }
+
+    public function test_index_and_edits_are_scoped_to_the_current_tenant(): void
+    {
+        $otherTenantId = 'tenant-bundles-other';
+        Tenant::create(['id' => $otherTenantId, 'business_name' => $otherTenantId, 'owner_email' => $otherTenantId.'@example.com', 'pairing_code' => 'ZZZZZZ']);
+        $foreignBundleId = (string) Str::uuid();
+        Bundle::create(['id' => $foreignBundleId, 'business_id' => $otherTenantId, 'name' => 'Not Yours', 'is_active' => true]);
+        $foreignProduct = $this->createCatalogItem($otherTenantId, 'Their Product', 'product');
+
+        $tenantId = 'tenant-bundles-4';
+        $this->actingBackOfficeSession($tenantId);
+        $myProduct = $this->createCatalogItem($tenantId, 'My Product', 'product');
+        Bundle::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'My Combo', 'is_active' => true]);
+
+        $response = $this->get('/office/combos');
+        $response->assertOk();
+
+        $names = collect($response->viewData('page')['props']['bundles'])->pluck('name');
+        $this->assertContains('My Combo', $names);
+        $this->assertNotContains('Not Yours', $names);
+
+        $catalogIds = collect($response->viewData('page')['props']['catalog'])->pluck('id');
+        $this->assertContains($myProduct->id, $catalogIds);
+        $this->assertNotContains($foreignProduct->id, $catalogIds);
+
+        $this->put("/office/combos/{$foreignBundleId}", [
+            'name' => 'Hijacked',
+            'items' => [['product_id' => $myProduct->id, 'quantity' => 1]],
+        ])->assertNotFound();
+
+        $this->patch("/office/combos/{$foreignBundleId}/toggle-active")->assertNotFound();
+
+        $this->assertDatabaseHas('bundles', ['id' => $foreignBundleId, 'name' => 'Not Yours', 'is_active' => true]);
+    }
 }

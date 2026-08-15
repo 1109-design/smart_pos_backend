@@ -93,6 +93,8 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::post('products', [BackOfficeProducts::class, 'store'])->name('products.store');
         Route::put('products/{product}', [BackOfficeProducts::class, 'update'])->name('products.update');
         Route::patch('products/{product}/toggle-active', [BackOfficeProducts::class, 'toggleActive'])->name('products.toggle-active');
+        Route::get('products/import/template', [BackOfficeProducts::class, 'template'])->name('products.import.template');
+        Route::post('products/import', [BackOfficeProducts::class, 'import'])->name('products.import');
         Route::post('categories', [BackOfficeCategories::class, 'store'])->name('categories.store');
         Route::put('categories/{category}', [BackOfficeCategories::class, 'update'])->name('categories.update');
         Route::patch('categories/{category}/toggle-active', [BackOfficeCategories::class, 'toggleActive'])->name('categories.toggle-active');
