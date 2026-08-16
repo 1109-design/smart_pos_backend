@@ -6,6 +6,8 @@ use App\Models\Bundle;
 use App\Models\BundleItem;
 use App\Models\Business;
 use App\Models\Category;
+use App\Models\ChangeOwedLedger;
+use App\Models\ContainerDepositLedger;
 use App\Models\Coupon;
 use App\Models\CreditTransaction;
 use App\Models\Currency;
@@ -18,6 +20,7 @@ use App\Models\LoyaltyTransaction;
 use App\Models\Payment;
 use App\Models\PoAuditLog;
 use App\Models\Product;
+use App\Models\ProductContainerLink;
 use App\Models\ProductStock;
 use App\Models\ProductTaxRate;
 use App\Models\ProductVariant;
@@ -49,6 +52,7 @@ class SyncProcessor
     private const IMMUTABLE = [
         'stock_movements', 'loyalty_transactions', 'credit_transactions',
         'transaction_items', 'transaction_taxes', 'payments', 'po_audit_logs',
+        'container_deposit_ledger', 'change_owed_ledger',
     ];
 
     // Tables with their own business_id column, guarded in assertOwnership().
@@ -77,6 +81,8 @@ class SyncProcessor
         'products' => Product::class,
         'stock_transfers' => StockTransfer::class,
         'users' => User::class,
+        'container_deposit_ledger' => ContainerDepositLedger::class,
+        'change_owed_ledger' => ChangeOwedLedger::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -88,6 +94,7 @@ class SyncProcessor
         'product_variant_stock' => [ProductVariantStock::class, 'variant_id'],
         'stock_transfer_items' => [StockTransferItem::class, 'stock_transfer_id'],
         'bundle_items' => [BundleItem::class, 'bundle_id'],
+        'product_container_links' => [ProductContainerLink::class, 'beverage_product_id'],
         'transaction_items' => [TransactionItem::class, 'transaction_id'],
         'transaction_taxes' => [TransactionTax::class, 'transaction_id'],
         'payments' => [Payment::class, 'transaction_id'],
@@ -200,6 +207,7 @@ class SyncProcessor
                 ->value('products.business_id'),
             'stock_transfer_items' => StockTransfer::where('id', $parentId)->value('business_id'),
             'bundle_items' => Bundle::where('id', $parentId)->value('business_id'),
+            'product_container_links' => Product::where('id', $parentId)->value('business_id'),
             'transaction_items', 'transaction_taxes', 'payments' => Transaction::where('id', $parentId)->value('business_id'),
             'loyalty_transactions', 'credit_transactions' => Customer::where('id', $parentId)->value('business_id'),
             'purchase_order_items', 'po_audit_logs' => PurchaseOrder::where('id', $parentId)->value('business_id'),
@@ -410,6 +418,7 @@ class SyncProcessor
                         'min_price' => $payload['min_price'] ?? null,
                         'discount_percent' => $payload['discount_percent'] ?? null,
                         'cost_price' => $payload['cost_price'] ?? 0,
+                        'deposit_amount' => $payload['deposit_amount'] ?? null,
                         'unit' => $payload['unit'] ?? 'piece',
                         'track_stock' => $payload['track_stock'] ?? true,
                         // stock_quantity is accepted from payload for initial setup.
@@ -459,6 +468,17 @@ class SyncProcessor
                         'product_id' => $payload['product_id'] ?? null,
                         'quantity' => $payload['quantity'] ?? 1,
                         'sort_order' => $payload['sort_order'] ?? 0,
+                    ]
+                );
+                break;
+
+            case 'product_container_links':
+                ProductContainerLink::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'beverage_product_id' => $payload['beverage_product_id'] ?? null,
+                        'container_product_id' => $payload['container_product_id'] ?? null,
+                        'quantity_per_unit' => $payload['quantity_per_unit'] ?? 1,
                     ]
                 );
                 break;
@@ -525,6 +545,7 @@ class SyncProcessor
                     'subtotal' => $payload['subtotal'] ?? 0,
                     'tax_total' => $payload['tax_total'] ?? 0,
                     'discount_total' => $payload['discount_total'] ?? 0,
+                    'deposit_total' => $payload['deposit_total'] ?? 0,
                     'total' => $payload['total'] ?? 0,
                     'base_currency' => $payload['base_currency'] ?? 'USD',
                     'status' => $payload['status'] ?? 'completed',
@@ -659,6 +680,49 @@ class SyncProcessor
                 if (! empty($payload['customer_id'])) {
                     $this->recomputeCustomerBalances($payload['customer_id']);
                 }
+                break;
+
+            case 'container_deposit_ledger':
+                // No denormalized balance to recompute — outstanding
+                // containers and deposit liability are always derived live
+                // from SUM() over this ledger by the reporting screen, so
+                // there's nothing here that can drift out of sync.
+                ContainerDepositLedger::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'container_product_id' => $payload['container_product_id'] ?? null,
+                        'transaction_id' => $payload['transaction_id'] ?? null,
+                        'quantity' => $payload['quantity'] ?? 0,
+                        'deposit_amount_per_unit' => $payload['deposit_amount_per_unit'] ?? 0,
+                        'type' => $payload['type'] ?? 'issue',
+                        'refund_method' => $payload['refund_method'] ?? null,
+                        'reason' => $payload['reason'] ?? null,
+                        'user_id' => $payload['user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'change_owed_ledger':
+                // Same convention as container_deposit_ledger: outstanding
+                // owed change is always derived live via SUM() over this
+                // ledger, grouped by transaction_id — nothing here to drift.
+                ChangeOwedLedger::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'transaction_id' => $payload['transaction_id'] ?? null,
+                        'amount' => $payload['amount'] ?? 0,
+                        'currency_code' => $payload['currency_code'] ?? '',
+                        'type' => $payload['type'] ?? 'issue',
+                        'reason' => $payload['reason'] ?? null,
+                        'user_id' => $payload['user_id'] ?? null,
+                    ]
+                );
                 break;
 
             case 'suppliers':
@@ -1053,6 +1117,7 @@ class SyncProcessor
             'products' => Product::class,
             'bundles' => Bundle::class,
             'bundle_items' => BundleItem::class,
+            'product_container_links' => ProductContainerLink::class,
             'product_variants' => ProductVariant::class,
             'customers' => Customer::class,
             'transactions' => Transaction::class,
