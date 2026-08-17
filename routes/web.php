@@ -8,6 +8,7 @@ use App\Http\Controllers\BackOffice\LocationsController as BackOfficeLocations;
 use App\Http\Controllers\BackOffice\ProductsController as BackOfficeProducts;
 use App\Http\Controllers\BackOffice\ReportsController as BackOfficeReports;
 use App\Http\Controllers\BackOffice\SessionController as BackOfficeSession;
+use App\Http\Controllers\BackOffice\SettingsController as BackOfficeSettings;
 use App\Http\Controllers\BackOffice\ShiftsController as BackOfficeShifts;
 use App\Http\Controllers\BackOffice\TransactionsController as BackOfficeTransactions;
 use App\Http\Controllers\BackOffice\TransfersController as BackOfficeTransfers;
@@ -123,6 +124,8 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::post('transfers/{transfer}/dispatch', [BackOfficeTransfers::class, 'dispatch'])->name('transfers.dispatch');
         Route::post('transfers/{transfer}/receive', [BackOfficeTransfers::class, 'receive'])->name('transfers.receive');
         Route::post('transfers/{transfer}/cancel', [BackOfficeTransfers::class, 'cancel'])->name('transfers.cancel');
+        Route::get('settings', [BackOfficeSettings::class, 'edit'])->name('settings.edit');
+        Route::post('settings/reset-stock', [BackOfficeSettings::class, 'resetStock'])->name('settings.reset-stock');
     });
 });
 

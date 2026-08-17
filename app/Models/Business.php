@@ -21,10 +21,13 @@ class Business extends Model
         'logo_path',
         'metadata',
         'fiscalisation_enabled',
+        'stock_reset_at',
+        'stock_reset_by_user_id',
     ];
 
     protected $casts = [
         'metadata' => 'array',
         'fiscalisation_enabled' => 'boolean',
+        'stock_reset_at' => 'datetime',
     ];
 }
