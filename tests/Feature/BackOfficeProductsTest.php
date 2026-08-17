@@ -5,11 +5,13 @@ namespace Tests\Feature;
 use App\Http\Middleware\AuthenticateBackOfficeUser;
 use App\Models\Category;
 use App\Models\Device;
+use App\Models\Location;
 use App\Models\Product;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Services\SyncProcessor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Str;
@@ -80,6 +82,56 @@ class BackOfficeProductsTest extends TestCase
             'record_uuid' => $product->id,
             'device_id' => null,
         ]);
+    }
+
+    public function test_opening_stock_is_attributed_to_the_chosen_location(): void
+    {
+        $tenantId = 'tenant-office-prod-loc-1';
+        $this->actingBackOfficeSession($tenantId);
+
+        // Visiting the index seeds the default "Main" location, mirroring the
+        // real page flow the create form's default location_id comes from.
+        $this->get('/office/products');
+        $mainLocation = Location::where('business_id', $tenantId)->firstOrFail();
+
+        $secondLocation = Location::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'Branch',
+            'type' => 'shop',
+            'is_active' => true,
+        ]);
+
+        $response = $this->post('/office/products', [
+            'name' => 'Located Cola 500ml',
+            'item_type' => 'product',
+            'price' => 1.50,
+            'stock_quantity' => 12,
+            'track_stock' => true,
+            'location_id' => $secondLocation->id,
+        ]);
+        $response->assertRedirect();
+
+        $product = Product::where('name', 'Located Cola 500ml')->firstOrFail();
+
+        $this->assertDatabaseHas('stock_movements', [
+            'product_id' => $product->id,
+            'type' => 'opening_stock',
+            'location_id' => $secondLocation->id,
+            'quantity_change' => 12,
+        ]);
+        $this->assertDatabaseHas('product_stock', [
+            'product_id' => $product->id,
+            'location_id' => $secondLocation->id,
+            'quantity' => 12,
+        ]);
+        $this->assertDatabaseMissing('product_stock', [
+            'product_id' => $product->id,
+            'location_id' => $mainLocation->id,
+        ]);
+
+        // Flat total stays the single source of truth for the Products list.
+        $this->assertSame('12.0000', $product->fresh()->stock_quantity);
     }
 
     public function test_portal_created_service_has_no_stock_or_ledger_entry(): void
@@ -340,6 +392,67 @@ class BackOfficeProductsTest extends TestCase
 
         $this->post('/office/products/import', ['file' => $file])
             ->assertSessionHasErrors('file');
+    }
+
+    public function test_index_shows_stock_split_by_location_when_business_has_more_than_one(): void
+    {
+        $tenantId = 'tenant-office-prod-locations';
+        $this->actingBackOfficeSession($tenantId);
+
+        $downtown = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Downtown']);
+        $mall = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Mall']);
+
+        $this->post('/office/products', [
+            'name' => 'Split Stock Item',
+            'item_type' => 'product',
+            'price' => 2,
+            'stock_quantity' => 10,
+            'track_stock' => true,
+            'location_id' => $downtown->id,
+        ])->assertRedirect();
+
+        $product = Product::where('name', 'Split Stock Item')->firstOrFail();
+
+        // A second opening batch at the Mall branch — same product, seeded
+        // from that till's own "Stock By Location" field, which pushes its
+        // own opening_stock movement (see product_form_screen.dart).
+        app(SyncProcessor::class)->process('stock_movements', (string) Str::uuid(), 'upsert', [
+            'business_id' => $tenantId,
+            'location_id' => $mall->id,
+            'product_id' => $product->id,
+            'type' => 'opening_stock',
+            'quantity_change' => 6,
+        ]);
+
+        $response = $this->get('/office/products');
+
+        $response->assertOk();
+        $response->assertInertia(fn ($page) => $page
+            ->where('products.data.0.name', 'Split Stock Item')
+            ->has('products.data.0.stock_by_location', 2)
+        );
+    }
+
+    public function test_index_omits_stock_split_for_single_location_businesses(): void
+    {
+        $tenantId = 'tenant-office-prod-single-location';
+        $this->actingBackOfficeSession($tenantId);
+
+        $this->post('/office/products', [
+            'name' => 'Single Location Item',
+            'item_type' => 'product',
+            'price' => 2,
+            'stock_quantity' => 10,
+            'track_stock' => true,
+        ])->assertRedirect();
+
+        $response = $this->get('/office/products');
+
+        $response->assertOk();
+        $response->assertInertia(fn ($page) => $page
+            ->where('products.data.0.name', 'Single Location Item')
+            ->missing('products.data.0.stock_by_location')
+        );
     }
 
     public function test_template_download_has_the_expected_headers(): void

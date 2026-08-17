@@ -3,12 +3,17 @@
 namespace App\Services;
 
 use App\Models\Location;
+use App\Models\Product;
 use App\Models\ProductStock;
+use App\Models\SyncRecord;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class LocationService
 {
+    public function __construct(private readonly SyncProcessor $processor) {}
+
     /**
      * Get or initialise the per-location stock row for a product.
      */
@@ -179,5 +184,103 @@ class LocationService
             ->where('is_active', true)
             ->orderBy('name')
             ->get();
+    }
+
+    /**
+     * Guarantee a business has at least one location. Businesses created
+     * before multi-location support existed (or whose owner never opened the
+     * till's location settings) get a single "Main" location seeded here the
+     * first time any location-aware BackOffice screen loads, with every
+     * existing product's flat stock_quantity snapshotted into it so nothing
+     * looks like it lost stock the moment locations become visible.
+     */
+    public function ensureDefaultLocation(string $businessId): Location
+    {
+        $existing = Location::where('business_id', $businessId)->orderBy('created_at')->first();
+        if ($existing) {
+            return $existing;
+        }
+
+        return DB::transaction(function () use ($businessId) {
+            $location = Location::create([
+                'id' => (string) Str::uuid(),
+                'business_id' => $businessId,
+                'name' => 'Main',
+                'type' => 'warehouse',
+                'can_sell' => true,
+                'can_receive' => true,
+                'is_active' => true,
+            ]);
+
+            SyncRecord::create([
+                'business_id' => $businessId,
+                'table_name' => 'locations',
+                'record_uuid' => $location->id,
+                'operation' => 'upsert',
+                'payload' => $location->only([
+                    'id', 'business_id', 'parent_id', 'name', 'type',
+                    'address', 'phone', 'email', 'can_sell', 'can_receive', 'is_active',
+                ]),
+                'source_updated_at' => now(),
+                'synced_at' => now(),
+            ]);
+
+            $this->backfillFlatStock($businessId, $location->id);
+
+            return $location;
+        });
+    }
+
+    /**
+     * Snapshot every stock-tracked product's current flat stock_quantity into
+     * the new default location's product_stock row. This deliberately writes
+     * product_stock directly rather than through a stock_movements ledger
+     * entry: a product with prior (location-less) movement history already
+     * has that quantity counted in the ledger sum, so replaying it as a new
+     * movement here would double it. This is a one-time opening snapshot, not
+     * a transaction.
+     */
+    private function backfillFlatStock(string $businessId, string $locationId): void
+    {
+        Product::where('business_id', $businessId)
+            ->where('track_stock', true)
+            ->chunkById(200, function ($products) use ($locationId, $businessId) {
+                foreach ($products as $product) {
+                    // No 'id' in the update values: this row is brand new (fresh
+                    // location), but updateOrCreate must never be handed a key that
+                    // would overwrite an existing row's primary key on match.
+                    ProductStock::updateOrCreate(
+                        ['product_id' => $product->id, 'location_id' => $locationId],
+                        ['quantity' => (float) $product->stock_quantity]
+                    );
+                    $this->publishStock($product->id, $locationId, $businessId);
+                }
+            });
+    }
+
+    /** Broadcast a location's current product_stock row to every device. */
+    public function publishStock(string $productId, string $locationId, string $businessId): void
+    {
+        $stock = $this->getStock($productId, $locationId);
+
+        $payload = [
+            'business_id' => $businessId,
+            'product_id' => $stock->product_id,
+            'location_id' => $stock->location_id,
+            'quantity' => (float) $stock->quantity,
+            'reserved_quantity' => (float) $stock->reserved_quantity,
+        ];
+
+        $this->processor->process('product_stock', $stock->id, 'upsert', $payload);
+
+        SyncRecord::create([
+            'business_id' => $businessId,
+            'table_name' => 'product_stock',
+            'record_uuid' => $stock->id,
+            'operation' => 'upsert',
+            'payload' => $payload,
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+        ]);
     }
 }

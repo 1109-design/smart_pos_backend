@@ -434,9 +434,13 @@ class SyncProcessor
                 // First time this product is created with an opening quantity: give it
                 // a ledger entry, same as every other stock change, so take-on has an
                 // audit trail instead of being a bare column write nothing can trace.
+                // An optional location_id (set by location-aware callers, e.g. the
+                // BackOffice create form) attributes the opening quantity to that
+                // location too, instead of leaving it in the flat total only.
                 if (! $productExisted && $openingStock != 0) {
                     StockMovement::create([
                         'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
                         'product_id' => $uuid,
                         'type' => 'opening_stock',
                         'quantity_change' => $openingStock,
@@ -447,6 +451,9 @@ class SyncProcessor
                 // If any movements exist for this product, recompute from the ledger
                 // so concurrent pushes from multiple devices converge correctly.
                 $this->recomputeProductStock($uuid);
+                if (! empty($payload['location_id'])) {
+                    $this->recomputeLocationStock($uuid, $payload['location_id']);
+                }
                 break;
 
             case 'bundles':

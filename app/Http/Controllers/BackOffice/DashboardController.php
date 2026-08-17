@@ -19,42 +19,49 @@ class DashboardController extends Controller
     {
         $session = session('backoffice');
         $currency = $session['currency_code'] ?? 'USD';
+        $tenantId = $this->tenantId();
 
         $today = now()->startOfDay();
         $weekStart = now()->startOfWeek();
         $monthStart = now()->startOfMonth();
 
         // ── Today's stats ─────────────────────────────────────────────
-        $todayTransactions = Transaction::where('status', 'completed')
+        $todayTransactions = Transaction::where('business_id', $tenantId)
+            ->where('status', 'completed')
             ->where('created_at', '>=', $today)
             ->selectRaw('COUNT(*) as count, COALESCE(SUM(total), 0) as revenue')
             ->first();
 
         // ── This week ─────────────────────────────────────────────────
-        $weekRevenue = Transaction::where('status', 'completed')
+        $weekRevenue = Transaction::where('business_id', $tenantId)
+            ->where('status', 'completed')
             ->where('created_at', '>=', $weekStart)
             ->sum('total');
 
         // ── This month ────────────────────────────────────────────────
-        $monthRevenue = Transaction::where('status', 'completed')
+        $monthRevenue = Transaction::where('business_id', $tenantId)
+            ->where('status', 'completed')
             ->where('created_at', '>=', $monthStart)
             ->sum('total');
 
-        $monthCount = Transaction::where('status', 'completed')
+        $monthCount = Transaction::where('business_id', $tenantId)
+            ->where('status', 'completed')
             ->where('created_at', '>=', $monthStart)
             ->count();
 
         // ── Customer count ────────────────────────────────────────────
-        $customerCount = Customer::count();
+        $customerCount = Customer::where('business_id', $tenantId)->count();
 
         // ── Low stock products ────────────────────────────────────────
-        $lowStockCount = Product::where('track_stock', true)
+        $lowStockCount = Product::where('business_id', $tenantId)
+            ->where('track_stock', true)
             ->whereColumn('stock_quantity', '<=', 'low_stock_threshold')
             ->where('is_active', true)
             ->count();
 
         // ── Payment method breakdown (this month) ─────────────────────
         $paymentBreakdown = Payment::join('transactions', 'payments.transaction_id', '=', 'transactions.id')
+            ->where('transactions.business_id', $tenantId)
             ->where('transactions.status', 'completed')
             ->where('transactions.created_at', '>=', $monthStart)
             ->selectRaw('payments.method, COUNT(*) as count, COALESCE(SUM(payments.base_equivalent), 0) as total')
@@ -65,6 +72,7 @@ class DashboardController extends Controller
         // ── Top 5 products this month ─────────────────────────────────
         $topProducts = TransactionItem::join('transactions', 'transaction_items.transaction_id', '=', 'transactions.id')
             ->join('products', 'transaction_items.product_id', '=', 'products.id')
+            ->where('transactions.business_id', $tenantId)
             ->where('transactions.status', 'completed')
             ->where('transactions.created_at', '>=', $monthStart)
             ->selectRaw('products.name, SUM(transaction_items.quantity) as units_sold, COALESCE(SUM(transaction_items.line_total), 0) as revenue')
@@ -74,7 +82,8 @@ class DashboardController extends Controller
             ->get();
 
         // ── Revenue last 7 days ───────────────────────────────────────
-        $last7Days = Transaction::where('status', 'completed')
+        $last7Days = Transaction::where('business_id', $tenantId)
+            ->where('status', 'completed')
             ->where('created_at', '>=', now()->subDays(6)->startOfDay())
             ->selectRaw('DATE(created_at) as date, COALESCE(SUM(total), 0) as revenue, COUNT(*) as count')
             ->groupByRaw('DATE(created_at)')
@@ -96,13 +105,15 @@ class DashboardController extends Controller
         }
 
         // ── Recent transactions ───────────────────────────────────────
-        $recentTransactions = Transaction::where('status', 'completed')
+        $recentTransactions = Transaction::where('business_id', $tenantId)
+            ->where('status', 'completed')
             ->orderByDesc('created_at')
             ->limit(8)
             ->get(['id', 'sale_number', 'total', 'base_currency', 'created_at']);
 
         // ── Active shift ──────────────────────────────────────────────
-        $activeShift = Shift::where('status', 'open')
+        $activeShift = Shift::where('business_id', $tenantId)
+            ->where('status', 'open')
             ->orderByDesc('opened_at')
             ->first(['id', 'opened_at', 'opening_float', 'transaction_count']);
 
@@ -123,5 +134,10 @@ class DashboardController extends Controller
             'active_shift' => $activeShift,
             'currency' => $currency,
         ]);
+    }
+
+    private function tenantId(): ?string
+    {
+        return session('backoffice')['tenant_id'] ?? null;
     }
 }

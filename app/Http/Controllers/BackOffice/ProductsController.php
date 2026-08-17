@@ -5,9 +5,12 @@ namespace App\Http\Controllers\BackOffice;
 use App\Http\Controllers\Controller;
 use App\Models\Category;
 use App\Models\Device;
+use App\Models\Location;
 use App\Models\Product;
+use App\Models\ProductStock;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
+use App\Services\LocationService;
 use App\Services\SyncProcessor;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -15,6 +18,7 @@ use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Inertia\Inertia;
 use Inertia\Response;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -29,11 +33,16 @@ class ProductsController extends Controller
 
     private const IMPORT_ROW_LIMIT = 2000;
 
-    public function index(Request $request): Response
+    public function index(Request $request, LocationService $locations): Response
     {
         $typeFilter = $request->string('type')->toString();
         $search = $request->string('search')->toString();
         $tenantId = $this->tenantId();
+
+        // Guarantees a location exists so the create form always has
+        // somewhere to put opening stock, even for businesses that never
+        // touched multi-location settings.
+        $defaultLocation = $locations->ensureDefaultLocation($tenantId);
 
         $products = Product::query()
             ->where('business_id', $tenantId)
@@ -55,11 +64,62 @@ class ProductsController extends Controller
 
         $this->attachSyncStatus($products);
 
+        $activeLocations = Location::where('business_id', $tenantId)->where('is_active', true)->orderBy('name')->get(['id', 'name', 'type']);
+
+        // Only worth the query for businesses actually using more than one
+        // location — a single-location business's flat stock_quantity
+        // already tells the whole story.
+        if ($activeLocations->count() > 1) {
+            $this->attachLocationStock($products);
+        }
+
         return Inertia::render('BackOffice/Products', [
             'products' => $products,
             'categories' => Category::where('business_id', $tenantId)->orderBy('name')->get(['id', 'name', 'is_active']),
+            'locations' => $activeLocations,
+            'default_location_id' => $defaultLocation->id,
             'filters' => ['type' => $typeFilter ?: 'all', 'search' => $search],
         ]);
+    }
+
+    /**
+     * Attach each product's per-location stock split (from the `product_stock`
+     * ledger view) so the owner can see where inventory actually sits instead
+     * of only the flat cross-location total. Locations a product has never had
+     * a ledger entry at (e.g. created before multi-location, or before its
+     * first stock movement at that location) simply don't appear.
+     */
+    private function attachLocationStock(LengthAwarePaginator $products): void
+    {
+        $productIds = $products->getCollection()
+            ->filter(fn (Product $product) => $product->item_type !== 'service' && $product->track_stock)
+            ->pluck('id');
+
+        if ($productIds->isEmpty()) {
+            return;
+        }
+
+        $rows = ProductStock::whereIn('product_id', $productIds)
+            ->join('locations', 'product_stock.location_id', '=', 'locations.id')
+            ->orderBy('locations.name')
+            ->get([
+                'product_stock.product_id', 'product_stock.location_id', 'product_stock.quantity',
+                'product_stock.reserved_quantity', 'locations.name as location_name',
+            ])
+            ->groupBy('product_id');
+
+        $products->getCollection()->transform(function (Product $product) use ($rows) {
+            $product->stock_by_location = ($rows->get($product->id) ?? collect())
+                ->map(fn ($row) => [
+                    'location_id' => $row->location_id,
+                    'location_name' => $row->location_name,
+                    'quantity' => (float) $row->quantity,
+                    'reserved_quantity' => (float) $row->reserved_quantity,
+                ])
+                ->values();
+
+            return $product;
+        });
     }
 
     /** A ready-to-fill CSV: header row + two worked examples (product and service). */
@@ -86,13 +146,19 @@ class ProductsController extends Controller
      * a new item. Every write goes through the same sync pipeline as the
      * manual form, so devices pick it up on their next pull.
      */
-    public function import(Request $request, SyncProcessor $processor): RedirectResponse
+    public function import(Request $request, SyncProcessor $processor, LocationService $locations): RedirectResponse
     {
+        $tenantId = $this->tenantId();
+
         $request->validate([
             'file' => ['required', 'file', 'mimes:csv,txt', 'max:5120'],
+            'location_id' => ['nullable', 'string', Rule::exists('locations', 'id')->where('business_id', $tenantId)],
         ]);
 
-        $tenantId = $this->tenantId();
+        // The whole file lands at one location — the owner picks it in the
+        // import dialog (defaulting to the business's default location) since
+        // a CSV row has no natural place to carry that per-item.
+        $locationId = $request->string('location_id')->toString() ?: $locations->ensureDefaultLocation($tenantId)->id;
 
         $handle = fopen($request->file('file')->getRealPath(), 'r');
         $header = $handle ? fgetcsv($handle) : false;
@@ -195,6 +261,7 @@ class ProductsController extends Controller
                 $updated++;
             } else {
                 $payload['stock_quantity'] = $isService ? 0 : ($valid['stock_quantity'] ?? 0);
+                $payload['location_id'] = $isService ? null : $locationId;
                 $payload['is_active'] = true;
                 $this->applyThroughSyncPipeline($processor, (string) Str::uuid(), $payload);
                 $created++;
@@ -283,9 +350,16 @@ class ProductsController extends Controller
         return $lastPulled && $lastPulled->greaterThanOrEqualTo($sync->synced_at);
     }
 
-    public function store(Request $request, SyncProcessor $processor): RedirectResponse
+    public function store(Request $request, SyncProcessor $processor, LocationService $locations): RedirectResponse
     {
         $data = $this->validatePayload($request);
+
+        // Opening stock has to land somewhere. If the form didn't specify a
+        // location (or this is a service, where it's moot), fall back to the
+        // business's default rather than leaving it unattributed.
+        if ($data['track_stock'] && empty($data['location_id'])) {
+            $data['location_id'] = $locations->ensureDefaultLocation($this->tenantId())->id;
+        }
 
         $this->applyThroughSyncPipeline($processor, (string) Str::uuid(), $data);
 
@@ -354,6 +428,7 @@ class ProductsController extends Controller
             'track_stock' => ['boolean'],
             'stock_quantity' => ['nullable', 'numeric', 'min:0'],
             'low_stock_threshold' => ['nullable', 'numeric', 'min:0'],
+            'location_id' => ['nullable', 'string', Rule::exists('locations', 'id')->where('business_id', $this->tenantId())],
             'is_active' => ['boolean'],
         ]);
 
@@ -371,6 +446,9 @@ class ProductsController extends Controller
             'track_stock' => $isService ? false : ($validated['track_stock'] ?? true),
             'stock_quantity' => $isService ? 0 : ($validated['stock_quantity'] ?? 0),
             'low_stock_threshold' => $validated['low_stock_threshold'] ?? 5,
+            // Only meaningful on create — see store(); update() leaves stock
+            // untouched and never sends this field.
+            'location_id' => $isService ? null : ($validated['location_id'] ?? null),
             'is_active' => $validated['is_active'] ?? true,
         ];
     }

@@ -109,4 +109,47 @@ class BackOfficeTransactionsTest extends TestCase
             ->where('transactions.data.0.fiscal_status', 'pending')
         );
     }
+
+    public function test_transactions_from_other_businesses_are_not_shown(): void
+    {
+        $tenantId = 'tenant-office-tx-mine';
+        $user = $this->actingBackOfficeSession($tenantId);
+
+        Transaction::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'user_id' => $user->id,
+            'subtotal' => 10,
+            'total' => 10,
+            'tax_total' => 0,
+            'base_currency' => 'USD',
+            'status' => 'completed',
+            'sale_number' => '202607-MINE-1',
+        ]);
+
+        $otherTenantId = 'tenant-office-tx-other';
+        Tenant::create(['id' => $otherTenantId, 'business_name' => $otherTenantId, 'owner_email' => $otherTenantId.'@example.com', 'pairing_code' => '654321']);
+        $otherUser = User::factory()->create(['id' => (string) Str::uuid(), 'business_id' => $otherTenantId]);
+
+        Transaction::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $otherTenantId,
+            'user_id' => $otherUser->id,
+            'subtotal' => 999,
+            'total' => 999,
+            'tax_total' => 0,
+            'base_currency' => 'USD',
+            'status' => 'completed',
+            'sale_number' => '202607-OTHER-1',
+        ]);
+
+        $response = $this->get('/office/transactions');
+
+        $response->assertOk();
+        $response->assertInertia(fn ($page) => $page
+            ->has('transactions.data', 1)
+            ->where('transactions.data.0.sale_number', '202607-MINE-1')
+            ->where('fiscal_summary.total', fn ($value) => (int) $value === 1)
+        );
+    }
 }

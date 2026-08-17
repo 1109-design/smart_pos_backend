@@ -48,11 +48,32 @@ const IconBox = () => (
     </svg>
 );
 
+const IconClock = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+        <path fillRule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm.75-13a.75.75 0 0 0-1.5 0v5c0 .414.336.75.75.75h4a.75.75 0 0 0 0-1.5h-3.25V5Z" clipRule="evenodd" />
+    </svg>
+);
+
+const IconMapPin = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+        <path fillRule="evenodd" d="M9.69 18.933a.75.75 0 0 0 .62 0c.061-.027 5.44-2.503 8.157-6.803A6.66 6.66 0 0 0 19.5 8.5a9.5 9.5 0 1 0-19 0 6.66 6.66 0 0 0 1.033 3.63c2.717 4.3 8.096 6.776 8.157 6.803ZM10 11.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" clipRule="evenodd" />
+    </svg>
+);
+
+const IconTruck = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+        <path d="M8.5 4.5a2.5 2.5 0 0 0-2.5 2.5v.5H2.75a.75.75 0 0 0 0 1.5H6v3H2.75a.75.75 0 0 0 0 1.5h.564a2.5 2.5 0 0 0 4.872 0h3.628a2.5 2.5 0 0 0 4.872 0H17a1 1 0 0 0 1-1v-2.382a1 1 0 0 0-.211-.615l-1.5-1.882a1 1 0 0 0-.782-.377H14V7A2.5 2.5 0 0 0 11.5 4.5h-3ZM5.5 14.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2Zm8.5 0a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z" />
+    </svg>
+);
+
 const ALL_NAV = [
     { label: 'Dashboard',    href: '/office/dashboard',    Icon: IconChart,          roles: null },
     { label: 'Transactions', href: '/office/transactions', Icon: IconReceipt,        roles: null },
+    { label: 'Shifts',       href: '/office/shifts',       Icon: IconClock,          roles: null },
     { label: 'Products',     href: '/office/products',     Icon: IconBox,            roles: ['business_owner', 'manager'] },
     { label: 'Combos',       href: '/office/combos',       Icon: IconBox,            roles: ['business_owner', 'manager'] },
+    { label: 'Transfers',    href: '/office/transfers',    Icon: IconTruck,          roles: ['business_owner', 'manager'] },
+    { label: 'Locations',    href: '/office/locations',    Icon: IconMapPin,         roles: ['business_owner', 'manager'] },
     { label: 'Reports',      href: '/office/reports',      Icon: IconDocumentReport, roles: null },
     { label: 'Users',        href: '/office/users',        Icon: IconUsers,          roles: ['business_owner', 'manager'] },
 ];

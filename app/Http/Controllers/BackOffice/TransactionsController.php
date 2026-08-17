@@ -17,6 +17,7 @@ class TransactionsController extends Controller
     {
         $session = session('backoffice');
         $currency = $session['currency_code'] ?? 'USD';
+        $tenantId = $this->tenantId();
 
         $from = $request->date('from', 'Y-m-d') ?? now()->subDays(6)->toDateString();
         $to = $request->date('to', 'Y-m-d') ?? now()->toDateString();
@@ -27,6 +28,7 @@ class TransactionsController extends Controller
 
         $transactions = Transaction::query()
             ->leftJoin('users', 'transactions.user_id', '=', 'users.id')
+            ->where('transactions.business_id', $tenantId)
             ->whereBetween('transactions.created_at', [$fromStart, $toEnd])
             ->when($fiscalFilter !== '' && $fiscalFilter !== 'all', function ($query) use ($fiscalFilter) {
                 if ($fiscalFilter === 'none') {
@@ -74,7 +76,8 @@ class TransactionsController extends Controller
             return $transaction;
         });
 
-        $fiscalSummary = Transaction::whereBetween('created_at', [$fromStart, $toEnd])
+        $fiscalSummary = Transaction::where('business_id', $tenantId)
+            ->whereBetween('created_at', [$fromStart, $toEnd])
             ->selectRaw("
                 COUNT(*) as total,
                 SUM(CASE WHEN fiscal_status = 'fiscalised' THEN 1 ELSE 0 END) as fiscalised,
@@ -89,5 +92,10 @@ class TransactionsController extends Controller
             'currency' => $currency,
             'filters' => ['from' => $from, 'to' => $to, 'fiscal' => $fiscalFilter ?: 'all'],
         ]);
+    }
+
+    private function tenantId(): ?string
+    {
+        return session('backoffice')['tenant_id'] ?? null;
     }
 }

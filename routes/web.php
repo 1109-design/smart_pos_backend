@@ -4,10 +4,13 @@ use App\Http\Controllers\ActivationCodeController;
 use App\Http\Controllers\BackOffice\BundlesController as BackOfficeBundles;
 use App\Http\Controllers\BackOffice\CategoriesController as BackOfficeCategories;
 use App\Http\Controllers\BackOffice\DashboardController as BackOfficeDashboard;
+use App\Http\Controllers\BackOffice\LocationsController as BackOfficeLocations;
 use App\Http\Controllers\BackOffice\ProductsController as BackOfficeProducts;
 use App\Http\Controllers\BackOffice\ReportsController as BackOfficeReports;
 use App\Http\Controllers\BackOffice\SessionController as BackOfficeSession;
+use App\Http\Controllers\BackOffice\ShiftsController as BackOfficeShifts;
 use App\Http\Controllers\BackOffice\TransactionsController as BackOfficeTransactions;
+use App\Http\Controllers\BackOffice\TransfersController as BackOfficeTransfers;
 use App\Http\Controllers\BackOffice\UsersController as BackOfficeUsers;
 use App\Http\Controllers\BusinessController;
 use App\Http\Controllers\DashboardController;
@@ -91,6 +94,7 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::get('dashboard', BackOfficeDashboard::class)->name('dashboard');
         Route::get('reports', BackOfficeReports::class)->name('reports');
         Route::get('transactions', BackOfficeTransactions::class)->name('transactions');
+        Route::get('shifts', BackOfficeShifts::class)->name('shifts');
         Route::get('products', [BackOfficeProducts::class, 'index'])->name('products.index');
         Route::post('products', [BackOfficeProducts::class, 'store'])->name('products.store');
         Route::put('products/{product}', [BackOfficeProducts::class, 'update'])->name('products.update');
@@ -109,6 +113,16 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::put('users/{user}', [BackOfficeUsers::class, 'update'])->name('users.update');
         Route::put('users/{user}/password', [BackOfficeUsers::class, 'changePassword'])->name('users.change-password');
         Route::patch('users/{user}/toggle-active', [BackOfficeUsers::class, 'toggleActive'])->name('users.toggle-active');
+        Route::get('locations', [BackOfficeLocations::class, 'index'])->name('locations.index');
+        Route::post('locations', [BackOfficeLocations::class, 'store'])->name('locations.store');
+        Route::put('locations/{location}', [BackOfficeLocations::class, 'update'])->name('locations.update');
+        Route::patch('locations/{location}/toggle-active', [BackOfficeLocations::class, 'toggleActive'])->name('locations.toggle-active');
+        Route::get('transfers', [BackOfficeTransfers::class, 'index'])->name('transfers.index');
+        Route::post('transfers', [BackOfficeTransfers::class, 'store'])->name('transfers.store');
+        Route::post('transfers/{transfer}/approve', [BackOfficeTransfers::class, 'approve'])->name('transfers.approve');
+        Route::post('transfers/{transfer}/dispatch', [BackOfficeTransfers::class, 'dispatch'])->name('transfers.dispatch');
+        Route::post('transfers/{transfer}/receive', [BackOfficeTransfers::class, 'receive'])->name('transfers.receive');
+        Route::post('transfers/{transfer}/cancel', [BackOfficeTransfers::class, 'cancel'])->name('transfers.cancel');
     });
 });
 

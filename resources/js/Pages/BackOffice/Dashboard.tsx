@@ -101,7 +101,10 @@ export default function BackOfficeDashboard({
 
             {/* Active shift banner */}
             {active_shift && (
-                <div className="mb-6 bg-emerald-50 border border-emerald-200 rounded-2xl px-5 py-4 flex items-center gap-4">
+                <Link
+                    href="/office/shifts"
+                    className="mb-6 bg-emerald-50 border border-emerald-200 rounded-2xl px-5 py-4 flex items-center gap-4 hover:bg-emerald-100/70 transition"
+                >
                     <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                     <div className="flex-1">
                         <p className="text-sm font-semibold text-emerald-800">Shift is open</p>
@@ -109,7 +112,8 @@ export default function BackOfficeDashboard({
                             Opened {new Date(active_shift.opened_at).toLocaleTimeString()} · {active_shift.transaction_count} transactions · Float {fmt(active_shift.opening_float, currency)}
                         </p>
                     </div>
-                </div>
+                    <span className="text-xs font-semibold text-emerald-700">View all shifts →</span>
+                </Link>
             )}
 
             {/* Stat cards */}
