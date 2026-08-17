@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\BackOfficeAccessController;
 use App\Http\Controllers\Api\DeviceAuthController;
 use App\Http\Controllers\Api\LocationController;
+use App\Http\Controllers\Api\StockResetController;
 use App\Http\Controllers\Api\StockTransferController;
 use App\Http\Controllers\Api\SubscriptionController;
 use App\Http\Controllers\Api\SyncController;
@@ -62,6 +63,11 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::post('transfers/{id}/dispatch', [StockTransferController::class, 'dispatch']);
     Route::post('transfers/{id}/receive', [StockTransferController::class, 'receive']);
     Route::post('transfers/{id}/cancel', [StockTransferController::class, 'cancel']);
+
+    // Owner-only, one-time: claims the business's single "reset all stock"
+    // token (see StockResetService). The till itself does the zeroing and
+    // pushes it through the normal sync/push above.
+    Route::post('stock/reset-claim', [StockResetController::class, 'claim']);
 });
 
 // Webhooks (no auth — verified by payload signature)
