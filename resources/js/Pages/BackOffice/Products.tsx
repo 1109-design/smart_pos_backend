@@ -189,7 +189,7 @@ export default function BackOfficeProducts({ products, categories, filters }: Pr
                         Items created here sync to every connected till automatically — including newly paired phones.
                     </p>
                 </div>
-                <div className="flex gap-2 flex-shrink-0">
+                <div className="flex flex-wrap gap-2 flex-shrink-0">
                     <button
                         onClick={() => setShowCategories(true)}
                         className="text-sm px-4 py-2 rounded-xl border border-slate-200 text-slate-600 hover:border-emerald-300"
@@ -241,21 +241,67 @@ export default function BackOfficeProducts({ products, categories, filters }: Pr
                         {label}
                     </button>
                 ))}
-                <div className="flex items-center gap-2 ml-auto">
+                <div className="flex items-center gap-2 w-full sm:w-auto sm:ml-auto">
                     <input
                         type="text"
                         value={search}
                         onChange={(e) => setSearch(e.target.value)}
                         onKeyDown={(e) => e.key === 'Enter' && applyFilter()}
                         placeholder="Search name, SKU, barcode…"
-                        className="text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500 w-56"
+                        className="text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500 flex-1 min-w-0 sm:w-56 sm:flex-none"
                     />
-                    <button onClick={() => applyFilter()} className="btn-primary py-2">Search</button>
+                    <button onClick={() => applyFilter()} className="btn-primary py-2 flex-shrink-0">Search</button>
                 </div>
             </div>
 
             <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-                <div className="overflow-x-auto">
+                {/* Mobile: card list */}
+                <div className="md:hidden divide-y divide-slate-50">
+                    {products.data.map((row) => (
+                        <div key={row.id} className={`p-4 ${!row.is_active ? 'opacity-50' : ''}`}>
+                            <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                    <p className="text-sm font-semibold text-slate-900 truncate">{row.name}</p>
+                                    <p className="text-xs text-slate-400 mt-0.5">{row.sku ?? 'No SKU'}</p>
+                                </div>
+                                <span className="text-base font-bold text-slate-900 flex-shrink-0">{Number(row.price).toFixed(2)}</span>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 mt-2.5">
+                                <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                                    row.item_type === 'service' ? 'bg-sky-50 text-sky-700' : 'bg-slate-100 text-slate-600'
+                                }`}>
+                                    {row.item_type === 'service' ? 'Service' : 'Product'}
+                                </span>
+                                <span className={`text-xs font-medium ${row.is_active ? 'text-emerald-600' : 'text-slate-400'}`}>
+                                    {row.is_active ? 'Active' : 'Archived'}
+                                </span>
+                                {row.item_type !== 'service' && row.track_stock && (
+                                    <span className="text-xs text-slate-500">{Number(row.stock_quantity).toFixed(0)} in stock</span>
+                                )}
+                            </div>
+                            <div className="mt-2">
+                                <SyncBadge synced={row.synced_devices} total={row.total_devices} />
+                            </div>
+                            <div className="flex items-center gap-3 mt-3">
+                                <button onClick={() => openEdit(row)} className="text-xs font-semibold text-emerald-600 hover:text-emerald-800">Edit</button>
+                                <button
+                                    onClick={() => router.patch(`/office/products/${row.id}/toggle-active`, {}, { preserveScroll: true })}
+                                    className="text-xs font-semibold text-slate-400 hover:text-slate-600"
+                                >
+                                    {row.is_active ? 'Archive' : 'Restore'}
+                                </button>
+                            </div>
+                        </div>
+                    ))}
+                    {products.data.length === 0 && (
+                        <p className="px-4 py-10 text-center text-sm text-slate-400">
+                            No items yet — add your first product or service above.
+                        </p>
+                    )}
+                </div>
+
+                {/* Desktop: table */}
+                <div className="hidden md:block overflow-x-auto">
                     <table className="w-full text-sm min-w-[720px]">
                         <thead>
                             <tr className="bg-slate-50">
@@ -492,7 +538,7 @@ export default function BackOfficeProducts({ products, categories, filters }: Pr
 
                     <div className="rounded-xl border border-slate-100 divide-y divide-slate-50 max-h-80 overflow-y-auto">
                         {categories.map((c) => (
-                            <div key={c.id} className={`flex items-center gap-3 px-3 py-2 ${!c.is_active ? 'opacity-50' : ''}`}>
+                            <div key={c.id} className={`flex items-center gap-2 sm:gap-3 px-3 py-2 ${!c.is_active ? 'opacity-50' : ''}`}>
                                 {renamingId === c.id ? (
                                     <input
                                         type="text"
@@ -504,23 +550,23 @@ export default function BackOfficeProducts({ products, categories, filters }: Pr
                                             if (e.key === 'Escape') setRenamingId(null);
                                         }}
                                         onBlur={() => saveRename(c.id)}
-                                        className="flex-1 text-sm rounded-lg border border-emerald-300 px-2 py-1 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                        className="flex-1 min-w-0 text-sm rounded-lg border border-emerald-300 px-2 py-1 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                                     />
                                 ) : (
-                                    <span className="flex-1 text-sm text-slate-700">{c.name}</span>
+                                    <span className="flex-1 min-w-0 truncate text-sm text-slate-700">{c.name}</span>
                                 )}
                                 {!c.is_active && (
-                                    <span className="text-[10px] font-semibold uppercase text-slate-400">Archived</span>
+                                    <span className="hidden sm:inline text-[10px] font-semibold uppercase text-slate-400 flex-shrink-0">Archived</span>
                                 )}
                                 <button
                                     onClick={() => { setRenamingId(c.id); setRenameValue(c.name); }}
-                                    className="text-xs font-semibold text-emerald-600 hover:text-emerald-800"
+                                    className="text-xs font-semibold text-emerald-600 hover:text-emerald-800 flex-shrink-0"
                                 >
                                     Rename
                                 </button>
                                 <button
                                     onClick={() => router.patch(`/office/categories/${c.id}/toggle-active`, {}, { preserveScroll: true })}
-                                    className="text-xs font-semibold text-slate-400 hover:text-slate-600"
+                                    className="text-xs font-semibold text-slate-400 hover:text-slate-600 flex-shrink-0"
                                 >
                                     {c.is_active ? 'Archive' : 'Restore'}
                                 </button>

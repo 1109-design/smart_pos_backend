@@ -250,7 +250,31 @@ export default function BackOfficeReports({ summary, daily_breakdown, payment_me
                     <div className="px-6 py-4 border-b border-slate-100">
                         <p className="text-sm font-semibold text-slate-700">Daily Breakdown</p>
                     </div>
-                    <div className="overflow-x-auto">
+                    {/* Mobile: card list */}
+                    <div className="sm:hidden divide-y divide-slate-50">
+                        {daily_breakdown.map((row) => (
+                            <div key={row.date} className="px-4 py-3 flex items-center justify-between gap-3">
+                                <div>
+                                    <p className="text-sm text-slate-700">
+                                        {new Date(row.date).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}
+                                    </p>
+                                    <p className="text-xs text-slate-400">{row.transactions} txns</p>
+                                </div>
+                                <div className="text-right">
+                                    <p className="text-sm font-semibold text-slate-900">{fmt(Number(row.revenue), currency)}</p>
+                                    {Number(row.discounts) > 0 && (
+                                        <p className="text-xs text-red-500">-{fmt(Number(row.discounts), currency)}</p>
+                                    )}
+                                </div>
+                            </div>
+                        ))}
+                        {daily_breakdown.length === 0 && (
+                            <p className="px-4 py-8 text-center text-sm text-slate-400">No data for selected range.</p>
+                        )}
+                    </div>
+
+                    {/* Desktop: table */}
+                    <div className="hidden sm:block overflow-x-auto">
                         <table className="w-full text-sm min-w-[480px]">
                             <thead>
                                 <tr className="bg-slate-50">
@@ -340,7 +364,27 @@ export default function BackOfficeReports({ summary, daily_breakdown, payment_me
                 <div className="px-6 py-4 border-b border-slate-100">
                     <p className="text-sm font-semibold text-slate-700">Product Performance</p>
                 </div>
-                <div className="overflow-x-auto">
+                {/* Mobile: card list */}
+                <div className="md:hidden divide-y divide-slate-50">
+                    {top_products.map((p, i) => (
+                        <div key={p.name} className="px-4 py-3 flex items-center gap-3">
+                            <span className="w-5 text-xs font-mono text-slate-300 text-right flex-shrink-0">{i + 1}</span>
+                            <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium text-slate-800 truncate">{p.name}</p>
+                                <p className="text-xs text-slate-400">
+                                    {p.sku ?? 'No SKU'} · {p.units_sold} sold · avg {fmt(Number(p.avg_price), currency)}
+                                </p>
+                            </div>
+                            <span className="text-sm font-semibold text-slate-900 flex-shrink-0">{fmt(Number(p.revenue), currency)}</span>
+                        </div>
+                    ))}
+                    {top_products.length === 0 && (
+                        <p className="px-4 py-8 text-center text-sm text-slate-400">No product sales in this period.</p>
+                    )}
+                </div>
+
+                {/* Desktop: table */}
+                <div className="hidden md:block overflow-x-auto">
                     <table className="w-full text-sm min-w-[480px]">
                         <thead>
                             <tr className="bg-slate-50">

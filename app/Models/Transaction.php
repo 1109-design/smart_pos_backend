@@ -12,7 +12,8 @@ class Transaction extends Model
 
     protected $fillable = [
         'id', 'business_id', 'location_id', 'user_id', 'customer_id',
-        'subtotal', 'tax_total', 'discount_total', 'total',
+        'subtotal', 'tax_total', 'discount_total', 'deposit_total',
+        'surcharge_total', 'total',
         'base_currency', 'status', 'sale_number', 'notes',
         'fiscal_status', 'fiscal_receipt_number', 'fiscal_qr_code',
     ];
@@ -23,6 +24,8 @@ class Transaction extends Model
             'subtotal' => 'decimal:4',
             'tax_total' => 'decimal:4',
             'discount_total' => 'decimal:4',
+            'deposit_total' => 'decimal:4',
+            'surcharge_total' => 'decimal:4',
             'total' => 'decimal:4',
         ];
     }

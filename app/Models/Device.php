@@ -11,6 +11,7 @@ class Device extends Model
         'tenant_id',
         'name',
         'device_identifier',
+        'location_id',
         'token_id',
         'last_seen_at',
         'is_revoked',
@@ -24,5 +25,11 @@ class Device extends Model
     public function tenant(): BelongsTo
     {
         return $this->belongsTo(Tenant::class);
+    }
+
+    /** The shop/warehouse this device operates from, if assigned. */
+    public function location(): BelongsTo
+    {
+        return $this->belongsTo(Location::class);
     }
 }

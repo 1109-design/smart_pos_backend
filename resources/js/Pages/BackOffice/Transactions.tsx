@@ -144,7 +144,52 @@ export default function BackOfficeTransactions({ transactions, fiscal_summary, c
             </div>
 
             <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-                <div className="overflow-x-auto">
+                {/* Mobile: card list */}
+                <div className="md:hidden divide-y divide-slate-50">
+                    {transactions.data.map((tx) => (
+                        <div key={tx.id} className="p-4 active:bg-slate-50">
+                            <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                    <p className="text-sm font-semibold text-slate-900 truncate">
+                                        {tx.sale_number ?? tx.id.slice(0, 8).toUpperCase()}
+                                    </p>
+                                    <p className="text-xs text-slate-400 mt-0.5">
+                                        {new Date(tx.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                        {tx.cashier_name ? ` · ${tx.cashier_name}` : ''}
+                                    </p>
+                                </div>
+                                <span className="text-base font-bold text-slate-900 flex-shrink-0">{fmt(Number(tx.total), currency)}</span>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 mt-3">
+                                <span className={`text-xs font-medium px-2 py-0.5 rounded-full bg-slate-50 ${tx.status === 'completed' ? 'text-emerald-600' : tx.status === 'voided' ? 'text-red-500' : 'text-slate-500'}`}>
+                                    {tx.status}
+                                </span>
+                                <FiscalBadge status={tx.fiscal_status} />
+                                {tx.payments.length > 0 && (
+                                    <span className="text-xs text-slate-500">
+                                        {[...new Set(tx.payments.map((p) => methodLabel(p.method)))].join(' + ')}
+                                    </span>
+                                )}
+                                {tx.fiscal_qr_data_uri && (
+                                    <button
+                                        onClick={() => setQrTransaction(tx)}
+                                        className="ml-auto text-xs font-semibold text-emerald-600 hover:text-emerald-800"
+                                    >
+                                        View QR
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    ))}
+                    {transactions.data.length === 0 && (
+                        <p className="px-4 py-10 text-center text-sm text-slate-400">
+                            No transactions match this range and filter.
+                        </p>
+                    )}
+                </div>
+
+                {/* Desktop: table */}
+                <div className="hidden md:block overflow-x-auto">
                     <table className="w-full text-sm min-w-[760px]">
                         <thead>
                             <tr className="bg-slate-50">

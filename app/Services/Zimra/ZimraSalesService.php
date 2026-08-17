@@ -425,6 +425,8 @@ class ZimraSalesService
                 'subtotal' => (float) $transaction->subtotal,
                 'tax_total' => (float) $transaction->tax_total,
                 'discount_total' => (float) $transaction->discount_total,
+                'deposit_total' => (float) $transaction->deposit_total,
+                'surcharge_total' => (float) $transaction->surcharge_total,
                 'total' => (float) $transaction->total,
                 'base_currency' => $transaction->base_currency,
                 'status' => $transaction->status,

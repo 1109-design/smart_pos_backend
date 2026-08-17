@@ -29,7 +29,7 @@ function roleLabel(role: string): string {
     return role.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-type ModalMode = 'edit' | 'password' | null;
+type ModalMode = 'create' | 'edit' | 'password' | null;
 
 export default function BackOfficeUsers({ users, roles, viewer_role, filters }: Props) {
     const [modalMode, setModalMode]     = useState<ModalMode>(null);
@@ -50,8 +50,17 @@ export default function BackOfficeUsers({ users, roles, viewer_role, filters }: 
     const editForm = useForm({ name: '', email: '', role: 'cashier', is_active: true as boolean, pin: '' });
     const pwForm   = useForm({ password: '', password_confirmation: '' });
 
+    const openCreate = () => {
+        setSelected(null);
+        editForm.reset();
+        editForm.clearErrors();
+        editForm.setData({ name: '', email: '', role: 'cashier', is_active: true, pin: '' });
+        setModalMode('create');
+    };
+
     const openEdit = (u: User) => {
         setSelected(u);
+        editForm.clearErrors();
         editForm.setData({ name: u.name, email: u.email, role: u.role ?? 'cashier', is_active: u.is_active, pin: '' });
         setModalMode('edit');
     };
@@ -64,9 +73,13 @@ export default function BackOfficeUsers({ users, roles, viewer_role, filters }: 
 
     const closeModal = () => { setModalMode(null); setSelected(null); };
 
-    const submitEdit = (e: React.FormEvent) => {
+    const submitUserForm = (e: React.FormEvent) => {
         e.preventDefault();
-        editForm.put(`/office/users/${selected!.id}`, { onSuccess: closeModal });
+        if (modalMode === 'create') {
+            editForm.post('/office/users', { onSuccess: closeModal });
+        } else {
+            editForm.put(`/office/users/${selected!.id}`, { onSuccess: closeModal });
+        }
     };
 
     const submitPassword = (e: React.FormEvent) => {
@@ -95,11 +108,12 @@ export default function BackOfficeUsers({ users, roles, viewer_role, filters }: 
         <BackOfficeLayout>
             <Head title="Users" />
 
-            <div className="flex items-center justify-between mb-8">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
                 <div>
                     <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Staff Users</h1>
                     <p className="text-sm text-slate-500 mt-1">{users.length} team member{users.length !== 1 ? 's' : ''}</p>
                 </div>
+                <button onClick={openCreate} className="btn-primary py-2 flex-shrink-0">+ Add User</button>
             </div>
 
             {/* Search */}
@@ -125,79 +139,135 @@ export default function BackOfficeUsers({ users, roles, viewer_role, filters }: 
                 </div>
             </div>
 
-            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-x-auto">
-                <table className="w-full text-sm min-w-[560px]">
-                    <thead>
-                        <tr className="border-b border-slate-100">
-                            <th className="table-th">Name</th>
-                            <th className="table-th">Email</th>
-                            <th className="table-th">Role</th>
-                            <th className="table-th">Status</th>
-                            <th className="table-th">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-50">
-                        {users.map((u) => (
-                            <tr key={u.id} className="hover:bg-slate-50/60 transition-colors">
-                                <td className="table-td font-medium text-slate-800">{u.name}</td>
-                                <td className="table-td text-slate-500">{u.email}</td>
-                                <td className="table-td">
-                                    {u.role && <StatusBadge label={roleLabel(u.role)} variant={roleVariant(u.role)} />}
-                                </td>
-                                <td className="table-td">
-                                    <StatusBadge label={u.is_active ? 'Active' : 'Inactive'} variant={u.is_active ? 'green' : 'red'} />
-                                </td>
-                                <td className="table-td">
-                                    <div className="flex items-center gap-2">
-                                        <button
-                                            onClick={() => openEdit(u)}
-                                            className="text-xs font-medium text-slate-600 hover:text-slate-900 px-2.5 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 transition-colors"
-                                        >
-                                            Edit
-                                        </button>
-                                        <button
-                                            onClick={() => openPassword(u)}
-                                            className="text-xs font-medium text-emerald-600 hover:text-emerald-800 px-2.5 py-1 rounded-lg border border-emerald-100 hover:bg-emerald-50 transition-colors"
-                                        >
-                                            Password
-                                        </button>
-                                        {isOwner && (
+            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+                {/* Mobile: card list */}
+                <div className="md:hidden divide-y divide-slate-50">
+                    {users.map((u) => (
+                        <div key={u.id} className="p-4">
+                            <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                    <p className="text-sm font-semibold text-slate-800 truncate">{u.name}</p>
+                                    <p className="text-xs text-slate-400 truncate mt-0.5">{u.email}</p>
+                                </div>
+                                <StatusBadge label={u.is_active ? 'Active' : 'Inactive'} variant={u.is_active ? 'green' : 'red'} />
+                            </div>
+                            {u.role && (
+                                <div className="mt-2">
+                                    <StatusBadge label={roleLabel(u.role)} variant={roleVariant(u.role)} />
+                                </div>
+                            )}
+                            <div className="flex flex-wrap items-center gap-2 mt-3">
+                                <button
+                                    onClick={() => openEdit(u)}
+                                    className="text-xs font-medium text-slate-600 hover:text-slate-900 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 transition-colors"
+                                >
+                                    Edit
+                                </button>
+                                <button
+                                    onClick={() => openPassword(u)}
+                                    className="text-xs font-medium text-emerald-600 hover:text-emerald-800 px-3 py-1.5 rounded-lg border border-emerald-100 hover:bg-emerald-50 transition-colors"
+                                >
+                                    Password
+                                </button>
+                                {isOwner && (
+                                    <button
+                                        onClick={() => toggleActive(u)}
+                                        className={`text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors ${
+                                            u.is_active
+                                                ? 'text-amber-600 hover:text-amber-800 border-amber-100 hover:bg-amber-50'
+                                                : 'text-slate-500 hover:text-slate-700 border-slate-200 hover:bg-slate-50'
+                                        }`}
+                                    >
+                                        {u.is_active ? 'Deactivate' : 'Activate'}
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    ))}
+                    {users.length === 0 && (
+                        <p className="px-4 py-10 text-center text-slate-400 text-sm">
+                            {search
+                                ? <>No users match "<span className="font-medium text-slate-600">{search}</span>".</>
+                                : 'No users found.'}
+                        </p>
+                    )}
+                </div>
+
+                {/* Desktop: table */}
+                <div className="hidden md:block overflow-x-auto">
+                    <table className="w-full text-sm min-w-[560px]">
+                        <thead>
+                            <tr className="border-b border-slate-100">
+                                <th className="table-th">Name</th>
+                                <th className="table-th">Email</th>
+                                <th className="table-th">Role</th>
+                                <th className="table-th">Status</th>
+                                <th className="table-th">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-50">
+                            {users.map((u) => (
+                                <tr key={u.id} className="hover:bg-slate-50/60 transition-colors">
+                                    <td className="table-td font-medium text-slate-800">{u.name}</td>
+                                    <td className="table-td text-slate-500">{u.email}</td>
+                                    <td className="table-td">
+                                        {u.role && <StatusBadge label={roleLabel(u.role)} variant={roleVariant(u.role)} />}
+                                    </td>
+                                    <td className="table-td">
+                                        <StatusBadge label={u.is_active ? 'Active' : 'Inactive'} variant={u.is_active ? 'green' : 'red'} />
+                                    </td>
+                                    <td className="table-td">
+                                        <div className="flex items-center gap-2">
                                             <button
-                                                onClick={() => toggleActive(u)}
-                                                className={`text-xs font-medium px-2.5 py-1 rounded-lg border transition-colors ${
-                                                    u.is_active
-                                                        ? 'text-amber-600 hover:text-amber-800 border-amber-100 hover:bg-amber-50'
-                                                        : 'text-slate-500 hover:text-slate-700 border-slate-200 hover:bg-slate-50'
-                                                }`}
+                                                onClick={() => openEdit(u)}
+                                                className="text-xs font-medium text-slate-600 hover:text-slate-900 px-2.5 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 transition-colors"
                                             >
-                                                {u.is_active ? 'Deactivate' : 'Activate'}
+                                                Edit
                                             </button>
-                                        )}
-                                    </div>
-                                </td>
-                            </tr>
-                        ))}
-                        {users.length === 0 && (
-                            <tr>
-                                <td colSpan={5} className="px-6 py-10 text-center text-slate-400 text-sm">
-                                    {search
-                                        ? <>No users match "<span className="font-medium text-slate-600">{search}</span>".</>
-                                        : 'No users found.'}
-                                </td>
-                            </tr>
-                        )}
-                    </tbody>
-                </table>
+                                            <button
+                                                onClick={() => openPassword(u)}
+                                                className="text-xs font-medium text-emerald-600 hover:text-emerald-800 px-2.5 py-1 rounded-lg border border-emerald-100 hover:bg-emerald-50 transition-colors"
+                                            >
+                                                Password
+                                            </button>
+                                            {isOwner && (
+                                                <button
+                                                    onClick={() => toggleActive(u)}
+                                                    className={`text-xs font-medium px-2.5 py-1 rounded-lg border transition-colors ${
+                                                        u.is_active
+                                                            ? 'text-amber-600 hover:text-amber-800 border-amber-100 hover:bg-amber-50'
+                                                            : 'text-slate-500 hover:text-slate-700 border-slate-200 hover:bg-slate-50'
+                                                    }`}
+                                                >
+                                                    {u.is_active ? 'Deactivate' : 'Activate'}
+                                                </button>
+                                            )}
+                                        </div>
+                                    </td>
+                                </tr>
+                            ))}
+                            {users.length === 0 && (
+                                <tr>
+                                    <td colSpan={5} className="px-6 py-10 text-center text-slate-400 text-sm">
+                                        {search
+                                            ? <>No users match "<span className="font-medium text-slate-600">{search}</span>".</>
+                                            : 'No users found.'}
+                                    </td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
-            {/* ── Edit Modal ─────────────────────────────────────────────── */}
-            <Modal show={modalMode === 'edit'} onClose={closeModal} maxWidth="md">
+            {/* ── Create / Edit Modal ───────────────────────────────────── */}
+            <Modal show={modalMode === 'create' || modalMode === 'edit'} onClose={closeModal} maxWidth="md">
                 <div className="p-6">
                     <div className="flex items-center justify-between mb-5">
-                        <h2 className="text-lg font-semibold text-slate-900">Edit User</h2>
+                        <h2 className="text-lg font-semibold text-slate-900">{modalMode === 'create' ? 'Add User' : 'Edit User'}</h2>
                         <CloseBtn />
                     </div>
-                    <form onSubmit={submitEdit} className="space-y-4">
+                    <form onSubmit={submitUserForm} className="space-y-4">
                         <div>
                             <label className="form-label">Name</label>
                             <input type="text" value={editForm.data.name} onChange={(e) => editForm.setData('name', e.target.value)} className="form-input" required />
@@ -208,21 +278,22 @@ export default function BackOfficeUsers({ users, roles, viewer_role, filters }: 
                             <input type="email" value={editForm.data.email} onChange={(e) => editForm.setData('email', e.target.value)} className="form-input" required />
                             {editForm.errors.email && <p className="text-red-500 text-xs mt-1">{editForm.errors.email}</p>}
                         </div>
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <div>
                                 <label className="form-label">Role</label>
                                 <select
                                     value={editForm.data.role}
                                     onChange={(e) => editForm.setData('role', e.target.value)}
                                     className="form-input"
-                                    disabled={selected?.id === undefined}
                                 >
                                     {roles.map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}
                                 </select>
                                 {editForm.errors.role && <p className="text-red-500 text-xs mt-1">{editForm.errors.role}</p>}
                             </div>
                             <div>
-                                <label className="form-label">POS PIN <span className="text-slate-400 font-normal">(leave blank to keep)</span></label>
+                                <label className="form-label">
+                                    POS PIN {modalMode === 'edit' && <span className="text-slate-400 font-normal">(leave blank to keep)</span>}
+                                </label>
                                 <input
                                     type="text"
                                     maxLength={4}
@@ -230,26 +301,41 @@ export default function BackOfficeUsers({ users, roles, viewer_role, filters }: 
                                     onChange={(e) => editForm.setData('pin', e.target.value)}
                                     className="form-input"
                                     placeholder="••••"
+                                    required={modalMode === 'create'}
                                 />
                                 {editForm.errors.pin && <p className="text-red-500 text-xs mt-1">{editForm.errors.pin}</p>}
                             </div>
                         </div>
-                        <div className="flex items-center gap-3 p-3 rounded-xl border border-slate-100 bg-slate-50">
-                            <input
-                                id="bo_is_active"
-                                type="checkbox"
-                                checked={editForm.data.is_active}
-                                onChange={(e) => editForm.setData('is_active', e.target.checked)}
-                                className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
-                            />
-                            <label htmlFor="bo_is_active" className="text-sm font-medium text-slate-700 cursor-pointer">
-                                Account active
-                            </label>
-                            <span className="text-xs text-slate-400 ml-auto">Inactive users cannot log in to the POS</span>
-                        </div>
+                        {modalMode === 'edit' && (
+                            <div className="flex items-center gap-3 p-3 rounded-xl border border-slate-100 bg-slate-50">
+                                <input
+                                    id="bo_is_active"
+                                    type="checkbox"
+                                    checked={editForm.data.is_active}
+                                    onChange={(e) => editForm.setData('is_active', e.target.checked)}
+                                    className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 flex-shrink-0"
+                                />
+                                <label htmlFor="bo_is_active" className="text-sm font-medium text-slate-700 cursor-pointer">
+                                    Account active
+                                    <span className="block sm:inline sm:ml-2 text-xs font-normal text-slate-400">
+                                        Inactive users cannot log in to the POS
+                                    </span>
+                                </label>
+                            </div>
+                        )}
+                        {modalMode === 'create' && (
+                            <div className="rounded-xl bg-sky-50 border border-sky-100 px-4 py-3">
+                                <p className="text-xs text-sky-700">
+                                    They can sign in at the till once this syncs. Back Office (browser) access needs a
+                                    password set separately — use "Password" from the list after creating them.
+                                </p>
+                            </div>
+                        )}
                         <div className="flex justify-end gap-3 pt-2">
                             <button type="button" onClick={closeModal} className="btn-secondary">Cancel</button>
-                            <button type="submit" disabled={editForm.processing} className="btn-primary disabled:opacity-50">Save Changes</button>
+                            <button type="submit" disabled={editForm.processing} className="btn-primary disabled:opacity-50">
+                                {modalMode === 'create' ? 'Create User' : 'Save Changes'}
+                            </button>
                         </div>
                     </form>
                 </div>

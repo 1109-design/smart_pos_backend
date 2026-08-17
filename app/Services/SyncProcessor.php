@@ -36,6 +36,7 @@ use App\Models\StockTakeItem;
 use App\Models\StockTransfer;
 use App\Models\StockTransferItem;
 use App\Models\Supplier;
+use App\Models\SyncRecord;
 use App\Models\TaxRate;
 use App\Models\Transaction;
 use App\Models\TransactionItem;
@@ -546,6 +547,7 @@ class SyncProcessor
                     'tax_total' => $payload['tax_total'] ?? 0,
                     'discount_total' => $payload['discount_total'] ?? 0,
                     'deposit_total' => $payload['deposit_total'] ?? 0,
+                    'surcharge_total' => $payload['surcharge_total'] ?? 0,
                     'total' => $payload['total'] ?? 0,
                     'base_currency' => $payload['base_currency'] ?? 'USD',
                     'status' => $payload['status'] ?? 'completed',
@@ -1004,11 +1006,20 @@ class SyncProcessor
 
     protected function syncUser(string $uuid, array $payload): void
     {
+        // Defense in depth: the device is expected to hash PINs itself
+        // before they ever reach a sync payload, but an older app build (or
+        // any future write path) sending one in plain text must not land in
+        // the database that way — hash it here rather than trust the client.
+        $pinHash = $payload['pin_hash'] ?? null;
+        if ($pinHash !== null && ! Hash::isHashed($pinHash)) {
+            $pinHash = Hash::make($pinHash);
+        }
+
         $userData = [
             'business_id' => $payload['business_id'] ?? null,
             'name' => $payload['name'] ?? '',
             'email' => $payload['email'] ?? $uuid.'@pos.local',
-            'pin_hash' => $payload['pin_hash'] ?? null,
+            'pin_hash' => $pinHash,
             'role' => $payload['role'] ?? 'cashier',
             'is_active' => $payload['is_active'] ?? true,
             'biometric_enabled' => $payload['biometric_enabled'] ?? false,
@@ -1038,11 +1049,22 @@ class SyncProcessor
     protected function recomputeProductStock(string $productId): void
     {
         $computed = StockMovement::where('product_id', $productId)->sum('quantity_change');
-        Product::where('id', $productId)
+        $updated = Product::where('id', $productId)
             ->whereExists(function ($q) use ($productId) {
                 $q->from('stock_movements')->where('product_id', $productId);
             })
             ->update(['stock_quantity' => $computed]);
+
+        // Broadcast the authoritative recomputed total to every device (this
+        // one included) — otherwise only the device that pushed the movement
+        // ever learns the correct number, and every other till/warehouse
+        // silently drifts until something else happens to touch this product.
+        if ($updated > 0) {
+            $product = Product::find($productId);
+            if ($product) {
+                $this->emitBroadcastSyncRecord('products', $product->id, $product->business_id, $this->productSyncPayload($product));
+            }
+        }
     }
 
     /**
@@ -1056,10 +1078,72 @@ class SyncProcessor
             ->where('location_id', $locationId)
             ->sum('quantity_change');
 
-        ProductStock::updateOrCreate(
+        $stock = ProductStock::updateOrCreate(
             ['product_id' => $productId, 'location_id' => $locationId],
             ['quantity' => max(0, $computed)]
         );
+
+        $product = Product::find($productId);
+        if ($product) {
+            $this->emitBroadcastSyncRecord('product_stock', $stock->id, $product->business_id, [
+                'product_id' => $stock->product_id,
+                'location_id' => $stock->location_id,
+                'quantity' => (float) $stock->quantity,
+                'reserved_quantity' => (float) $stock->reserved_quantity,
+                'updated_at' => $stock->updated_at?->toIso8601String(),
+            ]);
+        }
+    }
+
+    /**
+     * Full field snapshot for a product, matching exactly what the device's
+     * own push payload contains — a partial payload here would silently wipe
+     * out name/price/etc. on every device that pulls it (the client upsert
+     * defaults missing fields instead of leaving them untouched).
+     */
+    private function productSyncPayload(Product $product): array
+    {
+        return [
+            'business_id' => $product->business_id,
+            'category_id' => $product->category_id,
+            'name' => $product->name,
+            'item_type' => $product->item_type,
+            'sku' => $product->sku,
+            'barcode' => $product->barcode,
+            'price' => (float) $product->price,
+            'min_price' => $product->min_price !== null ? (float) $product->min_price : null,
+            'discount_percent' => $product->discount_percent !== null ? (float) $product->discount_percent : null,
+            'cost_price' => (float) $product->cost_price,
+            'deposit_amount' => $product->deposit_amount !== null ? (float) $product->deposit_amount : null,
+            'unit' => $product->unit,
+            'track_stock' => (bool) $product->track_stock,
+            'stock_quantity' => (float) $product->stock_quantity,
+            'low_stock_threshold' => (float) $product->low_stock_threshold,
+            'image_path' => $product->image_path,
+            'expiry_date' => $product->expiry_date?->toIso8601String(),
+            'is_active' => (bool) $product->is_active,
+        ];
+    }
+
+    /**
+     * Writes a server-originated SyncRecord (device_id = null, so every
+     * device — including the one that triggered the recompute — pulls it on
+     * their next sync). Used for values the server derives rather than a
+     * device sends directly, so the recomputed truth actually reaches
+     * everyone instead of staying correct only in this database.
+     */
+    private function emitBroadcastSyncRecord(string $table, string $recordUuid, ?string $businessId, array $payload): void
+    {
+        SyncRecord::create([
+            'business_id' => $businessId,
+            'table_name' => $table,
+            'record_uuid' => $recordUuid,
+            'operation' => 'upsert',
+            'payload' => $payload,
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+            'device_id' => null,
+        ]);
     }
 
     /**

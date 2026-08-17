@@ -182,6 +182,39 @@ class SyncReturnablePackagingTest extends TestCase
         ]);
     }
 
+    public function test_product_deposit_amount_persists_via_sync_push(): void
+    {
+        // Regression: Product::$fillable was missing deposit_amount, so
+        // SyncProcessor's updateOrCreate() silently dropped it — every
+        // container product's deposit synced from a device as null.
+        $tenantId = 'tenant-returnables-deposit-amount';
+        $token = $this->actingDeviceToken($tenantId);
+        $containerId = (string) Str::uuid();
+
+        $response = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'products',
+                    'uuid' => $containerId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'name' => 'Quart Bottle',
+                        'item_type' => 'container',
+                        'price' => 0,
+                        'deposit_amount' => 0.20,
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ]);
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'accepted');
+
+        $product = Product::findOrFail($containerId);
+        $this->assertSame('0.2000', $product->deposit_amount);
+    }
+
     public function test_container_deposit_ledger_rows_are_immutable(): void
     {
         $tenantId = 'tenant-returnables-immutable';

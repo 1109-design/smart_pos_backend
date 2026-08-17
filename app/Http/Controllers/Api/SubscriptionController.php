@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\ActivationCode;
 use App\Models\Device;
+use App\Models\Location;
 use App\Models\Setting;
 use App\Models\SubscriptionHistory;
 use App\Models\Tenant;
@@ -51,7 +52,73 @@ class SubscriptionController extends Controller
             // Manual renewal details (EcoCash + WhatsApp) — the app caches
             // these so the lock screen can show them even when offline.
             'payment_info' => Setting::paymentInfo(),
+            // Assigned via the web portal (Devices page). Null means "no
+            // restriction" — the app's own location picker still applies.
+            // Piggybacked on this existing heartbeat rather than a new
+            // endpoint so it's picked up on the same cadence as everything
+            // else the device already polls for.
+            'assigned_location_id' => $device->location_id,
+            'assigned_location_name' => $device->location?->name,
         ]);
+    }
+
+    /**
+     * Lets the device rename itself (e.g. "Till 1 — Front Counter") so
+     * cashiers can tell which physical device they're trading on. The web
+     * portal's Devices page can also rename it centrally — whichever was
+     * set most recently wins, same as any other synced field.
+     */
+    public function updateName(Request $request): JsonResponse
+    {
+        $device = $this->resolveDevice($request);
+
+        if (! $device || $device->is_revoked) {
+            return response()->json(['message' => 'Device revoked.'], 403);
+        }
+
+        $data = $request->validate([
+            'name' => 'required|string|max:255',
+        ]);
+
+        $device->update(['name' => $data['name']]);
+
+        return response()->json(['name' => $device->name]);
+    }
+
+    /**
+     * Reports the location a cashier picked on-device (the fallback prompt
+     * shown when the admin hasn't assigned one from the web portal). Without
+     * this, that choice lived only in the device's local storage — the
+     * portal's Devices page couldn't tell "genuinely unrestricted" apart
+     * from "a cashier picked X three weeks ago and it was never audited".
+     *
+     * Deliberately only writes when the device is *currently* unassigned:
+     * if an admin locks a location from the portal between the device
+     * fetching its heartbeat and this call landing, that lock must win, not
+     * a self-pick that's already stale by the time it arrives.
+     */
+    public function reportSelfPickedLocation(Request $request): JsonResponse
+    {
+        $device = $this->resolveDevice($request);
+
+        if (! $device || $device->is_revoked) {
+            return response()->json(['message' => 'Device revoked.'], 403);
+        }
+
+        $data = $request->validate([
+            'location_id' => 'required|uuid|exists:locations,id',
+        ]);
+
+        $belongsToBusiness = Location::where('id', $data['location_id'])
+            ->where('business_id', $device->tenant_id)
+            ->exists();
+        abort_unless($belongsToBusiness, 403);
+
+        if ($device->location_id === null) {
+            $device->update(['location_id' => $data['location_id']]);
+        }
+
+        return response()->json(['location_id' => $device->location_id]);
     }
 
     /**

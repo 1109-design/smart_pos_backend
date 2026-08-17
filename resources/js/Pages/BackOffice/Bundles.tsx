@@ -126,8 +126,8 @@ export default function BackOfficeBundles({ bundles, catalog }: Props) {
                         </div>
                         <ul className="space-y-1.5 mb-4">
                             {bundle.items.map((item) => (
-                                <li key={item.id} className="flex items-center justify-between text-sm">
-                                    <span className="text-slate-600">
+                                <li key={item.id} className="flex items-center justify-between gap-2 text-sm">
+                                    <span className="text-slate-600 min-w-0 truncate">
                                         {item.quantity !== 1 && <span className="font-semibold">{item.quantity}× </span>}
                                         {item.name}
                                         <span className={`ml-2 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
@@ -136,7 +136,7 @@ export default function BackOfficeBundles({ bundles, catalog }: Props) {
                                             {item.item_type === 'service' ? 'Service' : 'Product'}
                                         </span>
                                     </span>
-                                    <span className="text-slate-500 tabular-nums">{(item.price * item.quantity).toFixed(2)}</span>
+                                    <span className="text-slate-500 tabular-nums flex-shrink-0">{(item.price * item.quantity).toFixed(2)}</span>
                                 </li>
                             ))}
                         </ul>
@@ -214,15 +214,15 @@ export default function BackOfficeBundles({ bundles, catalog }: Props) {
                                 {form.data.items.map((item) => {
                                     const info = catalogById[item.product_id];
                                     return (
-                                        <div key={item.product_id} className="flex items-center gap-3 px-3 py-2">
-                                            <span className="flex-1 text-sm text-slate-700">{info?.name ?? item.product_id}</span>
+                                        <div key={item.product_id} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2">
+                                            <span className="flex-1 min-w-[8rem] text-sm text-slate-700 truncate">{info?.name ?? item.product_id}</span>
                                             <input
                                                 type="number" min="0.01" step="0.01"
                                                 value={item.quantity}
                                                 onChange={(e) => setQuantity(item.product_id, Number(e.target.value))}
-                                                className="w-20 text-sm rounded-lg border border-slate-200 px-2 py-1 text-right focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                                className="w-16 text-sm rounded-lg border border-slate-200 px-2 py-1 text-right focus:outline-none focus:ring-2 focus:ring-emerald-500"
                                             />
-                                            <span className="w-20 text-right text-sm text-slate-500 tabular-nums">
+                                            <span className="w-16 text-right text-sm text-slate-500 tabular-nums">
                                                 {(Number(info?.price ?? 0) * item.quantity).toFixed(2)}
                                             </span>
                                             <button type="button" onClick={() => removeItem(item.product_id)} className="text-xs font-semibold text-red-400 hover:text-red-600">

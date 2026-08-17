@@ -8,9 +8,16 @@ interface Device {
     id: number;
     name: string;
     device_identifier: string;
+    location_id: string | null;
     last_seen_at: string | null;
     is_revoked: boolean;
     created_at: string;
+}
+
+interface Location {
+    id: string;
+    name: string;
+    type: string;
 }
 
 interface Business {
@@ -21,9 +28,10 @@ interface Business {
 interface Props {
     business: Business;
     devices: Device[];
+    locations: Location[];
 }
 
-export default function DevicesIndex({ business, devices }: Props) {
+export default function DevicesIndex({ business, devices, locations }: Props) {
     const revoke = (device: Device) => {
         if (confirm(`Revoke device "${device.name}"? The POS app will be logged out.`)) {
             router.post(`/businesses/${business.id}/devices/${device.id}/revoke`);
@@ -34,6 +42,26 @@ export default function DevicesIndex({ business, devices }: Props) {
         if (confirm(`Remove device "${device.name}"? This cannot be undone.`)) {
             router.delete(`/businesses/${business.id}/devices/${device.id}`);
         }
+    };
+
+    const assignLocation = (device: Device, locationId: string) => {
+        router.put(
+            `/businesses/${business.id}/devices/${device.id}/location`,
+            { location_id: locationId === '' ? null : locationId },
+            { preserveScroll: true },
+        );
+    };
+
+    const rename = (device: Device) => {
+        const name = prompt('Device name (shown on the till itself):', device.name);
+        if (name === null) return;
+        const trimmed = name.trim();
+        if (trimmed === '' || trimmed === device.name) return;
+        router.put(
+            `/businesses/${business.id}/devices/${device.id}/name`,
+            { name: trimmed },
+            { preserveScroll: true },
+        );
     };
 
     return (
@@ -62,6 +90,7 @@ export default function DevicesIndex({ business, devices }: Props) {
                         <tr className="border-b border-slate-100">
                             <th className="table-th">Device Name</th>
                             <th className="table-th">Identifier</th>
+                            <th className="table-th">Location</th>
                             <th className="table-th">Last Seen</th>
                             <th className="table-th">Registered</th>
                             <th className="table-th">Status</th>
@@ -71,8 +100,34 @@ export default function DevicesIndex({ business, devices }: Props) {
                     <tbody className="divide-y divide-slate-50">
                         {devices.map((d) => (
                             <tr key={d.id} className="hover:bg-slate-50/60 transition-colors">
-                                <td className="table-td font-medium text-slate-800">{d.name}</td>
+                                <td className="table-td font-medium text-slate-800">
+                                    <button
+                                        onClick={() => rename(d)}
+                                        className="flex items-center gap-1.5 hover:text-indigo-600 transition-colors group"
+                                        title="Rename device"
+                                    >
+                                        {d.name}
+                                        <svg className="w-3.5 h-3.5 text-slate-300 group-hover:text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
+                                        </svg>
+                                    </button>
+                                </td>
                                 <td className="table-td font-mono text-xs text-slate-400">{d.device_identifier}</td>
+                                <td className="table-td">
+                                    <select
+                                        value={d.location_id ?? ''}
+                                        onChange={(e) => assignLocation(d, e.target.value)}
+                                        disabled={d.is_revoked}
+                                        className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        <option value="">No restriction (all locations)</option>
+                                        {locations.map((l) => (
+                                            <option key={l.id} value={l.id}>
+                                                {l.name} {l.type === 'warehouse' ? '(Warehouse)' : ''}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </td>
                                 <td className="table-td text-slate-500">{d.last_seen_at ?? 'Never'}</td>
                                 <td className="table-td text-slate-500">{d.created_at}</td>
                                 <td className="table-td">
@@ -100,7 +155,7 @@ export default function DevicesIndex({ business, devices }: Props) {
                         ))}
                         {devices.length === 0 && (
                             <tr>
-                                <td colSpan={6} className="px-6 py-10 text-center text-slate-400 text-sm">
+                                <td colSpan={7} className="px-6 py-10 text-center text-slate-400 text-sm">
                                     No devices registered. Devices appear here when a POS app first logs in.
                                 </td>
                             </tr>

@@ -51,6 +51,8 @@ Route::middleware(['auth', 'verified', 'platform.admin'])->group(function () {
     // Devices per business
     Route::get('businesses/{business}/devices', [DeviceController::class, 'index'])->name('businesses.devices.index');
     Route::post('businesses/{business}/devices/{device}/revoke', [DeviceController::class, 'revoke'])->name('businesses.devices.revoke');
+    Route::put('businesses/{business}/devices/{device}/name', [DeviceController::class, 'rename'])->name('businesses.devices.rename');
+    Route::put('businesses/{business}/devices/{device}/location', [DeviceController::class, 'assignLocation'])->name('businesses.devices.assign-location');
     Route::delete('businesses/{business}/devices/{device}', [DeviceController::class, 'destroy'])->name('businesses.devices.destroy');
 
     // Subscriptions
@@ -103,6 +105,7 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::put('combos/{bundle}', [BackOfficeBundles::class, 'update'])->name('combos.update');
         Route::patch('combos/{bundle}/toggle-active', [BackOfficeBundles::class, 'toggleActive'])->name('combos.toggle-active');
         Route::get('users', [BackOfficeUsers::class, 'index'])->name('users.index');
+        Route::post('users', [BackOfficeUsers::class, 'store'])->name('users.store');
         Route::put('users/{user}', [BackOfficeUsers::class, 'update'])->name('users.update');
         Route::put('users/{user}/password', [BackOfficeUsers::class, 'changePassword'])->name('users.change-password');
         Route::patch('users/{user}/toggle-active', [BackOfficeUsers::class, 'toggleActive'])->name('users.toggle-active');

@@ -37,6 +37,15 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::get('subscription/status', [SubscriptionController::class, 'status']);
     Route::post('subscription/redeem', [SubscriptionController::class, 'redeem']);
 
+    // Device self-service rename (shown on the POS screen so cashiers can
+    // confirm which till they're on)
+    Route::put('device/name', [SubscriptionController::class, 'updateName']);
+
+    // Reports back a location a cashier picked on-device (the fallback
+    // prompt shown when no admin assignment exists) so the web portal's
+    // Devices page reflects it too, instead of staying silently unaudited.
+    Route::put('device/location', [SubscriptionController::class, 'reportSelfPickedLocation']);
+
     // Locations
     Route::get('locations', [LocationController::class, 'index']);
     Route::post('locations', [LocationController::class, 'store']);
