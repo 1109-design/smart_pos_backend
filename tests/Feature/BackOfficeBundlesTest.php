@@ -143,6 +143,42 @@ class BackOfficeBundlesTest extends TestCase
         $this->assertDatabaseMissing('bundles', ['name' => 'Empty Combo']);
     }
 
+    public function test_container_products_are_excluded_from_the_catalog_and_cannot_be_added_to_a_combo(): void
+    {
+        // Regression: containers are deposit-only (price forced to 0) and
+        // must never be sellable inside a combo — otherwise a beverage
+        // container gets "sold" for free with no deposit ever charged.
+        $tenantId = 'tenant-bundles-container';
+        $this->actingBackOfficeSession($tenantId);
+
+        $regular = $this->createCatalogItem($tenantId, 'Cola 500ml', 'product');
+        $container = Product::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'Quart Bottle',
+            'item_type' => 'container',
+            'price' => 0,
+            'deposit_amount' => 1.5,
+            'track_stock' => false,
+        ]);
+
+        $response = $this->get('/office/combos');
+        $response->assertOk();
+
+        $catalogIds = collect($response->viewData('page')['props']['catalog'])->pluck('id');
+        $this->assertContains($regular->id, $catalogIds);
+        $this->assertNotContains($container->id, $catalogIds);
+
+        // The request body is client-supplied, so the server must reject a
+        // container even though the UI catalog never offers one.
+        $response = $this->post('/office/combos', [
+            'name' => 'Free Bottle Combo',
+            'items' => [['product_id' => $container->id, 'quantity' => 1]],
+        ]);
+        $response->assertSessionHasErrors('items.0.product_id');
+        $this->assertDatabaseMissing('bundles', ['name' => 'Free Bottle Combo']);
+    }
+
     public function test_index_and_edits_are_scoped_to_the_current_tenant(): void
     {
         $otherTenantId = 'tenant-bundles-other';

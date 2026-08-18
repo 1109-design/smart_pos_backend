@@ -11,6 +11,7 @@ use App\Services\SyncProcessor;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -41,8 +42,14 @@ class BundlesController extends Controller
 
         return Inertia::render('BackOffice/Bundles', [
             'bundles' => $bundles,
+            // Containers are deposit-only (price forced to 0, see
+            // ProductsController::validatePayload) and never meant to be sold
+            // standalone — excluding them here keeps them out of the combo
+            // builder so a container can't end up "sold" for free with no
+            // deposit ever charged or tracked.
             'catalog' => Product::where('business_id', $tenantId)
                 ->where('is_active', true)
+                ->where('item_type', '!=', 'container')
                 ->orderBy('name')
                 ->get(['id', 'name', 'item_type', 'price']),
         ]);
@@ -93,7 +100,22 @@ class BundlesController extends Controller
             'name' => ['required', 'string', 'max:255'],
             'description' => ['nullable', 'string', 'max:1000'],
             'items' => ['required', 'array', 'min:1'],
-            'items.*.product_id' => ['required', 'string', 'exists:products,id'],
+            'items.*.product_id' => [
+                'required',
+                'string',
+                // Scoped to this tenant and excluding containers — the catalog
+                // the UI offers already filters both, but the request body is
+                // client-supplied, so the server must enforce it independently.
+                // Note: DatabaseRule::where() only takes (column, value) —
+                // an inequality needs the closure form, not a 3-arg call
+                // (which silently drops the operator, since PHP ignores
+                // extra positional arguments rather than erroring).
+                Rule::exists('products', 'id')->where(
+                    fn ($query) => $query
+                        ->where('business_id', $this->tenantId())
+                        ->where('item_type', '!=', 'container'),
+                ),
+            ],
             'items.*.quantity' => ['required', 'numeric', 'min:0.01'],
         ]);
     }

@@ -355,6 +355,66 @@ class BackOfficeProductsTest extends TestCase
         $this->assertNotNull($deleteSync);
     }
 
+    public function test_container_links_reject_the_same_container_linked_twice(): void
+    {
+        // Regression: without a distinct rule, linking the same container
+        // twice creates two product_container_links rows for one beverage,
+        // doubling the deposit charged whenever it's sold.
+        $tenantId = 'tenant-office-prod-container-dup';
+        $this->actingBackOfficeSession($tenantId);
+
+        $container = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Bottle', 'item_type' => 'container', 'price' => 0, 'deposit_amount' => 0.3]);
+
+        $response = $this->post('/office/products', [
+            'name' => 'Lager',
+            'item_type' => 'product',
+            'price' => 1.2,
+            'container_links' => [
+                ['container_product_id' => $container->id, 'quantity_per_unit' => 1],
+                ['container_product_id' => $container->id, 'quantity_per_unit' => 1],
+            ],
+        ]);
+
+        $response->assertSessionHasErrors('container_links.0.container_product_id');
+        $this->assertDatabaseMissing('products', ['business_id' => $tenantId, 'name' => 'Lager']);
+    }
+
+    public function test_reimporting_a_former_container_as_a_product_clears_its_deposit_amount(): void
+    {
+        // Regression: CSV import can only ever set item_type to product or
+        // service, but a row matched by SKU/barcode could previously be an
+        // existing container — carrying its deposit_amount forward left the
+        // row with a non-null deposit on a non-container item, bypassing the
+        // rule validatePayload() enforces on the manual edit form.
+        $tenantId = 'tenant-office-prod-reimport-container';
+        $this->actingBackOfficeSession($tenantId);
+
+        $existingId = (string) Str::uuid();
+        Product::create([
+            'id' => $existingId,
+            'business_id' => $tenantId,
+            'name' => 'Quart Bottle',
+            'item_type' => 'container',
+            'price' => 0,
+            'deposit_amount' => 1.5,
+            'sku' => 'BOTTLE1',
+        ]);
+
+        $csv = "name,item_type,price,sku\n"
+            ."Quart Bottle (Retired),product,2.00,BOTTLE1\n";
+        $file = UploadedFile::fake()->createWithContent('import.csv', $csv);
+
+        $response = $this->post('/office/products/import', ['file' => $file]);
+
+        $response->assertRedirect();
+        $response->assertSessionMissing('import_errors');
+        $this->assertDatabaseHas('products', [
+            'id' => $existingId,
+            'item_type' => 'product',
+            'deposit_amount' => null,
+        ]);
+    }
+
     public function test_index_reports_how_many_of_the_business_devices_have_synced_each_product(): void
     {
         $tenantId = 'tenant-office-prod-4';

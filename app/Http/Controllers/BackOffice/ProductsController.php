@@ -303,9 +303,15 @@ class ProductsController extends Controller
                 // The CSV format has no columns for these — without carrying
                 // the existing values through, the full-row sync overwrite
                 // below would silently null them out on every re-import.
+                // deposit_amount is the one exception: the item_type rule
+                // above only ever accepts product/service (never container),
+                // so a CSV-touched row must never carry a deposit forward —
+                // matching validatePayload()'s $isContainer ternary, which
+                // enforces that non-container items always have a null
+                // deposit_amount.
                 $payload['min_price'] = $existing->min_price !== null ? (float) $existing->min_price : null;
                 $payload['discount_percent'] = $existing->discount_percent !== null ? (float) $existing->discount_percent : null;
-                $payload['deposit_amount'] = $existing->deposit_amount !== null ? (float) $existing->deposit_amount : null;
+                $payload['deposit_amount'] = null;
                 $payload['expiry_date'] = $existing->expiry_date?->toIso8601String();
                 $this->applyThroughSyncPipeline($processor, $existing->id, $payload);
                 $updated++;
@@ -505,6 +511,9 @@ class ProductsController extends Controller
             'container_links.*.container_product_id' => [
                 'required_with:container_links',
                 'string',
+                // Without this, the same container can be linked twice to one
+                // beverage, doubling the deposit charged whenever it's sold.
+                'distinct',
                 Rule::exists('products', 'id')->where('business_id', $this->tenantId())->where('item_type', 'container'),
             ],
             'container_links.*.quantity_per_unit' => ['required_with:container_links', 'numeric', 'min:0.0001'],
@@ -592,15 +601,7 @@ class ProductsController extends Controller
 
         foreach ($existingLinks as $old) {
             $processor->process('product_container_links', $old->id, 'delete', ['business_id' => $businessId]);
-            SyncRecord::create([
-                'business_id' => $businessId,
-                'table_name' => 'product_container_links',
-                'record_uuid' => $old->id,
-                'operation' => 'delete',
-                'payload' => [],
-                'source_updated_at' => now(),
-                'synced_at' => now(),
-            ]);
+            $this->publishSyncRecord($old->id, [], table: 'product_container_links', operation: 'delete');
         }
 
         foreach ($links as $link) {
@@ -612,28 +613,26 @@ class ProductsController extends Controller
                 'quantity_per_unit' => (float) $link['quantity_per_unit'],
             ];
             $processor->process('product_container_links', $linkId, 'upsert', $linkPayload);
-            SyncRecord::create([
-                'business_id' => $businessId,
-                'table_name' => 'product_container_links',
-                'record_uuid' => $linkId,
-                'operation' => 'upsert',
-                'payload' => $linkPayload,
-                'source_updated_at' => now(),
-                'synced_at' => now(),
-            ]);
+            $this->publishSyncRecord($linkId, $linkPayload, table: 'product_container_links');
         }
     }
 
     /**
+     * Mirrors a write into the sync stream so every device (including newly
+     * paired ones) receives it — same generalized shape as
+     * BundlesController::publishSyncRecord(), extended with an $operation
+     * parameter so the delete case above doesn't need its own hand-rolled
+     * SyncRecord::create().
+     *
      * @param  array<string, mixed>  $payload
      */
-    private function publishSyncRecord(string $uuid, array $payload): void
+    private function publishSyncRecord(string $uuid, array $payload, string $table = 'products', string $operation = 'upsert'): void
     {
         SyncRecord::create([
             'business_id' => $payload['business_id'] ?? $this->tenantId(),
-            'table_name' => 'products',
+            'table_name' => $table,
             'record_uuid' => $uuid,
-            'operation' => 'upsert',
+            'operation' => $operation,
             'payload' => $payload,
             'source_updated_at' => now(),
             'synced_at' => now(),
