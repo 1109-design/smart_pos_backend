@@ -73,16 +73,21 @@ const IconCog = () => (
 );
 
 const ALL_NAV = [
-    { label: 'Dashboard',    href: '/office/dashboard',    Icon: IconChart,          roles: null },
-    { label: 'Transactions', href: '/office/transactions', Icon: IconReceipt,        roles: null },
-    { label: 'Shifts',       href: '/office/shifts',       Icon: IconClock,          roles: null },
-    { label: 'Products',     href: '/office/products',     Icon: IconBox,            roles: ['business_owner', 'manager'] },
-    { label: 'Combos',       href: '/office/combos',       Icon: IconBox,            roles: ['business_owner', 'manager'] },
-    { label: 'Transfers',    href: '/office/transfers',    Icon: IconTruck,          roles: ['business_owner', 'manager'] },
-    { label: 'Locations',    href: '/office/locations',    Icon: IconMapPin,         roles: ['business_owner', 'manager'] },
-    { label: 'Reports',      href: '/office/reports',      Icon: IconDocumentReport, roles: null },
-    { label: 'Users',        href: '/office/users',        Icon: IconUsers,          roles: ['business_owner', 'manager'] },
-    { label: 'Settings',     href: '/office/settings',     Icon: IconCog,            roles: ['business_owner'] },
+    { label: 'Dashboard',       href: '/office/dashboard',       Icon: IconChart,          roles: null },
+    { label: 'Transactions',    href: '/office/transactions',    Icon: IconReceipt,        roles: null },
+    { label: 'Shifts',          href: '/office/shifts',          Icon: IconClock,          roles: null },
+    { label: 'Products',        href: '/office/products',        Icon: IconBox,            roles: ['business_owner', 'manager'] },
+    { label: 'Combos',          href: '/office/combos',          Icon: IconBox,            roles: ['business_owner', 'manager'] },
+    { label: 'Storeman',        href: '/office/storeman',        Icon: IconMapPin,         roles: ['business_owner', 'manager'] },
+    { label: 'Transfers',       href: '/office/transfers',       Icon: IconTruck,          roles: ['business_owner', 'manager'] },
+    { label: 'Suppliers',       href: '/office/suppliers',       Icon: IconTruck,          roles: ['business_owner', 'manager'] },
+    { label: 'Purchase Orders', href: '/office/purchase-orders', Icon: IconBox,            roles: ['business_owner', 'manager'] },
+    { label: 'Stocktakes',      href: '/office/stocktakes',      Icon: IconBox,            roles: ['business_owner', 'manager'] },
+    { label: 'Customers',       href: '/office/customers',       Icon: IconUsers,          roles: ['business_owner', 'manager'] },
+    { label: 'Locations',       href: '/office/locations',       Icon: IconMapPin,         roles: ['business_owner', 'manager'] },
+    { label: 'Reports',         href: '/office/reports',         Icon: IconDocumentReport, roles: null },
+    { label: 'Users',           href: '/office/users',           Icon: IconUsers,          roles: ['business_owner', 'manager'] },
+    { label: 'Settings',        href: '/office/settings',        Icon: IconCog,            roles: ['business_owner'] },
 ];
 
 export default function BackOfficeLayout({ children }: PropsWithChildren) {

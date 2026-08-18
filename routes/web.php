@@ -3,13 +3,18 @@
 use App\Http\Controllers\ActivationCodeController;
 use App\Http\Controllers\BackOffice\BundlesController as BackOfficeBundles;
 use App\Http\Controllers\BackOffice\CategoriesController as BackOfficeCategories;
+use App\Http\Controllers\BackOffice\CustomersController as BackOfficeCustomers;
 use App\Http\Controllers\BackOffice\DashboardController as BackOfficeDashboard;
 use App\Http\Controllers\BackOffice\LocationsController as BackOfficeLocations;
 use App\Http\Controllers\BackOffice\ProductsController as BackOfficeProducts;
+use App\Http\Controllers\BackOffice\PurchaseOrdersController as BackOfficePurchaseOrders;
 use App\Http\Controllers\BackOffice\ReportsController as BackOfficeReports;
 use App\Http\Controllers\BackOffice\SessionController as BackOfficeSession;
 use App\Http\Controllers\BackOffice\SettingsController as BackOfficeSettings;
 use App\Http\Controllers\BackOffice\ShiftsController as BackOfficeShifts;
+use App\Http\Controllers\BackOffice\StockTakesController as BackOfficeStockTakes;
+use App\Http\Controllers\BackOffice\StoremanController as BackOfficeStoreman;
+use App\Http\Controllers\BackOffice\SuppliersController as BackOfficeSuppliers;
 use App\Http\Controllers\BackOffice\TransactionsController as BackOfficeTransactions;
 use App\Http\Controllers\BackOffice\TransfersController as BackOfficeTransfers;
 use App\Http\Controllers\BackOffice\UsersController as BackOfficeUsers;
@@ -126,6 +131,28 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::post('transfers/{transfer}/cancel', [BackOfficeTransfers::class, 'cancel'])->name('transfers.cancel');
         Route::get('settings', [BackOfficeSettings::class, 'edit'])->name('settings.edit');
         Route::post('settings/reset-stock', [BackOfficeSettings::class, 'resetStock'])->name('settings.reset-stock');
+
+        Route::get('suppliers', [BackOfficeSuppliers::class, 'index'])->name('suppliers.index');
+        Route::post('suppliers', [BackOfficeSuppliers::class, 'store'])->name('suppliers.store');
+        Route::put('suppliers/{supplier}', [BackOfficeSuppliers::class, 'update'])->name('suppliers.update');
+        Route::patch('suppliers/{supplier}/toggle-active', [BackOfficeSuppliers::class, 'toggleActive'])->name('suppliers.toggle-active');
+
+        Route::get('purchase-orders', [BackOfficePurchaseOrders::class, 'index'])->name('purchase-orders.index');
+        Route::get('purchase-orders/{purchaseOrder}', [BackOfficePurchaseOrders::class, 'show'])->name('purchase-orders.show');
+        Route::post('purchase-orders/{purchaseOrder}/cancel', [BackOfficePurchaseOrders::class, 'cancel'])->name('purchase-orders.cancel');
+
+        Route::get('stocktakes', [BackOfficeStockTakes::class, 'index'])->name('stocktakes.index');
+        Route::get('stocktakes/{stockTake}', [BackOfficeStockTakes::class, 'show'])->name('stocktakes.show');
+        Route::post('stocktakes/{stockTake}/approve', [BackOfficeStockTakes::class, 'approve'])->name('stocktakes.approve');
+        Route::post('stocktakes/{stockTake}/reject', [BackOfficeStockTakes::class, 'reject'])->name('stocktakes.reject');
+        Route::post('stocktakes/{stockTake}/reopen', [BackOfficeStockTakes::class, 'reopen'])->name('stocktakes.reopen');
+
+        Route::get('customers', [BackOfficeCustomers::class, 'index'])->name('customers.index');
+        Route::get('customers/{customer}', [BackOfficeCustomers::class, 'show'])->name('customers.show');
+        Route::put('customers/{customer}', [BackOfficeCustomers::class, 'update'])->name('customers.update');
+
+        Route::get('storeman', [BackOfficeStoreman::class, 'index'])->name('storeman.index');
+        Route::post('storeman/suggested-transfer', [BackOfficeStoreman::class, 'createSuggestedTransfer'])->name('storeman.suggested-transfer');
     });
 });
 
