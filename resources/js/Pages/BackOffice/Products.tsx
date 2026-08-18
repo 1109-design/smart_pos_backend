@@ -10,14 +10,24 @@ interface StockLocationRow {
     reserved_quantity: number;
 }
 
+interface ContainerLinkRow {
+    id: string;
+    container_product_id: string;
+    quantity_per_unit: number;
+}
+
 interface ProductRow {
     id: string;
     name: string;
-    item_type: 'product' | 'service';
+    item_type: 'product' | 'service' | 'container';
     sku: string | null;
     barcode: string | null;
     price: string;
     cost_price: string;
+    min_price: string | null;
+    discount_percent: string | null;
+    deposit_amount: string | null;
+    expiry_date: string | null;
     unit: string;
     track_stock: boolean;
     stock_quantity: string;
@@ -27,6 +37,13 @@ interface ProductRow {
     synced_devices: number | null;
     total_devices: number;
     stock_by_location?: StockLocationRow[];
+    container_links?: ContainerLinkRow[];
+}
+
+interface ContainerOption {
+    id: string;
+    name: string;
+    deposit_amount: string | null;
 }
 
 interface CategoryRow {
@@ -51,15 +68,20 @@ interface Props {
     products: Paginated<ProductRow>;
     categories: CategoryRow[];
     locations: LocationOption[];
+    containers: ContainerOption[];
     default_location_id: string;
     filters: { type: string; search: string };
 }
 
 const EMPTY_FORM = {
     name: '',
-    item_type: 'product' as 'product' | 'service',
+    item_type: 'product' as 'product' | 'service' | 'container',
     price: '',
     cost_price: '',
+    min_price: '',
+    discount_percent: '',
+    deposit_amount: '',
+    expiry_date: '',
     sku: '',
     barcode: '',
     category_id: '',
@@ -69,6 +91,7 @@ const EMPTY_FORM = {
     low_stock_threshold: '5',
     location_id: '',
     is_active: true as boolean,
+    container_links: [] as { container_product_id: string; quantity_per_unit: string }[],
 };
 
 function SyncBadge({ synced, total }: { synced: number | null; total: number }) {
@@ -111,7 +134,19 @@ function StockByLocation({ rows }: { rows: StockLocationRow[] }) {
     );
 }
 
-export default function BackOfficeProducts({ products, categories, locations, default_location_id, filters }: Props) {
+function typeBadgeClass(itemType: ProductRow['item_type']): string {
+    if (itemType === 'service') return 'bg-sky-50 text-sky-700';
+    if (itemType === 'container') return 'bg-amber-50 text-amber-700';
+    return 'bg-slate-100 text-slate-600';
+}
+
+function typeLabel(itemType: ProductRow['item_type']): string {
+    if (itemType === 'service') return 'Service';
+    if (itemType === 'container') return 'Container';
+    return 'Product';
+}
+
+export default function BackOfficeProducts({ products, categories, locations, containers, default_location_id, filters }: Props) {
     const [search, setSearch] = useState(filters.search);
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [editing, setEditing] = useState<ProductRow | null>(null);
@@ -166,6 +201,10 @@ export default function BackOfficeProducts({ products, categories, locations, de
             item_type: row.item_type,
             price: String(row.price),
             cost_price: String(row.cost_price ?? ''),
+            min_price: row.min_price ?? '',
+            discount_percent: row.discount_percent ?? '',
+            deposit_amount: row.deposit_amount ?? '',
+            expiry_date: row.expiry_date ? row.expiry_date.slice(0, 10) : '',
             sku: row.sku ?? '',
             barcode: row.barcode ?? '',
             category_id: row.category_id ?? '',
@@ -175,6 +214,10 @@ export default function BackOfficeProducts({ products, categories, locations, de
             low_stock_threshold: String(row.low_stock_threshold ?? '5'),
             location_id: '',
             is_active: row.is_active,
+            container_links: (row.container_links ?? []).map((link) => ({
+                container_product_id: link.container_product_id,
+                quantity_per_unit: String(link.quantity_per_unit),
+            })),
         });
         form.clearErrors();
         setEditing(row);
@@ -195,6 +238,29 @@ export default function BackOfficeProducts({ products, categories, locations, de
     };
 
     const isService = form.data.item_type === 'service';
+    const isContainer = form.data.item_type === 'container';
+    const activeContainers = containers;
+
+    const addContainerLink = () => {
+        if (activeContainers.length === 0) return;
+        const used = new Set(form.data.container_links.map((l) => l.container_product_id));
+        const next = activeContainers.find((c) => !used.has(c.id)) ?? activeContainers[0];
+        form.setData('container_links', [
+            ...form.data.container_links,
+            { container_product_id: next.id, quantity_per_unit: '1' },
+        ]);
+    };
+
+    const updateContainerLink = (index: number, patch: Partial<{ container_product_id: string; quantity_per_unit: string }>) => {
+        form.setData(
+            'container_links',
+            form.data.container_links.map((link, i) => (i === index ? { ...link, ...patch } : link))
+        );
+    };
+
+    const removeContainerLink = (index: number) => {
+        form.setData('container_links', form.data.container_links.filter((_, i) => i !== index));
+    };
 
     const submitImport = (e: React.FormEvent) => {
         e.preventDefault();
@@ -265,6 +331,7 @@ export default function BackOfficeProducts({ products, categories, locations, de
                     { value: 'all', label: 'All' },
                     { value: 'product', label: 'Products' },
                     { value: 'service', label: 'Services' },
+                    { value: 'container', label: 'Containers' },
                 ].map(({ value, label }) => (
                     <button
                         key={value}
@@ -307,10 +374,8 @@ export default function BackOfficeProducts({ products, categories, locations, de
                                 <span className="text-base font-bold text-slate-900 flex-shrink-0">{Number(row.price).toFixed(2)}</span>
                             </div>
                             <div className="flex flex-wrap items-center gap-2 mt-2.5">
-                                <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${
-                                    row.item_type === 'service' ? 'bg-sky-50 text-sky-700' : 'bg-slate-100 text-slate-600'
-                                }`}>
-                                    {row.item_type === 'service' ? 'Service' : 'Product'}
+                                <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${typeBadgeClass(row.item_type)}`}>
+                                    {typeLabel(row.item_type)}
                                 </span>
                                 <span className={`text-xs font-medium ${row.is_active ? 'text-emerald-600' : 'text-slate-400'}`}>
                                     {row.is_active ? 'Active' : 'Archived'}
@@ -468,8 +533,8 @@ export default function BackOfficeProducts({ products, categories, locations, de
                     <p className="text-base font-semibold text-slate-800 mb-4">{editing ? 'Edit Item' : 'New Item'}</p>
 
                     {/* Type selector */}
-                    <div className="grid grid-cols-2 gap-3 mb-4">
-                        {(['product', 'service'] as const).map((type) => (
+                    <div className="grid grid-cols-3 gap-3 mb-4">
+                        {(['product', 'service', 'container'] as const).map((type) => (
                             <button
                                 type="button"
                                 key={type}
@@ -480,45 +545,87 @@ export default function BackOfficeProducts({ products, categories, locations, de
                                         : 'border-slate-200 hover:border-emerald-300'
                                 }`}
                             >
-                                <p className="text-sm font-semibold text-slate-800">{type === 'product' ? 'Product' : 'Service'}</p>
-                                <p className="text-xs text-slate-500">{type === 'product' ? 'Physical goods with stock' : 'No stock — e.g. repair, delivery'}</p>
+                                <p className="text-sm font-semibold text-slate-800">{type === 'product' ? 'Product' : type === 'service' ? 'Service' : 'Container'}</p>
+                                <p className="text-xs text-slate-500">
+                                    {type === 'product' ? 'Physical goods with stock' : type === 'service' ? 'No stock — e.g. repair, delivery' : 'Returnable bottle/crate + deposit'}
+                                </p>
                             </button>
                         ))}
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <div className="sm:col-span-2">
-                            <label className="text-xs font-semibold text-slate-500">{isService ? 'Service name' : 'Product name'}</label>
+                            <label className="text-xs font-semibold text-slate-500">{isContainer ? 'Container name' : isService ? 'Service name' : 'Product name'}</label>
                             <input
                                 type="text"
                                 value={form.data.name}
                                 onChange={(e) => form.setData('name', e.target.value)}
                                 className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                                placeholder={isService ? 'e.g. Phone Screen Repair' : 'e.g. Coca Cola 300ml'}
+                                placeholder={isContainer ? 'e.g. Quart Bottle' : isService ? 'e.g. Phone Screen Repair' : 'e.g. Coca Cola 300ml'}
                             />
                             {form.errors.name && <p className="text-xs text-red-500 mt-1">{form.errors.name}</p>}
                         </div>
 
-                        <div>
-                            <label className="text-xs font-semibold text-slate-500">Selling price</label>
-                            <input
-                                type="number" step="0.01" min="0"
-                                value={form.data.price}
-                                onChange={(e) => form.setData('price', e.target.value)}
-                                className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                            />
-                            {form.errors.price && <p className="text-xs text-red-500 mt-1">{form.errors.price}</p>}
-                        </div>
+                        {isContainer ? (
+                            <div className="sm:col-span-2 rounded-xl bg-amber-50 border border-amber-100 px-4 py-3">
+                                <p className="text-xs text-amber-800 mb-3">
+                                    Charged when this container leaves the shop with a sale, refunded when the customer returns the empty.
+                                </p>
+                                <label className="text-xs font-semibold text-slate-500">Deposit amount</label>
+                                <input
+                                    type="number" step="0.01" min="0"
+                                    value={form.data.deposit_amount}
+                                    onChange={(e) => form.setData('deposit_amount', e.target.value)}
+                                    className="mt-1 w-full sm:w-56 text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                />
+                                {form.errors.deposit_amount && <p className="text-xs text-red-500 mt-1">{form.errors.deposit_amount}</p>}
+                            </div>
+                        ) : (
+                            <>
+                                <div>
+                                    <label className="text-xs font-semibold text-slate-500">Selling price</label>
+                                    <input
+                                        type="number" step="0.01" min="0"
+                                        value={form.data.price}
+                                        onChange={(e) => form.setData('price', e.target.value)}
+                                        className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                    />
+                                    {form.errors.price && <p className="text-xs text-red-500 mt-1">{form.errors.price}</p>}
+                                </div>
 
-                        <div>
-                            <label className="text-xs font-semibold text-slate-500">Cost price</label>
-                            <input
-                                type="number" step="0.01" min="0"
-                                value={form.data.cost_price}
-                                onChange={(e) => form.setData('cost_price', e.target.value)}
-                                className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                            />
-                        </div>
+                                <div>
+                                    <label className="text-xs font-semibold text-slate-500">Cost price</label>
+                                    <input
+                                        type="number" step="0.01" min="0"
+                                        value={form.data.cost_price}
+                                        onChange={(e) => form.setData('cost_price', e.target.value)}
+                                        className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className="text-xs font-semibold text-slate-500">Negotiation floor</label>
+                                    <input
+                                        type="number" step="0.01" min="0"
+                                        value={form.data.min_price}
+                                        onChange={(e) => form.setData('min_price', e.target.value)}
+                                        placeholder="Minimum allowed price"
+                                        className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className="text-xs font-semibold text-slate-500">Default discount %</label>
+                                    <input
+                                        type="number" step="0.01" min="0" max="100"
+                                        value={form.data.discount_percent}
+                                        onChange={(e) => form.setData('discount_percent', e.target.value)}
+                                        placeholder="Automatic discount"
+                                        className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                    />
+                                </div>
+                            </>
+                        )}
 
                         <div>
                             <label className="text-xs font-semibold text-slate-500">Category</label>
@@ -576,6 +683,15 @@ export default function BackOfficeProducts({ products, categories, locations, de
                                         className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                                     />
                                 </div>
+                                <div>
+                                    <label className="text-xs font-semibold text-slate-500">Expiry date</label>
+                                    <input
+                                        type="date"
+                                        value={form.data.expiry_date}
+                                        onChange={(e) => form.setData('expiry_date', e.target.value)}
+                                        className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                    />
+                                </div>
                                 {!editing && locations.length > 1 && (
                                     <div>
                                         <label className="text-xs font-semibold text-slate-500">Opening stock goes to</label>
@@ -601,6 +717,52 @@ export default function BackOfficeProducts({ products, categories, locations, de
                             </div>
                         )}
                     </div>
+
+                    {form.data.item_type === 'product' && activeContainers.length > 0 && (
+                        <div className="mt-4">
+                            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Returnable packaging</p>
+                            <p className="text-xs text-slate-500 mb-2">
+                                The deposit-bearing container(s) this product carries when sold, and how many of each per unit (e.g. a crate of 12 links 1× Crate + 12× Bottle).
+                            </p>
+                            <div className="space-y-2">
+                                {form.data.container_links.map((link, i) => (
+                                    <div key={i} className="flex items-center gap-2">
+                                        <select
+                                            value={link.container_product_id}
+                                            onChange={(e) => updateContainerLink(i, { container_product_id: e.target.value })}
+                                            className="flex-1 text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                        >
+                                            {activeContainers.map((c) => (
+                                                <option key={c.id} value={c.id}>
+                                                    {c.name}{c.deposit_amount ? ` — deposit ${Number(c.deposit_amount).toFixed(2)}` : ''}
+                                                </option>
+                                            ))}
+                                        </select>
+                                        <input
+                                            type="number" step="1" min="1"
+                                            value={link.quantity_per_unit}
+                                            onChange={(e) => updateContainerLink(i, { quantity_per_unit: e.target.value })}
+                                            className="w-20 text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => removeContainerLink(i)}
+                                            className="text-xs font-semibold text-slate-400 hover:text-red-600 flex-shrink-0"
+                                        >
+                                            Remove
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                            <button
+                                type="button"
+                                onClick={addContainerLink}
+                                className="mt-2 text-xs font-semibold text-emerald-600 hover:text-emerald-800"
+                            >
+                                + Add container
+                            </button>
+                        </div>
+                    )}
 
                     <div className="mt-6 flex justify-end gap-2">
                         <button type="button" onClick={() => setShowForm(false)} className="text-sm px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100">

@@ -7,6 +7,7 @@ use App\Models\Category;
 use App\Models\Device;
 use App\Models\Location;
 use App\Models\Product;
+use App\Models\ProductContainerLink;
 use App\Models\ProductStock;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
@@ -46,7 +47,7 @@ class ProductsController extends Controller
 
         $products = Product::query()
             ->where('business_id', $tenantId)
-            ->when($typeFilter === 'product' || $typeFilter === 'service',
+            ->when(in_array($typeFilter, ['product', 'service', 'container'], true),
                 fn ($query) => $query->where('item_type', $typeFilter))
             ->when($search !== '', fn ($query) => $query->where(function ($q) use ($search) {
                 $q->where('name', 'like', "%{$search}%")
@@ -56,6 +57,7 @@ class ProductsController extends Controller
             ->orderBy('name')
             ->select([
                 'id', 'name', 'item_type', 'sku', 'barcode', 'price', 'cost_price',
+                'min_price', 'discount_percent', 'deposit_amount', 'expiry_date',
                 'unit', 'track_stock', 'stock_quantity', 'low_stock_threshold',
                 'category_id', 'is_active',
             ])
@@ -63,6 +65,7 @@ class ProductsController extends Controller
             ->withQueryString();
 
         $this->attachSyncStatus($products);
+        $this->attachContainerLinks($products);
 
         $activeLocations = Location::where('business_id', $tenantId)->where('is_active', true)->orderBy('name')->get(['id', 'name', 'type']);
 
@@ -78,8 +81,48 @@ class ProductsController extends Controller
             'categories' => Category::where('business_id', $tenantId)->orderBy('name')->get(['id', 'name', 'is_active']),
             'locations' => $activeLocations,
             'default_location_id' => $defaultLocation->id,
+            // For the returnable-packaging picker on a 'product' item — every
+            // active container this business has defined, deposit included so
+            // the picker can show it the way the mobile form does.
+            'containers' => Product::where('business_id', $tenantId)
+                ->where('item_type', 'container')
+                ->where('is_active', true)
+                ->orderBy('name')
+                ->get(['id', 'name', 'deposit_amount']),
             'filters' => ['type' => $typeFilter ?: 'all', 'search' => $search],
         ]);
+    }
+
+    /**
+     * Attach each 'product'-type row's current returnable-packaging links
+     * (which container(s) it carries when sold, and the qty of each) so the
+     * edit form can prefill them — mirrors attachLocationStock() below.
+     */
+    private function attachContainerLinks(LengthAwarePaginator $products): void
+    {
+        $productIds = $products->getCollection()
+            ->filter(fn (Product $product) => $product->item_type === 'product')
+            ->pluck('id');
+
+        if ($productIds->isEmpty()) {
+            return;
+        }
+
+        $links = ProductContainerLink::whereIn('beverage_product_id', $productIds)
+            ->get(['id', 'beverage_product_id', 'container_product_id', 'quantity_per_unit'])
+            ->groupBy('beverage_product_id');
+
+        $products->getCollection()->transform(function (Product $product) use ($links) {
+            $product->container_links = ($links->get($product->id) ?? collect())
+                ->map(fn (ProductContainerLink $link) => [
+                    'id' => $link->id,
+                    'container_product_id' => $link->container_product_id,
+                    'quantity_per_unit' => (float) $link->quantity_per_unit,
+                ])
+                ->values();
+
+            return $product;
+        });
     }
 
     /**
@@ -257,6 +300,13 @@ class ProductsController extends Controller
                 // follows (it disables the field and resubmits the current value).
                 $payload['stock_quantity'] = (float) $existing->stock_quantity;
                 $payload['is_active'] = $existing->is_active;
+                // The CSV format has no columns for these — without carrying
+                // the existing values through, the full-row sync overwrite
+                // below would silently null them out on every re-import.
+                $payload['min_price'] = $existing->min_price !== null ? (float) $existing->min_price : null;
+                $payload['discount_percent'] = $existing->discount_percent !== null ? (float) $existing->discount_percent : null;
+                $payload['deposit_amount'] = $existing->deposit_amount !== null ? (float) $existing->deposit_amount : null;
+                $payload['expiry_date'] = $existing->expiry_date?->toIso8601String();
                 $this->applyThroughSyncPipeline($processor, $existing->id, $payload);
                 $updated++;
             } else {
@@ -353,6 +403,8 @@ class ProductsController extends Controller
     public function store(Request $request, SyncProcessor $processor, LocationService $locations): RedirectResponse
     {
         $data = $this->validatePayload($request);
+        $containerLinks = $data['container_links'];
+        unset($data['container_links']);
 
         // Opening stock has to land somewhere. If the form didn't specify a
         // location (or this is a service, where it's moot), fall back to the
@@ -361,17 +413,27 @@ class ProductsController extends Controller
             $data['location_id'] = $locations->ensureDefaultLocation($this->tenantId())->id;
         }
 
-        $this->applyThroughSyncPipeline($processor, (string) Str::uuid(), $data);
+        $uuid = (string) Str::uuid();
+        $this->applyThroughSyncPipeline($processor, $uuid, $data);
+        $this->applyContainerLinks($processor, $uuid, $containerLinks, existingLinks: collect());
 
         return back()->with('success', 'Item created. Devices will receive it on their next sync.');
     }
 
     public function update(Request $request, string $product, SyncProcessor $processor): RedirectResponse
     {
-        Product::where('business_id', $this->tenantId())->findOrFail($product);
-        $data = $this->validatePayload($request);
+        $existing = Product::where('business_id', $this->tenantId())->findOrFail($product);
+        $data = $this->validatePayload($request, $existing);
+        $containerLinks = $data['container_links'];
+        unset($data['container_links']);
 
         $this->applyThroughSyncPipeline($processor, $product, $data);
+        $this->applyContainerLinks(
+            $processor,
+            $product,
+            $containerLinks,
+            existingLinks: ProductContainerLink::where('beverage_product_id', $product)->get()
+        );
 
         return back()->with('success', 'Item updated. Devices will receive it on their next sync.');
     }
@@ -397,11 +459,13 @@ class ProductsController extends Controller
             'min_price' => $existing->min_price !== null ? (float) $existing->min_price : null,
             'discount_percent' => $existing->discount_percent !== null ? (float) $existing->discount_percent : null,
             'cost_price' => (float) $existing->cost_price,
+            'deposit_amount' => $existing->deposit_amount !== null ? (float) $existing->deposit_amount : null,
             'unit' => $existing->unit,
             'track_stock' => (bool) $existing->track_stock,
             'stock_quantity' => (float) $existing->stock_quantity,
             'low_stock_threshold' => (float) $existing->low_stock_threshold,
             'image_path' => $existing->image_path,
+            'expiry_date' => $existing->expiry_date?->toIso8601String(),
             'is_active' => ! $existing->is_active,
         ];
 
@@ -414,13 +478,16 @@ class ProductsController extends Controller
     /**
      * @return array<string, mixed>
      */
-    private function validatePayload(Request $request): array
+    private function validatePayload(Request $request, ?Product $existing = null): array
     {
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'item_type' => ['required', 'in:product,service'],
-            'price' => ['required', 'numeric', 'min:0'],
+            'item_type' => ['required', 'in:product,service,container'],
+            'price' => ['required_unless:item_type,container', 'nullable', 'numeric', 'min:0'],
             'cost_price' => ['nullable', 'numeric', 'min:0'],
+            'min_price' => ['nullable', 'numeric', 'min:0'],
+            'discount_percent' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            'deposit_amount' => ['nullable', 'numeric', 'min:0'],
             'sku' => ['nullable', 'string', 'max:100'],
             'barcode' => ['nullable', 'string', 'max:100'],
             'category_id' => ['nullable', 'string', 'exists:categories,id'],
@@ -428,11 +495,42 @@ class ProductsController extends Controller
             'track_stock' => ['boolean'],
             'stock_quantity' => ['nullable', 'numeric', 'min:0'],
             'low_stock_threshold' => ['nullable', 'numeric', 'min:0'],
+            'expiry_date' => ['nullable', 'date'],
             'location_id' => ['nullable', 'string', Rule::exists('locations', 'id')->where('business_id', $this->tenantId())],
             'is_active' => ['boolean'],
+            // Returnable packaging: containers (by id) this product carries
+            // when sold, and how many of each per unit. Only meaningful for
+            // item_type=product — see applyContainerLinks().
+            'container_links' => ['nullable', 'array'],
+            'container_links.*.container_product_id' => [
+                'required_with:container_links',
+                'string',
+                Rule::exists('products', 'id')->where('business_id', $this->tenantId())->where('item_type', 'container'),
+            ],
+            'container_links.*.quantity_per_unit' => ['required_with:container_links', 'numeric', 'min:0.0001'],
         ]);
 
         $isService = $validated['item_type'] === 'service';
+        $isContainer = $validated['item_type'] === 'container';
+
+        // The current BackOffice form always sends these four, but they're
+        // easy to leave out of a future minimal integration (as the old CSV
+        // importer and toggleActive() payloads once did) — falling back to
+        // the existing row rather than defaulting to null means an update
+        // can never silently wipe them just by omitting the field. Only
+        // matters for update() (store() has no existing row).
+        $minPrice = $request->has('min_price')
+            ? ($validated['min_price'] ?? null)
+            : ($existing?->min_price !== null ? (float) $existing->min_price : null);
+        $discountPercent = $request->has('discount_percent')
+            ? ($validated['discount_percent'] ?? null)
+            : ($existing?->discount_percent !== null ? (float) $existing->discount_percent : null);
+        $depositAmount = $request->has('deposit_amount')
+            ? ($validated['deposit_amount'] ?? null)
+            : ($existing?->deposit_amount !== null ? (float) $existing->deposit_amount : null);
+        $expiryDate = $request->has('expiry_date')
+            ? ($validated['expiry_date'] ?? null)
+            : $existing?->expiry_date?->toIso8601String();
 
         return [
             'category_id' => $validated['category_id'] ?? null,
@@ -440,16 +538,26 @@ class ProductsController extends Controller
             'item_type' => $validated['item_type'],
             'sku' => $validated['sku'] ?? null,
             'barcode' => $validated['barcode'] ?? null,
-            'price' => $validated['price'],
+            // Containers aren't sold at a price — they carry a refundable
+            // deposit instead (see deposit_amount below), mirroring the
+            // mobile app's product_form_screen.dart.
+            'price' => $isContainer ? 0 : $validated['price'],
+            'min_price' => $isContainer ? null : $minPrice,
+            'discount_percent' => $isContainer ? null : $discountPercent,
             'cost_price' => $validated['cost_price'] ?? 0,
+            'deposit_amount' => $isContainer ? ($depositAmount ?? 0) : null,
             'unit' => $isService ? 'service' : ($validated['unit'] ?? 'piece'),
             'track_stock' => $isService ? false : ($validated['track_stock'] ?? true),
             'stock_quantity' => $isService ? 0 : ($validated['stock_quantity'] ?? 0),
             'low_stock_threshold' => $validated['low_stock_threshold'] ?? 5,
+            'expiry_date' => $isService ? null : $expiryDate,
             // Only meaningful on create — see store(); update() leaves stock
             // untouched and never sends this field.
             'location_id' => $isService ? null : ($validated['location_id'] ?? null),
             'is_active' => $validated['is_active'] ?? true,
+            // Stripped off in store()/update() before the product payload is
+            // built — not a Product column, handled by applyContainerLinks().
+            'container_links' => $isContainer ? [] : ($validated['container_links'] ?? []),
         ];
     }
 
@@ -466,6 +574,54 @@ class ProductsController extends Controller
 
         $processor->process('products', $uuid, 'upsert', $data);
         $this->publishSyncRecord($uuid, $data);
+    }
+
+    /**
+     * Replace a beverage product's returnable-packaging links: delete every
+     * existing link, then upsert the submitted set, mirroring both into the
+     * sync stream so every device (including newly paired ones) receives the
+     * change — same delete-then-recreate pattern as BundlesController's
+     * bundle_items, and the mobile app's own product_form_screen.dart.
+     *
+     * @param  array<int, array{container_product_id: string, quantity_per_unit: float|int|string}>  $links
+     * @param  Collection<int, ProductContainerLink>  $existingLinks
+     */
+    private function applyContainerLinks(SyncProcessor $processor, string $beverageProductId, array $links, Collection $existingLinks): void
+    {
+        $businessId = $this->tenantId();
+
+        foreach ($existingLinks as $old) {
+            $processor->process('product_container_links', $old->id, 'delete', ['business_id' => $businessId]);
+            SyncRecord::create([
+                'business_id' => $businessId,
+                'table_name' => 'product_container_links',
+                'record_uuid' => $old->id,
+                'operation' => 'delete',
+                'payload' => [],
+                'source_updated_at' => now(),
+                'synced_at' => now(),
+            ]);
+        }
+
+        foreach ($links as $link) {
+            $linkId = (string) Str::uuid();
+            $linkPayload = [
+                'business_id' => $businessId,
+                'beverage_product_id' => $beverageProductId,
+                'container_product_id' => $link['container_product_id'],
+                'quantity_per_unit' => (float) $link['quantity_per_unit'],
+            ];
+            $processor->process('product_container_links', $linkId, 'upsert', $linkPayload);
+            SyncRecord::create([
+                'business_id' => $businessId,
+                'table_name' => 'product_container_links',
+                'record_uuid' => $linkId,
+                'operation' => 'upsert',
+                'payload' => $linkPayload,
+                'source_updated_at' => now(),
+                'synced_at' => now(),
+            ]);
+        }
     }
 
     /**

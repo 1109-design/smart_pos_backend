@@ -7,6 +7,7 @@ use App\Models\Category;
 use App\Models\Device;
 use App\Models\Location;
 use App\Models\Product;
+use App\Models\ProductContainerLink;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
 use App\Models\Tenant;
@@ -193,6 +194,165 @@ class BackOfficeProductsTest extends TestCase
         $this->assertNotNull($syncRecord);
         $this->assertSame('Keep My Name', $syncRecord->payload['name']);
         $this->assertFalse((bool) $syncRecord->payload['is_active']);
+    }
+
+    public function test_toggle_active_preserves_deposit_amount_and_expiry_date(): void
+    {
+        $tenantId = 'tenant-office-prod-toggle-deposit';
+        $this->actingBackOfficeSession($tenantId);
+
+        $productId = (string) Str::uuid();
+        Product::create([
+            'id' => $productId,
+            'business_id' => $tenantId,
+            'name' => 'Quart Bottle',
+            'item_type' => 'container',
+            'price' => 0,
+            'deposit_amount' => 1.5,
+            'expiry_date' => '2027-01-01',
+        ]);
+
+        $this->patch("/office/products/{$productId}/toggle-active")->assertRedirect();
+
+        $this->assertDatabaseHas('products', [
+            'id' => $productId,
+            'deposit_amount' => 1.5,
+            'is_active' => false,
+        ]);
+        $this->assertNotNull(Product::find($productId)->expiry_date);
+    }
+
+    /**
+     * The edit form only ever sends the fields it exposes — min_price,
+     * discount_percent, deposit_amount and expiry_date aren't among them.
+     * Regression test for the bug where updating just the price wiped those
+     * four columns to null (both here and on every device that later synced
+     * the change), because the sync pipeline treats every 'products' record
+     * as a full-row overwrite.
+     */
+    public function test_update_preserves_fields_the_edit_form_does_not_send(): void
+    {
+        $tenantId = 'tenant-office-prod-preserve';
+        $this->actingBackOfficeSession($tenantId);
+
+        $productId = (string) Str::uuid();
+        Product::create([
+            'id' => $productId,
+            'business_id' => $tenantId,
+            'name' => 'Coca Cola 500ml',
+            'item_type' => 'product',
+            'price' => 1.50,
+            'min_price' => 1.00,
+            'discount_percent' => 5,
+            'expiry_date' => '2027-06-01',
+            'stock_quantity' => 20,
+        ]);
+
+        // A minimal edit — the way the BackOffice form actually submits,
+        // with no min_price/discount_percent/expiry_date fields at all.
+        $response = $this->put("/office/products/{$productId}", [
+            'name' => 'Coca Cola 500ml',
+            'item_type' => 'product',
+            'price' => 1.75,
+            'stock_quantity' => 20,
+        ]);
+
+        $response->assertRedirect();
+
+        $product = Product::find($productId);
+        $this->assertSame('1.7500', $product->price);
+        $this->assertSame('1.0000', $product->min_price);
+        $this->assertSame('5.00', $product->discount_percent);
+        $this->assertNotNull($product->expiry_date);
+
+        $syncRecord = SyncRecord::where('record_uuid', $productId)->latest('id')->first();
+        $this->assertEquals(1.0, $syncRecord->payload['min_price']);
+        $this->assertEquals(5, $syncRecord->payload['discount_percent']);
+    }
+
+    public function test_container_product_can_be_created_with_a_deposit_and_linked_from_a_beverage(): void
+    {
+        $tenantId = 'tenant-office-prod-container';
+        $this->actingBackOfficeSession($tenantId);
+
+        $containerResponse = $this->post('/office/products', [
+            'name' => 'Quart Bottle',
+            'item_type' => 'container',
+            'deposit_amount' => 0.5,
+            'track_stock' => true,
+            'stock_quantity' => 100,
+        ]);
+        $containerResponse->assertRedirect();
+
+        $container = Product::where('business_id', $tenantId)->where('item_type', 'container')->firstOrFail();
+        $this->assertSame('0.5000', $container->deposit_amount);
+        $this->assertSame('0.0000', $container->price);
+
+        $beverageResponse = $this->post('/office/products', [
+            'name' => 'Delta Lager Quart',
+            'item_type' => 'product',
+            'price' => 1.20,
+            'stock_quantity' => 0,
+            'container_links' => [
+                ['container_product_id' => $container->id, 'quantity_per_unit' => 1],
+            ],
+        ]);
+        $beverageResponse->assertRedirect();
+
+        $beverage = Product::where('business_id', $tenantId)->where('name', 'Delta Lager Quart')->firstOrFail();
+
+        $this->assertDatabaseHas('product_container_links', [
+            'beverage_product_id' => $beverage->id,
+            'container_product_id' => $container->id,
+        ]);
+        $linkSync = SyncRecord::where('table_name', 'product_container_links')
+            ->where('operation', 'upsert')
+            ->latest('id')->first();
+        $this->assertNotNull($linkSync);
+        $this->assertSame($beverage->id, $linkSync->payload['beverage_product_id']);
+    }
+
+    public function test_updating_container_links_replaces_them_and_publishes_a_delete_for_the_removed_one(): void
+    {
+        $tenantId = 'tenant-office-prod-container-update';
+        $this->actingBackOfficeSession($tenantId);
+
+        $bottle = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Bottle', 'item_type' => 'container', 'price' => 0, 'deposit_amount' => 0.3]);
+        $crate = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Crate', 'item_type' => 'container', 'price' => 0, 'deposit_amount' => 5]);
+
+        $beverage = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Lager', 'item_type' => 'product', 'price' => 1.2]);
+        ProductContainerLink::create([
+            'id' => (string) Str::uuid(),
+            'beverage_product_id' => $beverage->id,
+            'container_product_id' => $bottle->id,
+            'quantity_per_unit' => 1,
+        ]);
+
+        // Swap the bottle link for a crate link.
+        $response = $this->put("/office/products/{$beverage->id}", [
+            'name' => 'Lager',
+            'item_type' => 'product',
+            'price' => 1.2,
+            'container_links' => [
+                ['container_product_id' => $crate->id, 'quantity_per_unit' => 12],
+            ],
+        ]);
+        $response->assertRedirect();
+
+        $this->assertDatabaseMissing('product_container_links', [
+            'beverage_product_id' => $beverage->id,
+            'container_product_id' => $bottle->id,
+        ]);
+        $this->assertDatabaseHas('product_container_links', [
+            'beverage_product_id' => $beverage->id,
+            'container_product_id' => $crate->id,
+            'quantity_per_unit' => 12,
+        ]);
+
+        $deleteSync = SyncRecord::where('table_name', 'product_container_links')
+            ->where('operation', 'delete')
+            ->latest('id')->first();
+        $this->assertNotNull($deleteSync);
     }
 
     public function test_index_reports_how_many_of_the_business_devices_have_synced_each_product(): void
