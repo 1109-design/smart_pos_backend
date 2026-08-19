@@ -544,7 +544,9 @@ class SyncProcessor
                 break;
 
             case 'transactions':
-                $txExists = Transaction::where('id', $uuid)->exists();
+                $existingTx = Transaction::where('id', $uuid)->first();
+                $txExists = $existingTx !== null;
+                $previousStatus = $existingTx?->status;
                 $txData = [
                     'business_id' => $payload['business_id'] ?? null,
                     'location_id' => $payload['location_id'] ?? null,
@@ -567,10 +569,17 @@ class SyncProcessor
                 }
                 $tx = Transaction::updateOrCreate(['id' => $uuid], $txData);
 
-                // Queue ZIMRA fiscalisation for new completed sales. The service
-                // itself gates on the business's fiscalisation_enabled switch and
-                // the environment guard, so this is a no-op unless configured.
-                if (! $txExists && $tx->status === 'completed') {
+                // Queue ZIMRA fiscalisation whenever a transaction becomes
+                // completed — either brand new, or transitioning from another
+                // status (a layby that's just been paid off in full is the
+                // main case: it already existed as 'layby', so a txExists-only
+                // check never caught it becoming a real completed sale).
+                // queueFiscalisation() is safe to call on an
+                // already-fiscalised transaction — it no-ops immediately once
+                // fiscal_status is 'fiscalised' or ZIMRA has already accepted
+                // the receipt — so this only ever queues real transitions,
+                // never a duplicate submission.
+                if ($tx->status === 'completed' && $previousStatus !== 'completed') {
                     app(ZimraSalesService::class)->queueFiscalisation($tx);
                 }
                 break;

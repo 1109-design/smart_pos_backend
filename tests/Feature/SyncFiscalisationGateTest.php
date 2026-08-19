@@ -151,6 +151,71 @@ class SyncFiscalisationGateTest extends TestCase
         ]);
     }
 
+    public function test_a_layby_transitioning_to_completed_gets_fiscalised(): void
+    {
+        // Regression: the gate used to be "!txExists && status === completed".
+        // A layby is created first with status 'layby', so by the time it's
+        // paid off and flipped to 'completed' the transaction already exists
+        // — that never queued fiscalisation, even though it's a genuine
+        // completed sale at that point.
+        Queue::fake();
+        $tenantId = 'tenant-fiscal-5';
+        $token = $this->actingDeviceToken($tenantId);
+
+        Business::create([
+            'id' => $tenantId,
+            'name' => 'Layby Shop',
+            'fiscalisation_enabled' => true,
+            'tin' => '1234567890',
+        ]);
+
+        ZimraDevice::create([
+            'business_id' => $tenantId,
+            'tin' => '1234567890',
+            'device_id' => '12347',
+            'is_active' => true,
+            'status' => 'active',
+        ]);
+
+        $transactionId = (string) Str::uuid();
+
+        // Created as a layby — must not fiscalise yet.
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'transactions',
+                    'uuid' => $transactionId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'user_id' => '99999999-9999-4999-9999-999999999999',
+                        'subtotal' => 10,
+                        'tax_total' => 1.5,
+                        'total' => 10,
+                        'base_currency' => 'USD',
+                        'status' => 'layby',
+                        'sale_number' => '202607-TEST-LAYBY',
+                        'updated_at' => now()->toIso8601String(),
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ])->assertOk();
+
+        $this->assertDatabaseCount('zimra_sales', 0);
+        Queue::assertNotPushed(ProcessZimraFiscalisationJob::class);
+
+        // Paid off in full — status flips to 'completed' on the same,
+        // already-existing transaction row.
+        $this->pushTransaction($token, $tenantId, $transactionId)->assertOk();
+
+        $this->assertDatabaseHas('zimra_sales', [
+            'transaction_id' => $transactionId,
+            'device_id' => '12347',
+            'status' => 'pending',
+        ]);
+        Queue::assertPushed(ProcessZimraFiscalisationJob::class);
+    }
+
     public function test_updating_an_existing_transaction_does_not_requeue_fiscalisation(): void
     {
         Queue::fake();
