@@ -1060,7 +1060,7 @@ class SyncProcessor
             ->whereExists(function ($q) use ($productId) {
                 $q->from('stock_movements')->where('product_id', $productId);
             })
-            ->update(['stock_quantity' => $computed]);
+            ->update(['stock_quantity' => max(0, $computed)]);
 
         // Broadcast the authoritative recomputed total to every device (this
         // one included) — otherwise only the device that pushed the movement

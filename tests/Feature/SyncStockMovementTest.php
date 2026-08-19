@@ -102,6 +102,60 @@ class SyncStockMovementTest extends TestCase
         ]);
     }
 
+    public function test_product_stock_quantity_never_goes_negative_from_overselling(): void
+    {
+        // recomputeLocationStock already clamped its own ProductStock row to
+        // max(0, ...) — this is the flat products.stock_quantity total, which
+        // didn't, so an oversold product (e.g. two concurrent sales pushed
+        // from different devices before either saw the other's movement)
+        // would leave every device's inventory screen showing a negative
+        // count for it once the recomputed total broadcast back down.
+        $tenantId = 'tenant-sync-stock-4';
+        $token = $this->actingDeviceToken($tenantId);
+
+        $productId = (string) Str::uuid();
+
+        Product::create([
+            'id' => $productId,
+            'business_id' => $tenantId,
+            'name' => 'Oversold Product',
+            'price' => 10,
+            'stock_quantity' => 5,
+        ]);
+
+        StockMovement::create([
+            'business_id' => $tenantId,
+            'product_id' => $productId,
+            'type' => 'opening_stock',
+            'quantity_change' => 5,
+        ]);
+
+        $response = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'stock_movements',
+                    'uuid' => (string) Str::uuid(),
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'product_id' => $productId,
+                        'type' => 'sale',
+                        'quantity_change' => -8,
+                        'user_id' => '99999999-9999-4999-9999-999999999999',
+                        'updated_at' => now()->toIso8601String(),
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ]);
+
+        $response->assertOk();
+
+        $this->assertDatabaseHas('products', [
+            'id' => $productId,
+            'stock_quantity' => 0,
+        ]);
+    }
+
     public function test_new_product_with_opening_stock_gets_a_ledger_entry(): void
     {
         $tenantId = 'tenant-sync-stock-2';
