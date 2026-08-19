@@ -347,6 +347,8 @@ class SyncProcessor
                         'logo_path' => $payload['logo_path'] ?? null,
                         'metadata' => $payload['metadata'] ?? null,
                         'fiscalisation_enabled' => $payload['fiscalisation_enabled'] ?? false,
+                        'day_shift_start' => $payload['day_shift_start'] ?? null,
+                        'night_shift_start' => $payload['night_shift_start'] ?? null,
                     ]
                 );
                 break;

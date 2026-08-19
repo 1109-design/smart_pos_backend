@@ -21,6 +21,8 @@ class Business extends Model
         'logo_path',
         'metadata',
         'fiscalisation_enabled',
+        'day_shift_start',
+        'night_shift_start',
         'stock_reset_at',
         'stock_reset_by_user_id',
     ];
