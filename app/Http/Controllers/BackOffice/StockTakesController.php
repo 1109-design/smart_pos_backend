@@ -4,6 +4,7 @@ namespace App\Http\Controllers\BackOffice;
 
 use App\Http\Controllers\Controller;
 use App\Models\Product;
+use App\Models\StockMovement;
 use App\Models\StockTake;
 use App\Models\SyncRecord;
 use App\Services\SyncProcessor;
@@ -93,7 +94,20 @@ class StockTakesController extends Controller
                 }
 
                 $counted = $item->counted_qty ?? $item->system_qty;
-                $variance = (float) $counted - (float) $item->system_qty;
+
+                // Reconcile against the CURRENT stock at approval time, not
+                // the system_qty snapshot captured when the count started —
+                // stock can move between then and approval (another
+                // device's push landing, etc.), and a stock take must land
+                // on exactly what was physically counted, not a stale delta
+                // stacked on top of whatever the ledger has drifted to.
+                $currentQty = $take->location_id
+                    ? (float) StockMovement::where('product_id', $item->product_id)
+                        ->where('location_id', $take->location_id)
+                        ->sum('quantity_change')
+                    : (float) (Product::find($item->product_id)?->stock_quantity ?? 0);
+
+                $variance = (float) $counted - $currentQty;
 
                 if (abs($variance) < 0.0001) {
                     continue;
