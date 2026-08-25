@@ -7,6 +7,7 @@ use App\Models\Device;
 use App\Models\SyncConflict;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
+use App\Services\DeviceResolver;
 use App\Services\SyncProcessor;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -15,6 +16,8 @@ use Illuminate\Support\Facades\DB;
 
 class SyncController extends Controller
 {
+    public function __construct(private readonly DeviceResolver $deviceResolver) {}
+
     /** Flutter POS → Server: receive records pushed from device */
     public function push(Request $request, SyncProcessor $processor): JsonResponse
     {
@@ -367,14 +370,7 @@ class SyncController extends Controller
 
     private function resolveDevice(Request $request): ?Device
     {
-        $token = $request->bearerToken();
-        if (! $token) {
-            return null;
-        }
-
-        $tokenId = explode('|', $token)[0] ?? null;
-
-        return Device::where('token_id', $tokenId)->first();
+        return $this->deviceResolver->fromRequest($request);
     }
 
     private function resolveIncomingUpdatedAt(array $record)

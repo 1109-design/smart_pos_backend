@@ -38,6 +38,8 @@ use App\Models\StockTransferItem;
 use App\Models\Supplier;
 use App\Models\SyncRecord;
 use App\Models\TaxRate;
+use App\Models\Till;
+use App\Models\TillCashMovement;
 use App\Models\Transaction;
 use App\Models\TransactionItem;
 use App\Models\TransactionTax;
@@ -53,7 +55,7 @@ class SyncProcessor
     private const IMMUTABLE = [
         'stock_movements', 'loyalty_transactions', 'credit_transactions',
         'transaction_items', 'transaction_taxes', 'payments', 'po_audit_logs',
-        'container_deposit_ledger', 'change_owed_ledger',
+        'container_deposit_ledger', 'change_owed_ledger', 'till_cash_movements',
     ];
 
     // Tables with their own business_id column, guarded in assertOwnership().
@@ -84,6 +86,8 @@ class SyncProcessor
         'users' => User::class,
         'container_deposit_ledger' => ContainerDepositLedger::class,
         'change_owed_ledger' => ChangeOwedLedger::class,
+        'tills' => Till::class,
+        'till_cash_movements' => TillCashMovement::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -829,12 +833,44 @@ class SyncProcessor
                 );
                 break;
 
+            case 'tills':
+                Till::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'device_id' => $payload['device_id'] ?? null,
+                        'name' => $payload['name'] ?? '',
+                        'register_number' => $payload['register_number'] ?? 1,
+                        'is_active' => $payload['is_active'] ?? true,
+                    ]
+                );
+                break;
+
+            case 'till_cash_movements':
+                // Append-only ledger — see IMMUTABLE (delete is ignored).
+                TillCashMovement::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'till_id' => $payload['till_id'] ?? null,
+                        'shift_id' => $payload['shift_id'] ?? null,
+                        'type' => $payload['type'] ?? 'cash_in',
+                        'amount' => $payload['amount'] ?? 0,
+                        'reason' => $payload['reason'] ?? null,
+                        'recorded_by_user_id' => $payload['recorded_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
             case 'shifts':
                 Shift::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'business_id' => $payload['business_id'] ?? null,
                         'location_id' => $payload['location_id'] ?? null,
+                        'till_id' => $payload['till_id'] ?? null,
                         'cashier_id' => $payload['cashier_id'] ?? null,
                         'opened_at' => $payload['opened_at'] ?? now(),
                         'closed_at' => $payload['closed_at'] ?? null,
@@ -1232,9 +1268,10 @@ class SyncProcessor
             'stock_takes' => StockTake::class,
             'employees' => Employee::class,
             'salary_payments' => SalaryPayment::class,
+            'tills' => Till::class,
         ];
 
-        $softDeleteIsActive = ['locations', 'categories', 'tax_rates', 'products', 'product_variants', 'suppliers', 'coupons'];
+        $softDeleteIsActive = ['locations', 'categories', 'tax_rates', 'products', 'product_variants', 'suppliers', 'coupons', 'tills'];
 
         if (isset($modelMap[$table])) {
             if (in_array($table, $softDeleteIsActive)) {

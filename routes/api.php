@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\StockResetController;
 use App\Http\Controllers\Api\StockTransferController;
 use App\Http\Controllers\Api\SubscriptionController;
 use App\Http\Controllers\Api\SyncController;
+use App\Http\Controllers\Api\TillController;
 use App\Http\Controllers\Api\WebhookController;
 use Illuminate\Support\Facades\Route;
 
@@ -53,6 +54,7 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::get('locations/{id}', [LocationController::class, 'show']);
     Route::patch('locations/{id}', [LocationController::class, 'update']);
     Route::get('locations/{id}/stock', [LocationController::class, 'stock']);
+    Route::get('locations/{id}/tills', [TillController::class, 'index']);
     Route::get('products/{productId}/stock-by-location', [LocationController::class, 'productStock']);
 
     // Stock transfers

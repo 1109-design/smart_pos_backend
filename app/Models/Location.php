@@ -19,9 +19,9 @@ class Location extends Model
     protected function casts(): array
     {
         return [
-            'can_sell'    => 'boolean',
+            'can_sell' => 'boolean',
             'can_receive' => 'boolean',
-            'is_active'   => 'boolean',
+            'is_active' => 'boolean',
         ];
     }
 
@@ -60,5 +60,10 @@ class Location extends Model
     public function shifts(): HasMany
     {
         return $this->hasMany(Shift::class);
+    }
+
+    public function tills(): HasMany
+    {
+        return $this->hasMany(Till::class);
     }
 }

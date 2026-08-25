@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Events\ProductPriceChanged;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 
@@ -15,6 +16,17 @@ class Product extends Model
         'track_stock', 'stock_quantity', 'low_stock_threshold',
         'image_path', 'expiry_date', 'is_active',
     ];
+
+    protected static function booted(): void
+    {
+        static::updated(function (Product $product): void {
+            if (! $product->wasChanged(['price', 'min_price', 'discount_percent', 'is_active']) || ! $product->business_id) {
+                return;
+            }
+
+            ProductPriceChanged::dispatch($product->business_id, $product->id);
+        });
+    }
 
     protected function casts(): array
     {
