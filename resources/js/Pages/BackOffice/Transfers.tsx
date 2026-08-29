@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Head, Link, router, useForm, usePage } from '@inertiajs/react';
 import BackOfficeLayout from '@/Layouts/BackOfficeLayout';
 import Modal from '@/Components/Modal';
@@ -8,6 +8,8 @@ interface CatalogItem {
     id: string;
     name: string;
     sku: string | null;
+    barcode: string | null;
+    cost_price: string;
 }
 
 interface LocationOption {
@@ -65,16 +67,23 @@ interface FormItem {
     qty_requested: number;
 }
 
+interface ReceiveItem {
+    product_id: string;
+    qty: number;
+    unit_cost: number;
+}
+
 export default function BackOfficeTransfers({ transfers, locations, catalog }: Props) {
     const [showNew, setShowNew] = useState(false);
-    const [picker, setPicker] = useState('');
     const [dispatching, setDispatching] = useState<TransferRow | null>(null);
     const [receiving, setReceiving] = useState<TransferRow | null>(null);
     const [qtyDraft, setQtyDraft] = useState<Record<string, number>>({});
     const [actionPending, setActionPending] = useState(false);
+    const [showReceive, setShowReceive] = useState(false);
+    const receiveImportFileInput = useRef<HTMLInputElement>(null);
 
     const { flash, errors } = usePage().props as unknown as {
-        flash: { success: string | null };
+        flash: { success: string | null; import_errors: string[] | null };
         errors: Record<string, string>;
     };
 
@@ -93,10 +102,67 @@ export default function BackOfficeTransfers({ transfers, locations, catalog }: P
         setShowNew(true);
     };
 
+    const receiveForm = useForm<{ location_id: string; reason: string; items: ReceiveItem[] }>({
+        location_id: locations[0]?.id ?? '',
+        reason: '',
+        items: [],
+    });
+
+    const receiveImportForm = useForm<{ file: File | null; location_id: string; reason: string }>({
+        file: null,
+        location_id: locations[0]?.id ?? '',
+        reason: '',
+    });
+
+    const openReceiveStock = () => {
+        receiveForm.setData({ location_id: locations[0]?.id ?? '', reason: '', items: [] });
+        receiveForm.clearErrors();
+        receiveImportForm.setData({ file: null, location_id: locations[0]?.id ?? '', reason: '' });
+        receiveImportForm.clearErrors();
+        if (receiveImportFileInput.current) receiveImportFileInput.current.value = '';
+        setShowReceive(true);
+    };
+
+    const addReceiveItem = (productId: string) => {
+        if (!productId || receiveForm.data.items.some((i) => i.product_id === productId)) return;
+        const cost = Number(catalogById[productId]?.cost_price ?? 0);
+        receiveForm.setData('items', [...receiveForm.data.items, { product_id: productId, qty: 1, unit_cost: cost }]);
+    };
+
+    const updateReceiveItem = (productId: string, patch: Partial<ReceiveItem>) => {
+        receiveForm.setData('items', receiveForm.data.items.map((i) => (i.product_id === productId ? { ...i, ...patch } : i)));
+    };
+
+    const removeReceiveItem = (productId: string) => {
+        receiveForm.setData('items', receiveForm.data.items.filter((i) => i.product_id !== productId));
+    };
+
+    const submitReceiveStock = (e: React.FormEvent) => {
+        e.preventDefault();
+        receiveForm.post('/office/products/receive-stock', { preserveScroll: true, onSuccess: () => setShowReceive(false) });
+    };
+
+    const setReceiveLocation = (locationId: string) => {
+        receiveForm.setData('location_id', locationId);
+        receiveImportForm.setData('location_id', locationId);
+    };
+
+    const submitReceiveImport = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!receiveImportForm.data.file) return;
+        receiveImportForm.post('/office/products/receive-stock/import', {
+            preserveScroll: true,
+            onSuccess: () => {
+                setShowReceive(false);
+                receiveImportForm.setData('file', null);
+                if (receiveImportFileInput.current) receiveImportFileInput.current.value = '';
+            },
+        });
+    };
+
     const addItem = (productId: string) => {
         if (!productId || newForm.data.items.some((i) => i.product_id === productId)) return;
         newForm.setData('items', [...newForm.data.items, { product_id: productId, qty_requested: 1 }]);
-        setPicker('');
     };
 
     const setReqQty = (productId: string, qty: number) => {
@@ -152,17 +218,27 @@ export default function BackOfficeTransfers({ transfers, locations, catalog }: P
                 <div>
                     <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Stock Transfers</h1>
                     <p className="text-sm text-slate-500 mt-1">
-                        Move stock between shops and warehouses. Requested here, dispatched, then received — every step updates every till.
+                        Receive stock into a location, then move it between shops and warehouses. Requested, dispatched, then received —
+                        every step updates every till.
                     </p>
                 </div>
-                <button
-                    onClick={openNew}
-                    disabled={locations.length < 2}
-                    title={locations.length < 2 ? 'Add a second location first' : undefined}
-                    className="btn-primary py-2 flex-shrink-0 disabled:opacity-50"
-                >
-                    + New Transfer
-                </button>
+                <div className="flex gap-2 flex-shrink-0">
+                    <button
+                        onClick={openReceiveStock}
+                        disabled={locations.length === 0}
+                        className="text-sm px-4 py-2 rounded-xl border border-slate-200 text-slate-600 hover:border-emerald-300 disabled:opacity-50"
+                    >
+                        + Receive Stock
+                    </button>
+                    <button
+                        onClick={openNew}
+                        disabled={locations.length < 2}
+                        title={locations.length < 2 ? 'Add a second location first' : undefined}
+                        className="btn-primary py-2 disabled:opacity-50"
+                    >
+                        + New Transfer
+                    </button>
+                </div>
             </div>
 
             {locations.length < 2 && (
@@ -175,6 +251,17 @@ export default function BackOfficeTransfers({ transfers, locations, catalog }: P
             {flash?.success && (
                 <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
                     {flash.success}
+                </div>
+            )}
+
+            {flash?.import_errors && flash.import_errors.length > 0 && (
+                <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                    <p className="text-sm font-semibold text-amber-800 mb-1">Rows that need attention</p>
+                    <ul className="text-xs text-amber-700 space-y-0.5 list-disc list-inside">
+                        {flash.import_errors.map((message, i) => (
+                            <li key={i}>{message}</li>
+                        ))}
+                    </ul>
                 </div>
             )}
 
@@ -303,16 +390,11 @@ export default function BackOfficeTransfers({ transfers, locations, catalog }: P
 
                         <div>
                             <label className="text-xs font-semibold text-slate-500">Add item</label>
-                            <select
-                                value={picker}
-                                onChange={(e) => addItem(e.target.value)}
-                                className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                            >
-                                <option value="">Choose a product…</option>
-                                {catalog.filter((c) => !newForm.data.items.some((i) => i.product_id === c.id)).map((c) => (
-                                    <option key={c.id} value={c.id}>{c.name}{c.sku ? ` (${c.sku})` : ''}</option>
-                                ))}
-                            </select>
+                            <ProductPicker
+                                catalog={catalog}
+                                excludeIds={newForm.data.items.map((i) => i.product_id)}
+                                onSelect={addItem}
+                            />
                             {newForm.errors.items && <p className="text-xs text-red-500 mt-1">{newForm.errors.items}</p>}
                         </div>
 
@@ -359,6 +441,149 @@ export default function BackOfficeTransfers({ transfers, locations, catalog }: P
                         </button>
                     </div>
                 </form>
+            </Modal>
+
+            {/* Receive stock modal */}
+            <Modal show={showReceive} onClose={() => setShowReceive(false)} maxWidth="lg">
+                <div className="p-6">
+                    <p className="text-base font-semibold text-slate-800 mb-1">Receive Stock</p>
+                    <p className="text-xs text-slate-500 mb-4">
+                        Record a delivery arriving directly into a location — no purchase order required. Cost price is recalculated as a
+                        weighted average across existing and received stock, same as receiving on a till.
+                    </p>
+
+                    <div className="mb-4">
+                        <label className="text-xs font-semibold text-slate-500">Receiving location</label>
+                        <select
+                            value={receiveForm.data.location_id}
+                            onChange={(e) => setReceiveLocation(e.target.value)}
+                            className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        >
+                            <option value="">Choose location…</option>
+                            {locations.map((l) => (
+                                <option key={l.id} value={l.id}>{l.name}</option>
+                            ))}
+                        </select>
+                        {(receiveForm.errors.location_id || receiveImportForm.errors.location_id) && (
+                            <p className="text-xs text-red-500 mt-1">{receiveForm.errors.location_id ?? receiveImportForm.errors.location_id}</p>
+                        )}
+                    </div>
+
+                    <form onSubmit={submitReceiveStock} className="space-y-4">
+                        <div>
+                            <label className="text-xs font-semibold text-slate-500">Add item</label>
+                            <ProductPicker
+                                catalog={catalog}
+                                excludeIds={receiveForm.data.items.map((i) => i.product_id)}
+                                onSelect={addReceiveItem}
+                            />
+                            {receiveForm.errors.items && <p className="text-xs text-red-500 mt-1">{receiveForm.errors.items}</p>}
+                        </div>
+
+                        {receiveForm.data.items.length > 0 && (
+                            <div className="rounded-xl border border-slate-100 divide-y divide-slate-50">
+                                <div className="flex items-center gap-3 px-3 py-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wide">
+                                    <span className="flex-1">Item</span>
+                                    <span className="w-20 text-right">Qty</span>
+                                    <span className="w-24 text-right">Unit cost</span>
+                                    <span className="w-12"></span>
+                                </div>
+                                {receiveForm.data.items.map((item) => (
+                                    <div key={item.product_id} className="flex items-center gap-3 px-3 py-2">
+                                        <span className="flex-1 min-w-0 text-sm text-slate-700 truncate">{catalogById[item.product_id]?.name ?? item.product_id}</span>
+                                        <input
+                                            type="number" min="0.0001" step="any"
+                                            value={item.qty}
+                                            onChange={(e) => updateReceiveItem(item.product_id, { qty: Number(e.target.value) })}
+                                            className="w-20 text-sm rounded-lg border border-slate-200 px-2 py-1 text-right focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                        />
+                                        <input
+                                            type="number" min="0" step="any"
+                                            value={item.unit_cost}
+                                            onChange={(e) => updateReceiveItem(item.product_id, { unit_cost: Number(e.target.value) })}
+                                            className="w-24 text-sm rounded-lg border border-slate-200 px-2 py-1 text-right focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                        />
+                                        <button type="button" onClick={() => removeReceiveItem(item.product_id)} className="w-12 text-xs font-semibold text-red-400 hover:text-red-600 text-right">
+                                            Remove
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        <div>
+                            <label className="text-xs font-semibold text-slate-500">Note (optional)</label>
+                            <input
+                                type="text"
+                                placeholder="e.g. delivery note number, supplier"
+                                value={receiveForm.data.reason}
+                                onChange={(e) => receiveForm.setData('reason', e.target.value)}
+                                className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                        </div>
+
+                        <div className="flex justify-end">
+                            <button
+                                type="submit"
+                                disabled={receiveForm.processing || receiveForm.data.items.length === 0 || !receiveForm.data.location_id}
+                                className="btn-primary py-2 disabled:opacity-50"
+                            >
+                                {receiveForm.processing ? 'Receiving…' : 'Receive Stock'}
+                            </button>
+                        </div>
+                    </form>
+
+                    <div className="my-5 flex items-center gap-3">
+                        <div className="h-px flex-1 bg-slate-100" />
+                        <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">or import a CSV</span>
+                        <div className="h-px flex-1 bg-slate-100" />
+                    </div>
+
+                    <form onSubmit={submitReceiveImport} className="space-y-3">
+                        <p className="text-xs text-slate-500">
+                            For a big delivery, download a template prefilled with every stocked product's SKU, barcode and current cost —
+                            fill in the quantities that arrived (leave the rest blank), then upload it here.
+                        </p>
+                        <a
+                            href="/office/products/receive-stock/template"
+                            className="inline-block text-xs font-semibold text-emerald-600 hover:text-emerald-800"
+                        >
+                            Download receiving template (.csv) →
+                        </a>
+                        <div>
+                            <input
+                                ref={receiveImportFileInput}
+                                type="file"
+                                accept=".csv,text/csv"
+                                onChange={(e) => receiveImportForm.setData('file', e.target.files?.[0] ?? null)}
+                                className="mt-1 w-full text-sm text-slate-600 file:mr-3 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100"
+                            />
+                            {receiveImportForm.errors.file && <p className="text-xs text-red-500 mt-1">{receiveImportForm.errors.file}</p>}
+                        </div>
+                        <input
+                            type="text"
+                            placeholder="Note (optional) — e.g. delivery note number, supplier"
+                            value={receiveImportForm.data.reason}
+                            onChange={(e) => receiveImportForm.setData('reason', e.target.value)}
+                            className="w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                        <div className="flex justify-end">
+                            <button
+                                type="submit"
+                                disabled={receiveImportForm.processing || !receiveImportForm.data.file || !receiveImportForm.data.location_id}
+                                className="text-sm px-4 py-2 rounded-xl border border-slate-200 text-slate-600 hover:border-emerald-300 disabled:opacity-50"
+                            >
+                                {receiveImportForm.processing ? 'Uploading…' : 'Upload & Receive'}
+                            </button>
+                        </div>
+                    </form>
+
+                    <div className="mt-4 flex justify-end">
+                        <button type="button" onClick={() => setShowReceive(false)} className="text-sm px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100">
+                            Close
+                        </button>
+                    </div>
+                </div>
             </Modal>
 
             {/* Dispatch modal */}
@@ -481,4 +706,81 @@ function TransferActions({
     }
 
     return <div className={inline ? 'flex items-center justify-end gap-3' : 'flex items-center gap-3 mt-3'}>{buttons}</div>;
+}
+
+/**
+ * Type-to-search product picker: filters the full catalog by name, SKU or
+ * barcode as you type, since a plain <select> stops being usable once a
+ * catalog grows past a couple dozen items. onMouseDown (not onClick) on
+ * each result fires before the input's onBlur closes the dropdown, so a
+ * click still registers.
+ */
+function ProductPicker({
+    catalog,
+    excludeIds,
+    onSelect,
+    placeholder = 'Search by name, SKU, or barcode…',
+}: {
+    catalog: CatalogItem[];
+    excludeIds: string[];
+    onSelect: (productId: string) => void;
+    placeholder?: string;
+}) {
+    const [query, setQuery] = useState('');
+    const [open, setOpen] = useState(false);
+
+    const q = query.trim().toLowerCase();
+    const results = q === ''
+        ? []
+        : catalog
+              .filter((c) => !excludeIds.includes(c.id))
+              .filter(
+                  (c) =>
+                      c.name.toLowerCase().includes(q) ||
+                      (c.sku ?? '').toLowerCase().includes(q) ||
+                      (c.barcode ?? '').toLowerCase().includes(q)
+              )
+              .slice(0, 8);
+
+    const pick = (id: string) => {
+        onSelect(id);
+        setQuery('');
+        setOpen(false);
+    };
+
+    return (
+        <div className="relative">
+            <input
+                type="text"
+                value={query}
+                onChange={(e) => {
+                    setQuery(e.target.value);
+                    setOpen(true);
+                }}
+                onFocus={() => setOpen(true)}
+                onBlur={() => setTimeout(() => setOpen(false), 150)}
+                placeholder={placeholder}
+                className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+            />
+            {open && q !== '' && (
+                <div className="absolute z-10 mt-1 w-full max-h-64 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg">
+                    {results.length === 0 ? (
+                        <p className="px-3 py-2 text-sm text-slate-400">No matches.</p>
+                    ) : (
+                        results.map((c) => (
+                            <button
+                                key={c.id}
+                                type="button"
+                                onMouseDown={() => pick(c.id)}
+                                className="w-full text-left px-3 py-2 text-sm hover:bg-emerald-50 flex items-center justify-between gap-2"
+                            >
+                                <span className="truncate">{c.name}</span>
+                                <span className="text-xs text-slate-400 flex-shrink-0">{c.sku ?? c.barcode ?? ''}</span>
+                            </button>
+                        ))
+                    )}
+                </div>
+            )}
+        </div>
+    );
 }

@@ -11,14 +11,18 @@ interface StockReset {
 
 interface Props {
     stock_reset: StockReset;
+    catalogue_reset: StockReset;
 }
 
 const CONFIRM_WORD = 'RESET';
+const CATALOGUE_CONFIRM_PHRASE = 'DELETE EVERYTHING';
 
-export default function BackOfficeSettings({ stock_reset }: Props) {
+export default function BackOfficeSettings({ stock_reset, catalogue_reset }: Props) {
     const [showConfirm, setShowConfirm] = useState(false);
+    const [showCatalogueConfirm, setShowCatalogueConfirm] = useState(false);
     const { flash } = usePage().props as unknown as { flash: { success: string | null } };
     const form = useForm({ confirm: '' });
+    const catalogueForm = useForm({ confirm: '' });
 
     const openConfirm = () => {
         form.reset();
@@ -31,6 +35,20 @@ export default function BackOfficeSettings({ stock_reset }: Props) {
         form.post('/office/settings/reset-stock', {
             preserveScroll: true,
             onSuccess: () => setShowConfirm(false),
+        });
+    };
+
+    const openCatalogueConfirm = () => {
+        catalogueForm.reset();
+        catalogueForm.clearErrors();
+        setShowCatalogueConfirm(true);
+    };
+
+    const submitCatalogueReset = (e: React.FormEvent) => {
+        e.preventDefault();
+        catalogueForm.post('/office/settings/reset-catalogue', {
+            preserveScroll: true,
+            onSuccess: () => setShowCatalogueConfirm(false),
         });
     };
 
@@ -83,6 +101,39 @@ export default function BackOfficeSettings({ stock_reset }: Props) {
                 </div>
             </div>
 
+            <div className="bg-white rounded-2xl border border-red-100 shadow-sm p-5 mt-4">
+                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+                    <div>
+                        <p className="text-sm font-semibold text-slate-900">Reset Everything</p>
+                        <p className="text-sm text-slate-500 mt-1 max-w-xl">
+                            Permanently deletes every product, all stock, and the entire sales, purchase order, stock take and
+                            transfer history for this business — <span className="font-semibold">including transactions and payments</span>,
+                            fiscalised ones included. Nothing is archived; it's gone. Use this only for a genuine fresh start (e.g.
+                            clearing test/dummy data before go-live), then re-upload your real catalogue from{' '}
+                            <a href="/office/products" className="font-semibold underline">Products</a>. This is a{' '}
+                            <span className="font-semibold">one-time</span> action, independent of Reset All Stock above — once run,
+                            it can never be run again for this business.
+                        </p>
+                        {catalogue_reset.done && (
+                            <p className="text-xs text-slate-400 mt-3 flex items-center gap-1.5">
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0">
+                                    <path fillRule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clipRule="evenodd" />
+                                </svg>
+                                Already used{catalogue_reset.at ? ` — ${new Date(catalogue_reset.at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}` : ''}
+                                {catalogue_reset.by ? ` by ${catalogue_reset.by}` : ''}
+                            </p>
+                        )}
+                    </div>
+                    <button
+                        onClick={openCatalogueConfirm}
+                        disabled={catalogue_reset.done}
+                        className="text-sm px-4 py-2.5 rounded-xl font-semibold bg-red-600 text-white hover:bg-red-700 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed flex-shrink-0"
+                    >
+                        {catalogue_reset.done ? 'Already used' : 'Reset Everything'}
+                    </button>
+                </div>
+            </div>
+
             <Modal show={showConfirm} onClose={() => setShowConfirm(false)} maxWidth="md">
                 <form onSubmit={submit} className="p-6">
                     <p className="text-base font-semibold text-slate-800 mb-2">Reset all stock to zero?</p>
@@ -113,6 +164,43 @@ export default function BackOfficeSettings({ stock_reset }: Props) {
                             className="text-sm px-4 py-2 rounded-xl font-semibold bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                             {form.processing ? 'Resetting…' : 'Reset All Stock'}
+                        </button>
+                    </div>
+                </form>
+            </Modal>
+
+            <Modal show={showCatalogueConfirm} onClose={() => setShowCatalogueConfirm(false)} maxWidth="md">
+                <form onSubmit={submitCatalogueReset} className="p-6">
+                    <p className="text-base font-semibold text-slate-800 mb-2">Delete everything?</p>
+                    <p className="text-sm text-slate-500 mb-4">
+                        This permanently deletes every product, all stock, and this business's entire sales, purchase order, stock
+                        take and transfer history — <span className="font-semibold">transactions and payments included</span>. There
+                        is no undo, and it can only be used once — ever. Type{' '}
+                        <span className="font-mono font-semibold text-slate-700">{CATALOGUE_CONFIRM_PHRASE}</span> to confirm.
+                    </p>
+                    <input
+                        type="text"
+                        autoFocus
+                        value={catalogueForm.data.confirm}
+                        onChange={(e) => catalogueForm.setData('confirm', e.target.value)}
+                        placeholder={CATALOGUE_CONFIRM_PHRASE}
+                        className="w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-red-500 font-mono"
+                    />
+                    {catalogueForm.errors.confirm && <p className="text-xs text-red-500 mt-1">{catalogueForm.errors.confirm}</p>}
+                    {(catalogueForm.errors as Record<string, string>).catalogue_reset && (
+                        <p className="text-xs text-red-500 mt-1">{(catalogueForm.errors as Record<string, string>).catalogue_reset}</p>
+                    )}
+
+                    <div className="mt-6 flex justify-end gap-2">
+                        <button type="button" onClick={() => setShowCatalogueConfirm(false)} className="text-sm px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100">
+                            Cancel
+                        </button>
+                        <button
+                            type="submit"
+                            disabled={catalogueForm.processing || catalogueForm.data.confirm !== CATALOGUE_CONFIRM_PHRASE}
+                            className="text-sm px-4 py-2 rounded-xl font-semibold bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            {catalogueForm.processing ? 'Deleting…' : 'Delete Everything'}
                         </button>
                     </div>
                 </form>

@@ -34,6 +34,8 @@ interface ProductRow {
     low_stock_threshold: string;
     category_id: string | null;
     is_active: boolean;
+    merged_into_product_id: string | null;
+    merged_into_product_name: string | null;
     synced_devices: number | null;
     total_devices: number;
     stock_by_location?: StockLocationRow[];
@@ -44,6 +46,13 @@ interface ContainerOption {
     id: string;
     name: string;
     deposit_amount: string | null;
+}
+
+interface MergeCandidate {
+    id: string;
+    name: string;
+    item_type: 'product' | 'service' | 'container';
+    sku: string | null;
 }
 
 interface CategoryRow {
@@ -173,11 +182,15 @@ export default function BackOfficeProducts({ products, categories, locations, co
     const importFileInput = useRef<HTMLInputElement>(null);
 
     const { flash } = usePage().props as unknown as {
-        flash: { success: string | null; import_errors: string[] | null };
+        flash: { success: string | null; import_errors: string[] | null; import_missing: string[] | null };
     };
 
     const form = useForm({ ...EMPTY_FORM });
-    const importForm = useForm<{ file: File | null; location_id: string }>({ file: null, location_id: default_location_id });
+    const importForm = useForm<{ file: File | null; location_id: string; full_catalogue: boolean }>({
+        file: null,
+        location_id: default_location_id,
+        full_catalogue: false,
+    });
     const balanceForm = useForm<{ location_id: string; quantity: string }>({ location_id: '', quantity: '' });
     const activeCategories = categories.filter((c) => c.is_active);
 
@@ -323,6 +336,7 @@ export default function BackOfficeProducts({ products, categories, locations, co
         setShowImport(false);
         importForm.clearErrors();
         importForm.setData('file', null);
+        importForm.setData('full_catalogue', false);
         if (importFileInput.current) importFileInput.current.value = '';
     };
 
@@ -365,6 +379,20 @@ export default function BackOfficeProducts({ products, categories, locations, co
                     <p className="text-sm font-semibold text-amber-800 mb-1">Rows that need attention</p>
                     <ul className="text-xs text-amber-700 space-y-0.5 list-disc list-inside">
                         {flash.import_errors.map((message, i) => (
+                            <li key={i}>{message}</li>
+                        ))}
+                    </ul>
+                </div>
+            )}
+
+            {flash?.import_missing && flash.import_missing.length > 0 && (
+                <div className="mb-4 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3">
+                    <p className="text-sm font-semibold text-sky-800 mb-1">Not in this file — left untouched</p>
+                    <p className="text-xs text-sky-700 mb-2">
+                        These active items weren't in the uploaded file. Nothing about them was changed — archive them yourself below if that was intentional.
+                    </p>
+                    <ul className="text-xs text-sky-700 space-y-0.5 list-disc list-inside">
+                        {flash.import_missing.map((message, i) => (
                             <li key={i}>{message}</li>
                         ))}
                     </ul>
@@ -906,8 +934,10 @@ export default function BackOfficeProducts({ products, categories, locations, co
                 <form onSubmit={submitImport} className="p-6">
                     <p className="text-base font-semibold text-slate-800 mb-1">Import Products &amp; Services</p>
                     <p className="text-sm text-slate-500 mb-4">
-                        Download the template, fill in your items, then upload it here. New rows are added, and rows whose SKU or barcode
-                        matches an existing item update it instead. Everything syncs to your connected devices automatically once it's in.
+                        Download the template (blank) or export your current catalogue (prefilled with real prices and balances), edit it,
+                        then upload it here. New rows are added, and rows whose SKU or barcode matches an existing item update it instead —
+                        anything not in the file is always left exactly as it is. Everything syncs to your connected devices automatically
+                        once it's in.
                     </p>
 
                     <div className="rounded-xl bg-slate-50 border border-slate-100 px-4 py-3 mb-4">
@@ -925,15 +955,23 @@ export default function BackOfficeProducts({ products, categories, locations, co
                                     safe.
                                 </li>
                             ) : (
-                                <li><span className="font-mono">stock_quantity</span> sets opening stock for new items only — it's ignored when updating an existing item, same as editing by hand.</li>
+                                <li><span className="font-mono">stock_quantity</span> is reconciled to the exact number in the sheet, the same as editing it by hand.</li>
                             )}
                         </ul>
-                        <a
-                            href="/office/products/import/template"
-                            className="inline-block mt-3 text-xs font-semibold text-emerald-600 hover:text-emerald-800"
-                        >
-                            Download template (.csv) →
-                        </a>
+                        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1">
+                            <a
+                                href="/office/products/import/template"
+                                className="text-xs font-semibold text-emerald-600 hover:text-emerald-800"
+                            >
+                                Download blank template (.csv) →
+                            </a>
+                            <a
+                                href="/office/products/export"
+                                className="text-xs font-semibold text-emerald-600 hover:text-emerald-800"
+                            >
+                                Export current catalogue (.csv) →
+                            </a>
+                        </div>
                     </div>
 
                     <div>
@@ -947,6 +985,20 @@ export default function BackOfficeProducts({ products, categories, locations, co
                         />
                         {importForm.errors.file && <p className="text-xs text-red-500 mt-1">{importForm.errors.file}</p>}
                     </div>
+
+                    <label className="mt-4 flex items-start gap-2 text-xs text-slate-600">
+                        <input
+                            type="checkbox"
+                            checked={importForm.data.full_catalogue}
+                            onChange={(e) => importForm.setData('full_catalogue', e.target.checked)}
+                            className="mt-0.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                        />
+                        <span>
+                            This file is my complete product list (e.g. from "Export current catalogue"). Nothing is ever deleted or
+                            archived automatically — checking this just adds a list of active items missing from the file to the result,
+                            so you can review and archive them yourself.
+                        </span>
+                    </label>
 
                     {locations.length > 1 && (
                         <div className="mt-4">

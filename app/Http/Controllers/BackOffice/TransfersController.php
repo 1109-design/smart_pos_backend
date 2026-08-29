@@ -35,7 +35,7 @@ class TransfersController extends Controller
                 ->where('is_active', true)
                 ->where('track_stock', true)
                 ->orderBy('name')
-                ->get(['id', 'name', 'sku']),
+                ->get(['id', 'name', 'sku', 'barcode', 'cost_price']),
         ]);
     }
 

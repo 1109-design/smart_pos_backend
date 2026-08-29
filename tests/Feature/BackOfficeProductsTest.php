@@ -8,6 +8,7 @@ use App\Models\Device;
 use App\Models\Location;
 use App\Models\Product;
 use App\Models\ProductContainerLink;
+use App\Models\ProductStock;
 use App\Models\StockMovement;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
@@ -23,7 +24,7 @@ class BackOfficeProductsTest extends TestCase
 {
     use RefreshDatabase;
 
-    private function actingBackOfficeSession(string $tenantId): User
+    private function actingBackOfficeSession(string $tenantId, string $role = 'business_owner'): User
     {
         $this->withoutMiddleware(AuthenticateBackOfficeUser::class);
 
@@ -42,7 +43,7 @@ class BackOfficeProductsTest extends TestCase
                 'user_id' => $user->id,
                 'user_name' => $user->name,
                 'user_email' => $user->email,
-                'role' => 'business_owner',
+                'role' => $role,
                 'business_name' => $tenantId,
                 'currency_code' => 'USD',
             ],
@@ -575,8 +576,10 @@ class BackOfficeProductsTest extends TestCase
         $response->assertSessionMissing('import_errors');
 
         $this->assertDatabaseHas('products', ['id' => $existingId, 'name' => 'Updated Name', 'sku' => 'EXIST1']);
-        // Stock is ledger-owned after creation — the CSV's 999 must be ignored for an existing item.
-        $this->assertDatabaseHas('products', ['id' => $existingId, 'stock_quantity' => 42]);
+        // Stock is ledger-owned, but for an existing item the flat stock_quantity column is still
+        // reconciled against the default location — same as the "stock: <location>" columns are for
+        // a multi-location business — so re-importing with an edited quantity actually changes it.
+        $this->assertDatabaseHas('products', ['id' => $existingId, 'stock_quantity' => 999]);
 
         $newProduct = Product::where('sku', 'NEWSKU')->first();
         $this->assertNotNull($newProduct);
@@ -773,6 +776,220 @@ class BackOfficeProductsTest extends TestCase
         ])->assertSessionHasErrors('location_id');
     }
 
+    public function test_receive_stock_adds_quantity_and_recomputes_weighted_average_cost(): void
+    {
+        $tenantId = 'tenant-office-prod-receive-1';
+        $this->actingBackOfficeSession($tenantId);
+
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 1']);
+        $product = Product::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'Receivable Item',
+            'item_type' => 'product',
+            'price' => 5,
+            'cost_price' => 2,
+            'track_stock' => true,
+            'stock_quantity' => 10,
+        ]);
+        // A real ledger row for the starting balance — stock_quantity is
+        // ledger-owned, so a bare Eloquent field without a matching
+        // stock_movements row would get overwritten by the receipt's own
+        // recompute below.
+        StockMovement::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'product_id' => $product->id,
+            'location_id' => $location->id, 'type' => 'opening_stock', 'quantity_change' => 10,
+        ]);
+        ProductStock::create(['id' => (string) Str::uuid(), 'product_id' => $product->id, 'location_id' => $location->id, 'quantity' => 10, 'reserved_quantity' => 0]);
+
+        // 10 units already on hand @ $2, receiving 10 more @ $4 → WAC of $3.
+        $response = $this->post('/office/products/receive-stock', [
+            'location_id' => $location->id,
+            'reason' => 'PO-100 delivery',
+            'items' => [
+                ['product_id' => $product->id, 'qty' => 10, 'unit_cost' => 4],
+            ],
+        ]);
+
+        $response->assertRedirect();
+        $response->assertSessionHas('success');
+
+        $this->assertDatabaseHas('stock_movements', [
+            'product_id' => $product->id,
+            'location_id' => $location->id,
+            'type' => 'receive',
+            'quantity_change' => 10,
+            'unit_cost' => 4,
+            'running_avg_cost' => 3,
+            'reason' => 'PO-100 delivery',
+        ]);
+
+        $fresh = $product->fresh();
+        $this->assertSame('3.0000', $fresh->cost_price);
+        $this->assertSame('20.0000', $fresh->stock_quantity);
+        $this->assertDatabaseHas('product_stock', ['product_id' => $product->id, 'location_id' => $location->id, 'quantity' => 20]);
+    }
+
+    public function test_receive_stock_handles_multiple_items_in_one_receipt(): void
+    {
+        $tenantId = 'tenant-office-prod-receive-2';
+        $this->actingBackOfficeSession($tenantId);
+
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 1']);
+        $productA = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Item A', 'item_type' => 'product', 'price' => 1, 'track_stock' => true]);
+        $productB = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Item B', 'item_type' => 'product', 'price' => 1, 'track_stock' => true]);
+
+        $response = $this->post('/office/products/receive-stock', [
+            'location_id' => $location->id,
+            'items' => [
+                ['product_id' => $productA->id, 'qty' => 5, 'unit_cost' => 1],
+                ['product_id' => $productB->id, 'qty' => 8, 'unit_cost' => 2],
+            ],
+        ]);
+
+        $response->assertRedirect();
+        $this->assertSame('5.0000', $productA->fresh()->stock_quantity);
+        $this->assertSame('8.0000', $productB->fresh()->stock_quantity);
+    }
+
+    public function test_receive_stock_rejects_a_location_from_another_tenant(): void
+    {
+        $otherTenantId = 'tenant-office-prod-receive-other';
+        Tenant::firstOrCreate(['id' => $otherTenantId], ['business_name' => $otherTenantId, 'owner_email' => $otherTenantId.'@example.com', 'pairing_code' => substr(md5($otherTenantId), 0, 6)]);
+        $foreignLocation = Location::create(['id' => (string) Str::uuid(), 'business_id' => $otherTenantId, 'name' => 'Their Warehouse']);
+
+        $tenantId = 'tenant-office-prod-receive-3';
+        $this->actingBackOfficeSession($tenantId);
+        $product = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Guarded Receive Item', 'item_type' => 'product', 'price' => 1, 'track_stock' => true]);
+
+        $this->post('/office/products/receive-stock', [
+            'location_id' => $foreignLocation->id,
+            'items' => [
+                ['product_id' => $product->id, 'qty' => 5, 'unit_cost' => 1],
+            ],
+        ])->assertSessionHasErrors('location_id');
+
+        $this->assertSame('0.0000', $product->fresh()->stock_quantity);
+    }
+
+    public function test_receive_stock_cannot_touch_another_tenants_product(): void
+    {
+        $otherTenantId = 'tenant-office-prod-receive-foreign-product';
+        Tenant::firstOrCreate(['id' => $otherTenantId], ['business_name' => $otherTenantId, 'owner_email' => $otherTenantId.'@example.com', 'pairing_code' => substr(md5($otherTenantId), 0, 6)]);
+        $foreignProduct = Product::create(['id' => (string) Str::uuid(), 'business_id' => $otherTenantId, 'name' => 'Not Yours', 'item_type' => 'product', 'price' => 1, 'track_stock' => true]);
+
+        $tenantId = 'tenant-office-prod-receive-4';
+        $this->actingBackOfficeSession($tenantId);
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 1']);
+
+        $response = $this->post('/office/products/receive-stock', [
+            'location_id' => $location->id,
+            'items' => [
+                ['product_id' => $foreignProduct->id, 'qty' => 5, 'unit_cost' => 1],
+            ],
+        ]);
+
+        // Silently skipped rather than a hard error — matching the CSV
+        // import's per-row tolerance — but nothing about the foreign
+        // product changes, and the response reports zero items received.
+        $response->assertSessionHasErrors('items');
+        $this->assertSame('0.0000', $foreignProduct->fresh()->stock_quantity);
+    }
+
+    public function test_receive_stock_template_lists_active_tracked_products_with_current_cost(): void
+    {
+        $tenantId = 'tenant-office-prod-receive-template';
+        $this->actingBackOfficeSession($tenantId);
+
+        Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Templated Item', 'item_type' => 'product', 'price' => 1, 'cost_price' => 2.5, 'sku' => 'TPL1', 'track_stock' => true]);
+        Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Untracked Service', 'item_type' => 'service', 'price' => 1, 'track_stock' => false]);
+        Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Archived Item', 'item_type' => 'product', 'price' => 1, 'track_stock' => true, 'is_active' => false]);
+
+        $response = $this->get('/office/products/receive-stock/template');
+
+        $response->assertOk();
+        $content = $response->streamedContent();
+        $this->assertStringStartsWith('sku,barcode,name,qty,unit_cost', $content);
+        $this->assertStringContainsString('TPL1,,"Templated Item",,2.5000', $content);
+        $this->assertStringNotContainsString('Untracked Service', $content);
+        $this->assertStringNotContainsString('Archived Item', $content);
+    }
+
+    public function test_receive_stock_import_matches_by_sku_then_barcode_and_skips_blank_qty_rows(): void
+    {
+        $tenantId = 'tenant-office-prod-receive-import-1';
+        $this->actingBackOfficeSession($tenantId);
+
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 1']);
+        $bySku = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Matched By SKU', 'item_type' => 'product', 'price' => 1, 'sku' => 'BYSKU', 'track_stock' => true]);
+        $byBarcode = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Matched By Barcode', 'item_type' => 'product', 'price' => 1, 'barcode' => 'BYBAR123', 'track_stock' => true]);
+        $skipped = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Left Blank', 'item_type' => 'product', 'price' => 1, 'sku' => 'BLANK1', 'track_stock' => true]);
+
+        $csv = "sku,barcode,name,qty,unit_cost\n"
+            ."BYSKU,,Matched By SKU,10,3\n"
+            .",BYBAR123,Matched By Barcode,4,1.5\n"
+            ."BLANK1,,Left Blank,,5\n";
+        $file = UploadedFile::fake()->createWithContent('receive.csv', $csv);
+
+        $response = $this->post('/office/products/receive-stock/import', [
+            'file' => $file,
+            'location_id' => $location->id,
+            'reason' => 'Weekly delivery',
+        ]);
+
+        $response->assertRedirect();
+        $response->assertSessionMissing('import_errors');
+
+        $this->assertSame('10.0000', $bySku->fresh()->stock_quantity);
+        $this->assertSame('4.0000', $byBarcode->fresh()->stock_quantity);
+        $this->assertSame('0.0000', $skipped->fresh()->stock_quantity);
+        $this->assertDatabaseHas('stock_movements', [
+            'product_id' => $bySku->id, 'location_id' => $location->id, 'type' => 'receive',
+            'quantity_change' => 10, 'unit_cost' => 3, 'reason' => 'Weekly delivery',
+        ]);
+    }
+
+    public function test_receive_stock_import_reports_unmatched_rows_without_dropping_the_whole_batch(): void
+    {
+        $tenantId = 'tenant-office-prod-receive-import-2';
+        $this->actingBackOfficeSession($tenantId);
+
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 1']);
+        $known = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Known Item', 'item_type' => 'product', 'price' => 1, 'sku' => 'KNOWN1', 'track_stock' => true]);
+
+        $csv = "sku,barcode,name,qty,unit_cost\n"
+            ."KNOWN1,,Known Item,6,2\n"
+            ."GHOST1,,No Such Product,3,2\n";
+        $file = UploadedFile::fake()->createWithContent('receive.csv', $csv);
+
+        $response = $this->post('/office/products/receive-stock/import', [
+            'file' => $file,
+            'location_id' => $location->id,
+        ]);
+
+        $response->assertRedirect();
+        $response->assertSessionHas('import_errors', fn (?array $errors) => $errors !== null && count($errors) === 1 && str_contains($errors[0], 'no product matched'));
+        $this->assertSame('6.0000', $known->fresh()->stock_quantity);
+    }
+
+    public function test_receive_stock_import_rejects_a_location_from_another_tenant(): void
+    {
+        $otherTenantId = 'tenant-office-prod-receive-import-other';
+        Tenant::firstOrCreate(['id' => $otherTenantId], ['business_name' => $otherTenantId, 'owner_email' => $otherTenantId.'@example.com', 'pairing_code' => substr(md5($otherTenantId), 0, 6)]);
+        $foreignLocation = Location::create(['id' => (string) Str::uuid(), 'business_id' => $otherTenantId, 'name' => 'Their Warehouse']);
+
+        $tenantId = 'tenant-office-prod-receive-import-3';
+        $this->actingBackOfficeSession($tenantId);
+
+        $csv = "sku,barcode,name,qty,unit_cost\nX,,X,1,1\n";
+        $file = UploadedFile::fake()->createWithContent('receive.csv', $csv);
+
+        $this->post('/office/products/receive-stock/import', [
+            'file' => $file,
+            'location_id' => $foreignLocation->id,
+        ])->assertSessionHasErrors('location_id');
+    }
+
     public function test_creating_a_product_with_a_location_breakdown_posts_one_movement_per_location(): void
     {
         $tenantId = 'tenant-office-prod-create-breakdown';
@@ -920,5 +1137,294 @@ class BackOfficeProductsTest extends TestCase
 
         $this->assertDatabaseHas('product_stock', ['product_id' => $product->id, 'location_id' => $warehouse1->id, 'quantity' => 65]);
         $this->assertSame('65.0000', $product->fresh()->stock_quantity);
+    }
+
+    public function test_export_lists_active_products_with_live_prices_and_balances(): void
+    {
+        $tenantId = 'tenant-office-prod-export';
+        $this->actingBackOfficeSession($tenantId);
+
+        Category::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Beverages']);
+
+        $active = Product::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'Export Me',
+            'item_type' => 'product',
+            'price' => 2.5,
+            'cost_price' => 1,
+            'sku' => 'EXP1',
+            'stock_quantity' => 17,
+        ]);
+        Product::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'Archived Item',
+            'item_type' => 'product',
+            'price' => 1,
+            'sku' => 'ARC1',
+            'is_active' => false,
+        ]);
+        Product::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'A Container',
+            'item_type' => 'container',
+            'price' => 0,
+            'deposit_amount' => 0.5,
+            'sku' => 'CONT1',
+        ]);
+
+        $response = $this->get('/office/products/export');
+
+        $response->assertOk();
+        $response->assertHeader('content-type', 'text/csv; charset=UTF-8');
+        $content = $response->streamedContent();
+
+        $this->assertStringStartsWith(
+            'name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,stock_quantity,low_stock_threshold',
+            $content
+        );
+        $this->assertStringContainsString('"Export Me",product,2.5000,1.0000,EXP1,,,piece,yes,17.0000,5.0000', $content);
+        // Archived items and containers aren't part of the live catalogue this workflow reconciles.
+        $this->assertStringNotContainsString('Archived Item', $content);
+        $this->assertStringNotContainsString('A Container', $content);
+
+        unset($active);
+    }
+
+    public function test_export_has_one_stock_column_per_location_for_multi_location_businesses(): void
+    {
+        $tenantId = 'tenant-office-prod-export-multi';
+        $this->actingBackOfficeSession($tenantId);
+
+        $warehouse1 = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 1']);
+        Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 2']);
+
+        $product = Product::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'Split Stock Item',
+            'item_type' => 'product',
+            'price' => 3,
+            'sku' => 'SPLITEXP',
+        ]);
+        ProductStock::create([
+            'id' => (string) Str::uuid(),
+            'product_id' => $product->id,
+            'location_id' => $warehouse1->id,
+            'quantity' => 12,
+            'reserved_quantity' => 0,
+        ]);
+
+        $response = $this->get('/office/products/export');
+
+        $response->assertOk();
+        $content = $response->streamedContent();
+        $this->assertStringStartsWith(
+            'name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,"stock: Warehouse 1","stock: Warehouse 2",low_stock_threshold',
+            $content
+        );
+        $this->assertStringContainsString('"Split Stock Item",product,3.0000,0.0000,SPLITEXP,,,piece,yes,12,0,5.0000', $content);
+    }
+
+    public function test_full_catalogue_import_reports_active_products_missing_from_the_file_without_changing_them(): void
+    {
+        $tenantId = 'tenant-office-prod-full-catalogue';
+        $this->actingBackOfficeSession($tenantId);
+
+        $inFile = Product::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'Still Here',
+            'item_type' => 'product',
+            'price' => 1,
+            'sku' => 'STAY1',
+            'stock_quantity' => 5,
+        ]);
+        $missing = Product::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'Dropped From Sheet',
+            'item_type' => 'product',
+            'price' => 1,
+            'sku' => 'GONE1',
+            'stock_quantity' => 9,
+            'is_active' => true,
+        ]);
+
+        $csv = "name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,stock_quantity,low_stock_threshold\n"
+            ."Still Here,product,1.00,0.00,STAY1,,,piece,yes,5,5\n";
+        $file = UploadedFile::fake()->createWithContent('import.csv', $csv);
+
+        $response = $this->post('/office/products/import', ['file' => $file, 'full_catalogue' => true]);
+
+        $response->assertRedirect();
+        $response->assertSessionHas('import_missing', function (?array $missingList) {
+            return $missingList !== null && str_contains($missingList[0], 'Dropped From Sheet') && str_contains($missingList[0], 'GONE1');
+        });
+
+        // Untouched: still active, balance unchanged, no archive/deactivation happened.
+        $this->assertTrue($missing->fresh()->is_active);
+        $this->assertSame('9.0000', $missing->fresh()->stock_quantity);
+        $this->assertTrue($inFile->fresh()->is_active);
+    }
+
+    public function test_import_without_full_catalogue_flag_does_not_report_missing_products(): void
+    {
+        $tenantId = 'tenant-office-prod-partial-import';
+        $this->actingBackOfficeSession($tenantId);
+
+        Product::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'Not In This Small File',
+            'item_type' => 'product',
+            'price' => 1,
+            'sku' => 'PARTIAL1',
+        ]);
+
+        $csv = "name,item_type,price\nJust One New Item,product,4\n";
+        $file = UploadedFile::fake()->createWithContent('import.csv', $csv);
+
+        $response = $this->post('/office/products/import', ['file' => $file]);
+
+        $response->assertRedirect();
+        $response->assertSessionMissing('import_missing');
+    }
+
+    public function test_index_defaults_to_hiding_archived_items_and_the_archived_tab_shows_only_them(): void
+    {
+        $tenantId = 'tenant-office-prod-status-filter';
+        $this->actingBackOfficeSession($tenantId);
+
+        $active = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Active Item', 'item_type' => 'product', 'price' => 1, 'is_active' => true]);
+        $archived = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Archived Item', 'item_type' => 'product', 'price' => 1, 'is_active' => false]);
+
+        $default = $this->get('/office/products');
+        $defaultNames = collect($default->viewData('page')['props']['products']['data'])->pluck('name');
+        $this->assertContains('Active Item', $defaultNames);
+        $this->assertNotContains('Archived Item', $defaultNames);
+
+        $archivedTab = $this->get('/office/products?status=archived');
+        $archivedNames = collect($archivedTab->viewData('page')['props']['products']['data'])->pluck('name');
+        $this->assertContains('Archived Item', $archivedNames);
+        $this->assertNotContains('Active Item', $archivedNames);
+
+        $all = $this->get('/office/products?status=all');
+        $allNames = collect($all->viewData('page')['props']['products']['data'])->pluck('name');
+        $this->assertContains('Active Item', $allNames);
+        $this->assertContains('Archived Item', $allNames);
+
+        $this->assertNotNull($active);
+        $this->assertNotNull($archived);
+    }
+
+    public function test_merging_a_product_moves_stock_and_archives_the_duplicate(): void
+    {
+        $tenantId = 'tenant-office-prod-merge-1';
+        $this->actingBackOfficeSession($tenantId);
+
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Main']);
+        $processor = app(SyncProcessor::class);
+
+        $survivor = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Coca Cola 500ml', 'item_type' => 'product', 'price' => 1.5, 'track_stock' => true]);
+        $processor->process('stock_movements', (string) Str::uuid(), 'upsert', [
+            'business_id' => $tenantId, 'location_id' => $location->id, 'product_id' => $survivor->id,
+            'type' => 'opening_stock', 'quantity_change' => 10,
+        ]);
+
+        $duplicate = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Coke 500ml (dup)', 'item_type' => 'product', 'price' => 1.5, 'track_stock' => true]);
+        $processor->process('stock_movements', (string) Str::uuid(), 'upsert', [
+            'business_id' => $tenantId, 'location_id' => $location->id, 'product_id' => $duplicate->id,
+            'type' => 'opening_stock', 'quantity_change' => 8,
+        ]);
+
+        $response = $this->post("/office/products/{$duplicate->id}/merge", ['into' => $survivor->id]);
+        $response->assertRedirect();
+
+        $this->assertDatabaseHas('products', ['id' => $duplicate->id, 'is_active' => false, 'merged_into_product_id' => $survivor->id]);
+        $this->assertDatabaseHas('stock_movements', ['product_id' => $duplicate->id, 'location_id' => $location->id, 'type' => 'merge_out', 'quantity_change' => -8]);
+        $this->assertDatabaseHas('stock_movements', ['product_id' => $survivor->id, 'location_id' => $location->id, 'type' => 'merge_in', 'quantity_change' => 8]);
+        $this->assertDatabaseHas('product_stock', ['product_id' => $survivor->id, 'location_id' => $location->id, 'quantity' => 18]);
+        $this->assertDatabaseHas('product_stock', ['product_id' => $duplicate->id, 'location_id' => $location->id, 'quantity' => 0]);
+    }
+
+    public function test_cannot_merge_a_product_into_a_different_item_type(): void
+    {
+        $tenantId = 'tenant-office-prod-merge-2';
+        $this->actingBackOfficeSession($tenantId);
+
+        $product = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'A Product', 'item_type' => 'product', 'price' => 1]);
+        $service = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'A Service', 'item_type' => 'service', 'price' => 5]);
+
+        $this->post("/office/products/{$product->id}/merge", ['into' => $service->id])
+            ->assertSessionHasErrors('into');
+
+        $this->assertDatabaseHas('products', ['id' => $product->id, 'is_active' => true]);
+    }
+
+    public function test_cannot_merge_into_an_archived_item_or_into_itself(): void
+    {
+        $tenantId = 'tenant-office-prod-merge-3';
+        $this->actingBackOfficeSession($tenantId);
+
+        $product = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Solo Item', 'item_type' => 'product', 'price' => 1]);
+        $archivedTarget = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Archived Target', 'item_type' => 'product', 'price' => 1, 'is_active' => false]);
+
+        $this->post("/office/products/{$product->id}/merge", ['into' => $archivedTarget->id])
+            ->assertSessionHasErrors('into');
+
+        $this->post("/office/products/{$product->id}/merge", ['into' => $product->id])
+            ->assertSessionHasErrors('into');
+
+        $this->assertDatabaseHas('products', ['id' => $product->id, 'is_active' => true]);
+    }
+
+    public function test_merge_rejects_a_target_from_another_tenant(): void
+    {
+        $otherTenantId = 'tenant-office-prod-merge-other';
+        Tenant::firstOrCreate(['id' => $otherTenantId], ['business_name' => $otherTenantId, 'owner_email' => $otherTenantId.'@example.com', 'pairing_code' => substr(md5($otherTenantId), 0, 6)]);
+        $foreignProduct = Product::create(['id' => (string) Str::uuid(), 'business_id' => $otherTenantId, 'name' => 'Not Yours', 'item_type' => 'product', 'price' => 1]);
+
+        $tenantId = 'tenant-office-prod-merge-4';
+        $this->actingBackOfficeSession($tenantId);
+        $product = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Mine', 'item_type' => 'product', 'price' => 1]);
+
+        $this->post("/office/products/{$product->id}/merge", ['into' => $foreignProduct->id])
+            ->assertSessionHasErrors('into');
+    }
+
+    public function test_archive_all_deactivates_every_active_product_and_is_reversible_per_item(): void
+    {
+        $tenantId = 'tenant-office-prod-archive-all';
+        $this->actingBackOfficeSession($tenantId);
+
+        $a = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Item A', 'item_type' => 'product', 'price' => 1]);
+        $b = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Item B', 'item_type' => 'product', 'price' => 1]);
+        $alreadyArchived = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Already Archived', 'item_type' => 'product', 'price' => 1, 'is_active' => false]);
+
+        $response = $this->post('/office/products/archive-all');
+        $response->assertRedirect();
+
+        $this->assertDatabaseHas('products', ['id' => $a->id, 'is_active' => false]);
+        $this->assertDatabaseHas('products', ['id' => $b->id, 'is_active' => false]);
+        $this->assertDatabaseHas('products', ['id' => $alreadyArchived->id, 'is_active' => false]);
+
+        // Reversible per item, same as a normal archive.
+        $this->patch("/office/products/{$a->id}/toggle-active")->assertRedirect();
+        $this->assertDatabaseHas('products', ['id' => $a->id, 'is_active' => true]);
+    }
+
+    public function test_archive_all_is_owner_only(): void
+    {
+        $tenantId = 'tenant-office-prod-archive-all-role';
+        $this->actingBackOfficeSession($tenantId, role: 'cashier');
+
+        $product = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Protected Item', 'item_type' => 'product', 'price' => 1]);
+
+        $this->post('/office/products/archive-all')->assertForbidden();
+
+        $this->assertDatabaseHas('products', ['id' => $product->id, 'is_active' => true]);
     }
 }

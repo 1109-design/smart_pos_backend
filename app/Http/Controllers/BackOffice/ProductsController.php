@@ -18,6 +18,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -37,6 +38,7 @@ class ProductsController extends Controller
     public function index(Request $request, LocationService $locations): Response
     {
         $typeFilter = $request->string('type')->toString();
+        $statusFilter = $request->string('status')->toString() ?: 'active';
         $search = $request->string('search')->toString();
         $tenantId = $this->tenantId();
 
@@ -49,6 +51,11 @@ class ProductsController extends Controller
             ->where('business_id', $tenantId)
             ->when(in_array($typeFilter, ['product', 'service', 'container'], true),
                 fn ($query) => $query->where('item_type', $typeFilter))
+            // Archived items are opt-in via the Archived/All tabs — an
+            // archived duplicate sitting silently in the default list is
+            // exactly the confusion a merge/archive is meant to clear up.
+            ->when($statusFilter === 'active', fn ($query) => $query->where('is_active', true))
+            ->when($statusFilter === 'archived', fn ($query) => $query->where('is_active', false))
             ->when($search !== '', fn ($query) => $query->where(function ($q) use ($search) {
                 $q->where('name', 'like', "%{$search}%")
                     ->orWhere('sku', 'like', "%{$search}%")
@@ -59,13 +66,14 @@ class ProductsController extends Controller
                 'id', 'name', 'item_type', 'sku', 'barcode', 'price', 'cost_price',
                 'min_price', 'discount_percent', 'deposit_amount', 'expiry_date',
                 'unit', 'track_stock', 'stock_quantity', 'low_stock_threshold',
-                'category_id', 'is_active',
+                'category_id', 'is_active', 'merged_into_product_id',
             ])
             ->paginate(25)
             ->withQueryString();
 
         $this->attachSyncStatus($products);
         $this->attachContainerLinks($products);
+        $this->attachMergedIntoNames($products);
 
         $activeLocations = Location::where('business_id', $tenantId)->where('is_active', true)->orderBy('name')->get(['id', 'name', 'type']);
 
@@ -89,8 +97,38 @@ class ProductsController extends Controller
                 ->where('is_active', true)
                 ->orderBy('name')
                 ->get(['id', 'name', 'deposit_amount']),
-            'filters' => ['type' => $typeFilter ?: 'all', 'search' => $search],
+            // Merge target picker — every other active item, grouped
+            // client-side by item_type so a product can only merge into
+            // another product, a service into a service, etc.
+            'merge_candidates' => Product::where('business_id', $tenantId)
+                ->where('is_active', true)
+                ->orderBy('name')
+                ->get(['id', 'name', 'item_type', 'sku']),
+            'filters' => ['type' => $typeFilter ?: 'all', 'search' => $search, 'status' => $statusFilter],
         ]);
+    }
+
+    /**
+     * Attach the surviving product's name to any row that was merged away,
+     * so the Archived tab can show "Merged into X" instead of a bare id.
+     */
+    private function attachMergedIntoNames(LengthAwarePaginator $products): void
+    {
+        $targetIds = $products->getCollection()->pluck('merged_into_product_id')->filter()->unique();
+
+        if ($targetIds->isEmpty()) {
+            return;
+        }
+
+        $names = Product::whereIn('id', $targetIds)->pluck('name', 'id');
+
+        $products->getCollection()->transform(function (Product $product) use ($names) {
+            $product->merged_into_product_name = $product->merged_into_product_id
+                ? $names->get($product->merged_into_product_id)
+                : null;
+
+            return $product;
+        });
     }
 
     /**
@@ -202,10 +240,86 @@ class ProductsController extends Controller
     }
 
     /**
-     * Bulk create/update items from an uploaded CSV built from template().
-     * Matching an existing item is by SKU, then barcode; unmatched rows create
-     * a new item. Every write goes through the same sync pipeline as the
-     * manual form, so devices pick it up on their next pull.
+     * A live snapshot of the catalogue in the same column shape template()
+     * hands out, but populated with every active product/service and its
+     * real price, category and per-location balance — edit stock counts in
+     * Excel and re-upload through import() to update balances in bulk.
+     * Containers are left out (import()'s item_type rule doesn't accept
+     * "container", so a round trip couldn't bring them back in anyway).
+     */
+    public function export(): StreamedResponse
+    {
+        $tenantId = $this->tenantId();
+
+        $tenantLocations = Location::where('business_id', $tenantId)->where('is_active', true)->orderBy('name')->get(['id', 'name']);
+        $multiLocation = $tenantLocations->count() > 1;
+
+        $stockColumns = $multiLocation
+            ? $tenantLocations->map(fn (Location $location) => "stock: {$location->name}")->all()
+            : ['stock_quantity'];
+        $columns = array_merge(self::IMPORT_BASE_COLUMNS, $stockColumns, ['low_stock_threshold']);
+
+        $products = Product::where('business_id', $tenantId)
+            ->where('is_active', true)
+            ->whereIn('item_type', ['product', 'service'])
+            ->orderBy('name')
+            ->get(['id', 'name', 'item_type', 'price', 'cost_price', 'sku', 'barcode', 'category_id', 'unit', 'track_stock', 'stock_quantity', 'low_stock_threshold']);
+
+        $categoryNamesById = Category::where('business_id', $tenantId)->pluck('name', 'id');
+
+        $stockByProduct = $multiLocation
+            ? ProductStock::whereIn('product_id', $products->pluck('id'))->get(['product_id', 'location_id', 'quantity'])->groupBy('product_id')
+            : collect();
+
+        return response()->streamDownload(function () use ($products, $columns, $tenantLocations, $multiLocation, $stockByProduct, $categoryNamesById) {
+            $out = fopen('php://output', 'w');
+            fputcsv($out, $columns);
+
+            foreach ($products as $product) {
+                $isService = $product->item_type === 'service';
+
+                $row = [
+                    $product->name,
+                    $product->item_type,
+                    (string) $product->price,
+                    (string) $product->cost_price,
+                    $product->sku ?? '',
+                    $product->barcode ?? '',
+                    $product->category_id ? ($categoryNamesById->get($product->category_id) ?? '') : '',
+                    $isService ? '' : $product->unit,
+                    $isService ? '' : ($product->track_stock ? 'yes' : 'no'),
+                ];
+
+                if ($multiLocation) {
+                    $rowsByLocation = ($stockByProduct->get($product->id) ?? collect())->keyBy('location_id');
+                    foreach ($tenantLocations as $location) {
+                        $row[] = $isService ? '' : (string) (float) ($rowsByLocation->get($location->id)?->quantity ?? 0);
+                    }
+                } else {
+                    $row[] = $isService ? '' : (string) $product->stock_quantity;
+                }
+
+                $row[] = (string) $product->low_stock_threshold;
+
+                fputcsv($out, $row);
+            }
+
+            fclose($out);
+        }, 'products-export.csv', ['Content-Type' => 'text/csv']);
+    }
+
+    /**
+     * Bulk create/update items from an uploaded CSV built from template() or
+     * export(). Matching an existing item is by SKU, then barcode; unmatched
+     * rows create a new item. Every write goes through the same sync
+     * pipeline as the manual form, so devices pick it up on their next pull.
+     *
+     * Rows are never deleted or deactivated by omission — a product that
+     * exists here but is missing from the file is always left untouched.
+     * When full_catalogue is checked (the file is meant to be the entire
+     * active catalogue, e.g. from export()), missing products are reported
+     * back to the owner instead, so they can archive them deliberately if
+     * that was intentional.
      */
     public function import(Request $request, SyncProcessor $processor, LocationService $locations): RedirectResponse
     {
@@ -214,6 +328,7 @@ class ProductsController extends Controller
         $request->validate([
             'file' => ['required', 'file', 'mimes:csv,txt', 'max:5120'],
             'location_id' => ['nullable', 'string', Rule::exists('locations', 'id')->where('business_id', $tenantId)],
+            'full_catalogue' => ['sometimes', 'boolean'],
         ]);
 
         // The whole file lands at one location — the owner picks it in the
@@ -260,6 +375,10 @@ class ProductsController extends Controller
         $updated = 0;
         $errors = [];
         $rowNumber = 1;
+        // Every product id this file actually touched (created or matched
+        // by SKU/barcode) — used below to work out what full_catalogue's
+        // "missing from file" report should list.
+        $touchedProductIds = [];
 
         while (($row = fgetcsv($handle)) !== false) {
             $rowNumber++;
@@ -369,6 +488,17 @@ class ProductsController extends Controller
                     $this->applyLocationBalance($processor, $existing, $rowLocationId, $quantity);
                 }
 
+                // No per-location "stock: <location>" columns in this file (a
+                // single-location business, or a legacy flat file) — reconcile
+                // the flat stock_quantity column against the import's chosen
+                // location instead, the same place a brand new row's opening
+                // stock would land. Without this, editing stock_quantity for
+                // an existing item and re-importing would silently do nothing.
+                if (! $isService && empty($locationColumns) && ($data['stock_quantity'] ?? '') !== '') {
+                    $this->applyLocationBalance($processor, $existing, $locationId, (float) $valid['stock_quantity']);
+                }
+
+                $touchedProductIds[] = $existing->id;
                 $updated++;
             } else {
                 $payload['is_active'] = true;
@@ -394,18 +524,38 @@ class ProductsController extends Controller
                     }
                 }
 
+                $touchedProductIds[] = $newProductId;
                 $created++;
             }
         }
 
         fclose($handle);
 
+        $missing = [];
+        if ($request->boolean('full_catalogue')) {
+            $missing = Product::where('business_id', $tenantId)
+                ->where('is_active', true)
+                ->whereIn('item_type', ['product', 'service'])
+                ->whereNotIn('id', $touchedProductIds)
+                ->orderBy('name')
+                ->get(['name', 'sku', 'barcode'])
+                ->map(function (Product $product) {
+                    $identifier = $product->sku ?: $product->barcode;
+
+                    return $identifier ? "{$product->name} ({$identifier})" : $product->name;
+                })
+                ->all();
+        }
+
         $summary = "Imported {$created} new and updated {$updated} existing item(s). Devices will receive the changes on their next sync.";
         if ($errors) {
             $summary .= ' '.count($errors).' row(s) need attention — see details below.';
         }
+        if ($missing) {
+            $summary .= ' '.count($missing)." active item(s) weren't in this file — nothing was changed on them, see below.";
+        }
 
-        return back()->with('success', $summary)->with('import_errors', $errors ?: null);
+        return back()->with('success', $summary)->with('import_errors', $errors ?: null)->with('import_missing', $missing ?: null);
     }
 
     private function parseBoolean(string $value, bool $default): bool
@@ -543,37 +693,379 @@ class ProductsController extends Controller
     {
         $existing = Product::where('business_id', $this->tenantId())->findOrFail($product);
 
-        // Built as plain literals, not $existing->only(): Product casts every
-        // price/quantity field as decimal:N, which Eloquent renders as a
-        // STRING (e.g. "120.0000") to avoid float precision loss. Put through
-        // ->only() unchanged, that string lands in the sync payload's JSON
-        // and breaks the device's `as num?` cast on pull. Casting back to
-        // float/int here keeps the payload numeric on the wire.
+        $isActive = $this->setProductActive($processor, $existing, ! $existing->is_active);
+
+        return back()->with('success', $isActive ? 'Item restored.' : 'Item archived.');
+    }
+
+    /**
+     * Merge a duplicate product into a survivor of the same item type: moves
+     * every location's current stock across via a paired merge_out/merge_in
+     * ledger entry (the same audit-trail idea as a stock transfer), then
+     * archives the duplicate and stamps merged_into_product_id so the
+     * BackOffice can show why it's gone. Nothing historical is rewritten —
+     * every past sale, movement, and receipt still points at its original
+     * product id, exactly like any other archived item.
+     */
+    public function merge(Request $request, string $product, SyncProcessor $processor): RedirectResponse
+    {
+        $tenantId = $this->tenantId();
+
+        $data = $request->validate([
+            'into' => ['required', 'string', Rule::exists('products', 'id')->where('business_id', $tenantId)],
+        ]);
+
+        if ($data['into'] === $product) {
+            return back()->withErrors(['into' => 'Choose a different item to merge into.']);
+        }
+
+        $source = Product::where('business_id', $tenantId)->findOrFail($product);
+        $target = Product::where('business_id', $tenantId)->findOrFail($data['into']);
+
+        if ($source->item_type !== $target->item_type) {
+            return back()->withErrors(['into' => 'Can only merge items of the same type.']);
+        }
+
+        if (! $target->is_active) {
+            return back()->withErrors(['into' => 'Cannot merge into an archived item — restore it first or pick another.']);
+        }
+
+        DB::transaction(function () use ($processor, $source, $target) {
+            if ($source->track_stock) {
+                $sourceStock = ProductStock::where('product_id', $source->id)->where('quantity', '>', 0)->get();
+
+                foreach ($sourceStock as $stock) {
+                    $quantity = (float) $stock->quantity;
+                    $this->postStockMovement($processor, $source, $stock->location_id, 'merge_out', -$quantity, "Merged into {$target->name}", $target->id);
+                    $this->postStockMovement($processor, $target, $stock->location_id, 'merge_in', $quantity, "Merged from {$source->name}", $source->id);
+                }
+            }
+
+            $this->setProductActive($processor, $source, false);
+
+            // Backend-only bookkeeping — not part of the sync payload/products
+            // case, since devices only need is_active to stop selling it.
+            $source->forceFill(['merged_into_product_id' => $target->id])->save();
+        });
+
+        return back()->with('success', "\"{$source->name}\" merged into \"{$target->name}\" and archived. Devices will receive the stock changes on their next sync.");
+    }
+
+    /**
+     * Archive every currently-active item in one action — reversible
+     * per-item via the existing Restore button, and nothing is deleted or
+     * touches history. Owner-only given the blast radius (every till loses
+     * every product from its sell screen at once).
+     */
+    public function archiveAll(SyncProcessor $processor): RedirectResponse
+    {
+        abort_unless(session('backoffice.role') === 'business_owner', 403, 'Only the business owner can archive all items.');
+
+        $tenantId = $this->tenantId();
+        $archived = 0;
+
+        Product::where('business_id', $tenantId)->where('is_active', true)
+            ->chunkById(100, function ($products) use ($processor, &$archived) {
+                foreach ($products as $product) {
+                    $this->setProductActive($processor, $product, false);
+                    $archived++;
+                }
+            });
+
+        return back()->with('success', "Archived {$archived} item(s). Each can be restored individually from the Archived tab.");
+    }
+
+    /**
+     * Full-row product payload with only is_active flipped, run through the
+     * same sync pipeline as every other product write — reused by
+     * toggleActive(), merge() and archiveAll() so archiving always behaves
+     * identically everywhere it happens.
+     *
+     * Built as plain literals, not $product->only(): Product casts every
+     * price/quantity field as decimal:N, which Eloquent renders as a STRING
+     * (e.g. "120.0000") to avoid float precision loss. Put through ->only()
+     * unchanged, that string lands in the sync payload's JSON and breaks the
+     * device's `as num?` cast on pull. Casting back to float/int here keeps
+     * the payload numeric on the wire.
+     */
+    private function setProductActive(SyncProcessor $processor, Product $product, bool $isActive): bool
+    {
         $payload = [
-            'business_id' => $existing->business_id,
-            'category_id' => $existing->category_id,
-            'name' => $existing->name,
-            'item_type' => $existing->item_type,
-            'sku' => $existing->sku,
-            'barcode' => $existing->barcode,
-            'price' => (float) $existing->price,
-            'min_price' => $existing->min_price !== null ? (float) $existing->min_price : null,
-            'discount_percent' => $existing->discount_percent !== null ? (float) $existing->discount_percent : null,
-            'cost_price' => (float) $existing->cost_price,
-            'deposit_amount' => $existing->deposit_amount !== null ? (float) $existing->deposit_amount : null,
-            'unit' => $existing->unit,
-            'track_stock' => (bool) $existing->track_stock,
-            'stock_quantity' => (float) $existing->stock_quantity,
-            'low_stock_threshold' => (float) $existing->low_stock_threshold,
-            'image_path' => $existing->image_path,
-            'expiry_date' => $existing->expiry_date?->toIso8601String(),
-            'is_active' => ! $existing->is_active,
+            'business_id' => $product->business_id,
+            'category_id' => $product->category_id,
+            'name' => $product->name,
+            'item_type' => $product->item_type,
+            'sku' => $product->sku,
+            'barcode' => $product->barcode,
+            'price' => (float) $product->price,
+            'min_price' => $product->min_price !== null ? (float) $product->min_price : null,
+            'discount_percent' => $product->discount_percent !== null ? (float) $product->discount_percent : null,
+            'cost_price' => (float) $product->cost_price,
+            'deposit_amount' => $product->deposit_amount !== null ? (float) $product->deposit_amount : null,
+            'unit' => $product->unit,
+            'track_stock' => (bool) $product->track_stock,
+            'stock_quantity' => (float) $product->stock_quantity,
+            'low_stock_threshold' => (float) $product->low_stock_threshold,
+            'image_path' => $product->image_path,
+            'expiry_date' => $product->expiry_date?->toIso8601String(),
+            'is_active' => $isActive,
         ];
 
-        $processor->process('products', $product, 'upsert', $payload);
-        $this->publishSyncRecord($product, $payload);
+        $processor->process('products', $product->id, 'upsert', $payload);
+        $this->publishSyncRecord($product->id, $payload);
 
-        return back()->with('success', $payload['is_active'] ? 'Item restored.' : 'Item archived.');
+        return $isActive;
+    }
+
+    /**
+     * @param  string  $referenceId  the other product involved, so the ledger
+     *                               entry is traceable back to the merge.
+     */
+    private function postStockMovement(SyncProcessor $processor, Product $product, string $locationId, string $type, float $quantityChange, string $reason, ?string $referenceId = null, ?float $unitCost = null, ?float $runningAvgCost = null): void
+    {
+        $uuid = (string) Str::uuid();
+        $payload = [
+            'business_id' => $product->business_id,
+            'location_id' => $locationId,
+            'product_id' => $product->id,
+            'type' => $type,
+            'quantity_change' => $quantityChange,
+            'unit_cost' => $unitCost,
+            'running_avg_cost' => $runningAvgCost,
+            'reason' => $reason,
+            'reference_id' => $referenceId,
+            'user_id' => $this->userId(),
+        ];
+
+        $processor->process('stock_movements', $uuid, 'upsert', $payload);
+        $this->publishSyncRecord($uuid, $payload, table: 'stock_movements');
+    }
+
+    /**
+     * Multi-item goods receipt into one location — the BackOffice counterpart
+     * of the till's "Direct receive (no PO)" sheet
+     * (`CostService.receiveStock()` in `smart_pos/lib/core/inventory/cost_service.dart`).
+     * Recomputes cost_price as the weighted-average cost across existing +
+     * received stock, the same formula and 'receive' movement type the till
+     * already uses, so a receipt looks identical in the ledger regardless of
+     * which side recorded it.
+     */
+    public function receiveStock(Request $request, SyncProcessor $processor): RedirectResponse
+    {
+        $tenantId = $this->tenantId();
+
+        $data = $request->validate([
+            'location_id' => ['required', 'string', Rule::exists('locations', 'id')->where('business_id', $tenantId)],
+            'reason' => ['nullable', 'string', 'max:500'],
+            'items' => ['required', 'array', 'min:1'],
+            'items.*.product_id' => ['required', 'string'],
+            'items.*.qty' => ['required', 'numeric', 'min:0.0001'],
+            'items.*.unit_cost' => ['required', 'numeric', 'min:0'],
+        ]);
+
+        $products = Product::where('business_id', $tenantId)
+            ->where('track_stock', true)
+            ->whereIn('id', collect($data['items'])->pluck('product_id'))
+            ->get()
+            ->keyBy('id');
+
+        $received = 0;
+        foreach ($data['items'] as $item) {
+            $product = $products->get($item['product_id']);
+            if (! $product) {
+                continue;
+            }
+
+            $this->applyStockReceipt($processor, $product, $data['location_id'], (float) $item['qty'], (float) $item['unit_cost'], $data['reason'] ?? null);
+            $received++;
+        }
+
+        if ($received === 0) {
+            return back()->withErrors(['items' => 'None of the selected items could be received (check they still track stock).']);
+        }
+
+        return back()->with('success', "Received {$received} product(s) into stock. Devices will receive the update on their next sync.");
+    }
+
+    /**
+     * A ready-to-fill CSV for a bulk receipt: every active, stock-tracked
+     * product with its SKU/barcode/name for identification and current
+     * cost_price prefilled into unit_cost — leave qty blank (or 0) for
+     * anything not in this delivery, fill it in for what arrived, then
+     * upload through receiveStockImport(). Mirrors template()/export()'s
+     * shape for the product CSV import above.
+     */
+    public function receiveStockTemplate(): StreamedResponse
+    {
+        $tenantId = $this->tenantId();
+
+        $products = Product::where('business_id', $tenantId)
+            ->where('is_active', true)
+            ->where('track_stock', true)
+            ->orderBy('name')
+            ->get(['sku', 'barcode', 'name', 'cost_price']);
+
+        return response()->streamDownload(function () use ($products) {
+            $out = fopen('php://output', 'w');
+            fputcsv($out, ['sku', 'barcode', 'name', 'qty', 'unit_cost']);
+            foreach ($products as $product) {
+                fputcsv($out, [$product->sku ?? '', $product->barcode ?? '', $product->name, '', (string) $product->cost_price]);
+            }
+            fclose($out);
+        }, 'receive-stock-template.csv', ['Content-Type' => 'text/csv']);
+    }
+
+    /**
+     * Bulk version of receiveStock() from an uploaded CSV built from
+     * receiveStockTemplate() — one location for the whole file (same as a
+     * single delivery only ever arrives in one place), matching each row to
+     * a product by SKU then barcode, same precedence as the product CSV
+     * import. A row with a blank/zero qty is skipped quietly (nothing on
+     * this delivery for that product) rather than reported as an error.
+     */
+    public function receiveStockImport(Request $request, SyncProcessor $processor): RedirectResponse
+    {
+        $tenantId = $this->tenantId();
+
+        $request->validate([
+            'file' => ['required', 'file', 'mimes:csv,txt', 'max:5120'],
+            'location_id' => ['required', 'string', Rule::exists('locations', 'id')->where('business_id', $tenantId)],
+            'reason' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        $locationId = $request->string('location_id')->toString();
+        $reason = $request->string('reason')->toString() ?: null;
+
+        $handle = fopen($request->file('file')->getRealPath(), 'r');
+        $header = $handle ? fgetcsv($handle) : false;
+
+        if ($header === false) {
+            return back()->withErrors(['file' => 'The file could not be read or is empty.']);
+        }
+
+        $header = array_map(fn ($h) => strtolower(trim((string) $h)), $header);
+
+        foreach (['qty', 'unit_cost'] as $required) {
+            if (! in_array($required, $header, true)) {
+                fclose($handle);
+
+                return back()->withErrors(['file' => "Missing required column \"{$required}\". Download the template for the expected format."]);
+            }
+        }
+
+        $received = 0;
+        $errors = [];
+        $rowNumber = 1;
+
+        while (($row = fgetcsv($handle)) !== false) {
+            $rowNumber++;
+
+            if ($rowNumber - 1 > self::IMPORT_ROW_LIMIT) {
+                $errors[] = 'Stopped after '.self::IMPORT_ROW_LIMIT.' rows — split larger deliveries into multiple files.';
+                break;
+            }
+
+            if (count(array_filter($row, fn ($value) => trim((string) $value) !== '')) === 0) {
+                continue;
+            }
+
+            $data = [];
+            foreach ($header as $index => $key) {
+                $data[$key] = trim((string) ($row[$index] ?? ''));
+            }
+
+            // Nothing arrived on this line — skip quietly, same tolerance as
+            // the "stock: <location>" columns in the product CSV import.
+            if (($data['qty'] ?? '') === '' || (float) $data['qty'] <= 0) {
+                continue;
+            }
+
+            $validator = Validator::make($data, [
+                'qty' => ['required', 'numeric', 'min:0.0001'],
+                'unit_cost' => ['required', 'numeric', 'min:0'],
+            ]);
+
+            if ($validator->fails()) {
+                $errors[] = "Row {$rowNumber}: ".implode(' ', $validator->errors()->all());
+
+                continue;
+            }
+
+            $product = null;
+            if (($data['sku'] ?? '') !== '') {
+                $product = Product::where('business_id', $tenantId)->where('sku', $data['sku'])->first();
+            }
+            if (! $product && ($data['barcode'] ?? '') !== '') {
+                $product = Product::where('business_id', $tenantId)->where('barcode', $data['barcode'])->first();
+            }
+
+            if (! $product) {
+                $errors[] = "Row {$rowNumber}: no product matched by SKU or barcode.";
+
+                continue;
+            }
+
+            if (! $product->track_stock) {
+                $errors[] = "Row {$rowNumber}: \"{$product->name}\" doesn't track stock, skipped.";
+
+                continue;
+            }
+
+            $valid = $validator->validated();
+            $this->applyStockReceipt($processor, $product, $locationId, (float) $valid['qty'], (float) $valid['unit_cost'], $reason);
+            $received++;
+        }
+
+        fclose($handle);
+
+        $summary = "Received {$received} product(s) into stock. Devices will receive the update on their next sync.";
+        if ($errors) {
+            $summary .= ' '.count($errors).' row(s) need attention — see details below.';
+        }
+
+        return back()->with('success', $summary)->with('import_errors', $errors ?: null);
+    }
+
+    /**
+     * Weighted-average-cost recompute + full-row product upsert + ledger
+     * write for one receive() line. Split out from receiveStock() so each
+     * item gets its own product payload built from fresh field values.
+     */
+    private function applyStockReceipt(SyncProcessor $processor, Product $product, string $locationId, float $qty, float $unitCost, ?string $reason): void
+    {
+        $existingQty = max(0.0, (float) $product->stock_quantity);
+        $existingCost = (float) $product->cost_price;
+        $totalUnits = $existingQty + $qty;
+        $newAvgCost = $totalUnits > 0 ? (($existingQty * $existingCost) + ($qty * $unitCost)) / $totalUnits : $unitCost;
+
+        // Full-row product payload, same shape toggleActive() sends — every
+        // write through the sync pipeline replaces the whole row, so every
+        // untouched field has to be carried through explicitly.
+        $payload = [
+            'business_id' => $product->business_id,
+            'category_id' => $product->category_id,
+            'name' => $product->name,
+            'item_type' => $product->item_type,
+            'sku' => $product->sku,
+            'barcode' => $product->barcode,
+            'price' => (float) $product->price,
+            'min_price' => $product->min_price !== null ? (float) $product->min_price : null,
+            'discount_percent' => $product->discount_percent !== null ? (float) $product->discount_percent : null,
+            'cost_price' => $newAvgCost,
+            'deposit_amount' => $product->deposit_amount !== null ? (float) $product->deposit_amount : null,
+            'unit' => $product->unit,
+            'track_stock' => (bool) $product->track_stock,
+            // Ledger-owned — the postStockMovement() call below recomputes
+            // the true total from stock_movements right after this lands.
+            'stock_quantity' => (float) $product->stock_quantity,
+            'low_stock_threshold' => (float) $product->low_stock_threshold,
+            'image_path' => $product->image_path,
+            'expiry_date' => $product->expiry_date?->toIso8601String(),
+            'is_active' => (bool) $product->is_active,
+        ];
+        $this->applyThroughSyncPipeline($processor, $product->id, $payload);
+
+        $this->postStockMovement($processor, $product, $locationId, 'receive', $qty, $reason ?: 'Direct receive via BackOffice', unitCost: $unitCost, runningAvgCost: $newAvgCost);
     }
 
     /**
