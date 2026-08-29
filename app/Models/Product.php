@@ -14,7 +14,7 @@ class Product extends Model
         'id', 'business_id', 'category_id', 'name', 'item_type', 'sku', 'barcode',
         'price', 'min_price', 'discount_percent', 'cost_price', 'deposit_amount', 'unit',
         'track_stock', 'stock_quantity', 'low_stock_threshold',
-        'image_path', 'expiry_date', 'is_active',
+        'image_path', 'expiry_date', 'is_active', 'merged_into_product_id',
     ];
 
     protected static function booted(): void
