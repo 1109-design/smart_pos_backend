@@ -106,7 +106,13 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::put('products/{product}', [BackOfficeProducts::class, 'update'])->name('products.update');
         Route::patch('products/{product}/toggle-active', [BackOfficeProducts::class, 'toggleActive'])->name('products.toggle-active');
         Route::post('products/{product}/opening-balance', [BackOfficeProducts::class, 'setOpeningBalance'])->name('products.opening-balance');
+        Route::post('products/receive-stock', [BackOfficeProducts::class, 'receiveStock'])->name('products.receive-stock');
+        Route::get('products/receive-stock/template', [BackOfficeProducts::class, 'receiveStockTemplate'])->name('products.receive-stock.template');
+        Route::post('products/receive-stock/import', [BackOfficeProducts::class, 'receiveStockImport'])->name('products.receive-stock.import');
+        Route::post('products/{product}/merge', [BackOfficeProducts::class, 'merge'])->name('products.merge');
+        Route::post('products/archive-all', [BackOfficeProducts::class, 'archiveAll'])->name('products.archive-all');
         Route::get('products/import/template', [BackOfficeProducts::class, 'template'])->name('products.import.template');
+        Route::get('products/export', [BackOfficeProducts::class, 'export'])->name('products.export');
         Route::post('products/import', [BackOfficeProducts::class, 'import'])->name('products.import');
         Route::post('categories', [BackOfficeCategories::class, 'store'])->name('categories.store');
         Route::put('categories/{category}', [BackOfficeCategories::class, 'update'])->name('categories.update');
@@ -132,6 +138,7 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::post('transfers/{transfer}/cancel', [BackOfficeTransfers::class, 'cancel'])->name('transfers.cancel');
         Route::get('settings', [BackOfficeSettings::class, 'edit'])->name('settings.edit');
         Route::post('settings/reset-stock', [BackOfficeSettings::class, 'resetStock'])->name('settings.reset-stock');
+        Route::post('settings/reset-catalogue', [BackOfficeSettings::class, 'resetCatalogue'])->name('settings.reset-catalogue');
 
         Route::get('suppliers', [BackOfficeSuppliers::class, 'index'])->name('suppliers.index');
         Route::post('suppliers', [BackOfficeSuppliers::class, 'store'])->name('suppliers.store');

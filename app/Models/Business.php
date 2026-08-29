@@ -25,11 +25,14 @@ class Business extends Model
         'night_shift_start',
         'stock_reset_at',
         'stock_reset_by_user_id',
+        'catalogue_reset_at',
+        'catalogue_reset_by_user_id',
     ];
 
     protected $casts = [
         'metadata' => 'array',
         'fiscalisation_enabled' => 'boolean',
         'stock_reset_at' => 'datetime',
+        'catalogue_reset_at' => 'datetime',
     ];
 }
