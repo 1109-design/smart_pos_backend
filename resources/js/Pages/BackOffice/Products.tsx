@@ -116,12 +116,21 @@ function SyncBadge({ synced, total }: { synced: number | null; total: number }) 
     );
 }
 
-function StockByLocation({ rows }: { rows: StockLocationRow[] }) {
+function StockByLocation({ rows, onEdit }: { rows: StockLocationRow[]; onEdit: (row: StockLocationRow) => void }) {
     return (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
             {rows.map((r) => (
                 <div key={r.location_id} className="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2">
-                    <p className="text-xs text-slate-400 truncate">{r.location_name}</p>
+                    <div className="flex items-start justify-between gap-2">
+                        <p className="text-xs text-slate-400 truncate">{r.location_name}</p>
+                        <button
+                            onClick={() => onEdit(r)}
+                            className="text-[11px] font-semibold text-emerald-600 hover:text-emerald-800 flex-shrink-0"
+                            title="Set exact balance at this location"
+                        >
+                            Set balance
+                        </button>
+                    </div>
                     <p className="text-sm font-semibold text-slate-800">
                         {r.quantity.toFixed(0)}
                         {r.reserved_quantity > 0 && (
@@ -156,6 +165,7 @@ export default function BackOfficeProducts({ products, categories, locations, co
     const [newCategoryName, setNewCategoryName] = useState('');
     const [renamingId, setRenamingId] = useState<string | null>(null);
     const [renameValue, setRenameValue] = useState('');
+    const [balanceEdit, setBalanceEdit] = useState<{ productId: string; productName: string; locationName: string } | null>(null);
     const importFileInput = useRef<HTMLInputElement>(null);
 
     const { flash } = usePage().props as unknown as {
@@ -164,7 +174,23 @@ export default function BackOfficeProducts({ products, categories, locations, co
 
     const form = useForm({ ...EMPTY_FORM });
     const importForm = useForm<{ file: File | null; location_id: string }>({ file: null, location_id: default_location_id });
+    const balanceForm = useForm<{ location_id: string; quantity: string }>({ location_id: '', quantity: '' });
     const activeCategories = categories.filter((c) => c.is_active);
+
+    const openBalanceEdit = (productId: string, productName: string, row: StockLocationRow) => {
+        balanceForm.setData({ location_id: row.location_id, quantity: String(row.quantity) });
+        balanceForm.clearErrors();
+        setBalanceEdit({ productId, productName, locationName: row.location_name });
+    };
+
+    const submitBalance = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!balanceEdit) return;
+        balanceForm.post(`/office/products/${balanceEdit.productId}/opening-balance`, {
+            preserveScroll: true,
+            onSuccess: () => setBalanceEdit(null),
+        });
+    };
 
     const addCategory = () => {
         const name = newCategoryName.trim();
@@ -395,7 +421,7 @@ export default function BackOfficeProducts({ products, categories, locations, co
                             </div>
                             {hasBreakdown && expanded && (
                                 <div className="mt-3">
-                                    <StockByLocation rows={row.stock_by_location!} />
+                                    <StockByLocation rows={row.stock_by_location!} onEdit={(loc) => openBalanceEdit(row.id, row.name, loc)} />
                                 </div>
                             )}
                             <div className="mt-2">
@@ -490,7 +516,7 @@ export default function BackOfficeProducts({ products, categories, locations, co
                                 {hasBreakdown && expanded && (
                                     <tr>
                                         <td colSpan={8} className="bg-slate-50/60 px-6 py-3 border-t border-slate-100">
-                                            <StockByLocation rows={row.stock_by_location!} />
+                                            <StockByLocation rows={row.stock_by_location!} onEdit={(loc) => openBalanceEdit(row.id, row.name, loc)} />
                                         </td>
                                     </tr>
                                 )}
@@ -905,6 +931,43 @@ export default function BackOfficeProducts({ products, categories, locations, co
                         </button>
                     </div>
                 </form>
+            </Modal>
+
+            {/* Set exact stock balance at one location (opening balance / correction) */}
+            <Modal show={balanceEdit !== null} onClose={() => setBalanceEdit(null)} maxWidth="sm">
+                {balanceEdit && (
+                    <form onSubmit={submitBalance} className="p-6">
+                        <p className="text-base font-semibold text-slate-800">Set balance</p>
+                        <p className="text-xs text-slate-400 mt-1">{balanceEdit.productName} · {balanceEdit.locationName}</p>
+
+                        <div className="mt-4">
+                            <label className="text-xs font-semibold text-slate-500">Exact quantity on hand</label>
+                            <input
+                                type="number"
+                                step="any"
+                                min="0"
+                                autoFocus
+                                value={balanceForm.data.quantity}
+                                onChange={(e) => balanceForm.setData('quantity', e.target.value)}
+                                className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                            {balanceForm.errors.quantity && <p className="text-xs text-red-500 mt-1">{balanceForm.errors.quantity}</p>}
+                            <p className="text-xs text-slate-400 mt-2">
+                                This sets the balance to exactly this number — a stock movement is recorded for the
+                                difference, and every till will pick up the change on its next sync.
+                            </p>
+                        </div>
+
+                        <div className="mt-6 flex justify-end gap-2">
+                            <button type="button" onClick={() => setBalanceEdit(null)} className="text-sm px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100">
+                                Cancel
+                            </button>
+                            <button type="submit" disabled={balanceForm.processing || balanceForm.data.quantity === ''} className="btn-primary py-2 disabled:opacity-50">
+                                {balanceForm.processing ? 'Saving…' : 'Save'}
+                            </button>
+                        </div>
+                    </form>
+                )}
             </Modal>
         </BackOfficeLayout>
     );

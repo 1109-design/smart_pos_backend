@@ -9,6 +9,7 @@ use App\Models\Location;
 use App\Models\Product;
 use App\Models\ProductContainerLink;
 use App\Models\ProductStock;
+use App\Models\StockMovement;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
 use App\Services\LocationService;
@@ -482,6 +483,51 @@ class ProductsController extends Controller
     }
 
     /**
+     * Set a product's stock at one location to an exact figure, e.g. entering
+     * a warehouse's opening balance. Posts the *delta* against the live
+     * ledger total (not a raw add) so re-running this with the same number
+     * is a no-op and re-editing it twice never stacks — same reconciliation
+     * approach as the stock-take approval flow (recordVarianceMovement).
+     */
+    public function setOpeningBalance(Request $request, string $product, SyncProcessor $processor): RedirectResponse
+    {
+        $tenantId = $this->tenantId();
+
+        $data = $request->validate([
+            'location_id' => ['required', 'string', Rule::exists('locations', 'id')->where('business_id', $tenantId)],
+            'quantity' => ['required', 'numeric', 'min:0'],
+        ]);
+
+        $existing = Product::where('business_id', $tenantId)->where('track_stock', true)->findOrFail($product);
+
+        $currentQty = (float) StockMovement::where('product_id', $existing->id)
+            ->where('location_id', $data['location_id'])
+            ->sum('quantity_change');
+
+        $variance = (float) $data['quantity'] - $currentQty;
+
+        if (abs($variance) < 0.0001) {
+            return back()->with('success', 'Balance already matches — nothing to change.');
+        }
+
+        $uuid = (string) Str::uuid();
+        $payload = [
+            'business_id' => $tenantId,
+            'location_id' => $data['location_id'],
+            'product_id' => $existing->id,
+            'type' => 'opening_stock',
+            'quantity_change' => $variance,
+            'reason' => 'Opening balance set via BackOffice',
+            'user_id' => $this->userId(),
+        ];
+
+        $processor->process('stock_movements', $uuid, 'upsert', $payload);
+        $this->publishSyncRecord($uuid, $payload, table: 'stock_movements');
+
+        return back()->with('success', 'Opening balance updated. Devices will receive it on their next sync.');
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function validatePayload(Request $request, ?Product $existing = null): array
@@ -642,5 +688,10 @@ class ProductsController extends Controller
     private function tenantId(): ?string
     {
         return session('backoffice')['tenant_id'] ?? null;
+    }
+
+    private function userId(): ?string
+    {
+        return session('backoffice')['user_id'] ?? null;
     }
 }

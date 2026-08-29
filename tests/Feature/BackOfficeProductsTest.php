@@ -8,6 +8,7 @@ use App\Models\Device;
 use App\Models\Location;
 use App\Models\Product;
 use App\Models\ProductContainerLink;
+use App\Models\StockMovement;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
 use App\Models\Tenant;
@@ -673,6 +674,103 @@ class BackOfficeProductsTest extends TestCase
             ->where('products.data.0.name', 'Single Location Item')
             ->missing('products.data.0.stock_by_location')
         );
+    }
+
+    public function test_setting_opening_balance_records_the_delta_against_live_stock(): void
+    {
+        $tenantId = 'tenant-office-prod-balance-1';
+        $this->actingBackOfficeSession($tenantId);
+
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 1']);
+
+        $this->post('/office/products', [
+            'name' => 'Take-On Item',
+            'item_type' => 'product',
+            'price' => 2,
+            'stock_quantity' => 10,
+            'track_stock' => true,
+            'location_id' => $location->id,
+        ])->assertRedirect();
+
+        $product = Product::where('name', 'Take-On Item')->firstOrFail();
+
+        $response = $this->post("/office/products/{$product->id}/opening-balance", [
+            'location_id' => $location->id,
+            'quantity' => 50,
+        ]);
+        $response->assertRedirect();
+
+        // Delta of +40 posted, not a raw overwrite — keeps the ledger intact.
+        $this->assertDatabaseHas('stock_movements', [
+            'product_id' => $product->id,
+            'location_id' => $location->id,
+            'type' => 'opening_stock',
+            'quantity_change' => 40,
+        ]);
+        $this->assertDatabaseHas('product_stock', [
+            'product_id' => $product->id,
+            'location_id' => $location->id,
+            'quantity' => 50,
+        ]);
+        $this->assertSame('50.0000', $product->fresh()->stock_quantity);
+
+        $syncRecord = SyncRecord::where('table_name', 'stock_movements')
+            ->where('device_id', null)
+            ->latest('id')->first();
+        $this->assertNotNull($syncRecord);
+        $this->assertSame(40.0, (float) $syncRecord->payload['quantity_change']);
+    }
+
+    public function test_setting_opening_balance_twice_to_the_same_number_is_a_no_op_the_second_time(): void
+    {
+        $tenantId = 'tenant-office-prod-balance-2';
+        $this->actingBackOfficeSession($tenantId);
+
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 1']);
+
+        $this->post('/office/products', [
+            'name' => 'Repeat Take-On Item',
+            'item_type' => 'product',
+            'price' => 2,
+            'stock_quantity' => 0,
+            'track_stock' => true,
+            'location_id' => $location->id,
+        ])->assertRedirect();
+        $product = Product::where('name', 'Repeat Take-On Item')->firstOrFail();
+
+        $this->post("/office/products/{$product->id}/opening-balance", [
+            'location_id' => $location->id,
+            'quantity' => 30,
+        ])->assertRedirect();
+
+        $movementCountBefore = StockMovement::where('product_id', $product->id)->count();
+
+        // Re-submitting the same exact balance must not stack another movement.
+        $this->post("/office/products/{$product->id}/opening-balance", [
+            'location_id' => $location->id,
+            'quantity' => 30,
+        ])->assertRedirect();
+
+        $this->assertSame($movementCountBefore, StockMovement::where('product_id', $product->id)->count());
+        $this->assertSame('30.0000', $product->fresh()->stock_quantity);
+    }
+
+    public function test_opening_balance_rejects_a_location_from_another_tenant(): void
+    {
+        $otherTenantId = 'tenant-office-prod-balance-other';
+        Tenant::firstOrCreate(['id' => $otherTenantId], ['business_name' => $otherTenantId, 'owner_email' => $otherTenantId.'@example.com', 'pairing_code' => substr(md5($otherTenantId), 0, 6)]);
+        $foreignLocation = Location::create(['id' => (string) Str::uuid(), 'business_id' => $otherTenantId, 'name' => 'Their Warehouse']);
+
+        $tenantId = 'tenant-office-prod-balance-3';
+        $this->actingBackOfficeSession($tenantId);
+
+        $productId = (string) Str::uuid();
+        Product::create(['id' => $productId, 'business_id' => $tenantId, 'name' => 'Guarded Item', 'item_type' => 'product', 'price' => 1, 'track_stock' => true]);
+
+        $this->post("/office/products/{$productId}/opening-balance", [
+            'location_id' => $foreignLocation->id,
+            'quantity' => 10,
+        ])->assertSessionHasErrors('location_id');
     }
 
     public function test_template_download_has_the_expected_headers(): void
