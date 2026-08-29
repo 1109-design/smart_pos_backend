@@ -92,6 +92,10 @@ const EMPTY_FORM = {
     location_id: '',
     is_active: true as boolean,
     container_links: [] as { container_product_id: string; quantity_per_unit: string }[],
+    // Per-location balance breakdown (multi-location businesses only), keyed
+    // by location_id. Takes over from location_id/stock_quantity above when
+    // non-empty — see submit()'s location_stock array below.
+    location_stock: {} as Record<string, string>,
 };
 
 function SyncBadge({ synced, total }: { synced: number | null; total: number }) {
@@ -215,13 +219,18 @@ export default function BackOfficeProducts({ products, categories, locations, co
     };
 
     const openCreate = () => {
-        form.setData({ ...EMPTY_FORM, location_id: default_location_id });
+        form.setData({
+            ...EMPTY_FORM,
+            location_id: default_location_id,
+            location_stock: Object.fromEntries(locations.map((l) => [l.id, '0'])),
+        });
         form.clearErrors();
         setEditing(null);
         setShowForm(true);
     };
 
     const openEdit = (row: ProductRow) => {
+        const stockByLocation = new Map((row.stock_by_location ?? []).map((s) => [s.location_id, s.quantity]));
         form.setData({
             name: row.name,
             item_type: row.item_type,
@@ -244,6 +253,7 @@ export default function BackOfficeProducts({ products, categories, locations, co
                 container_product_id: link.container_product_id,
                 quantity_per_unit: String(link.quantity_per_unit),
             })),
+            location_stock: Object.fromEntries(locations.map((l) => [l.id, String(stockByLocation.get(l.id) ?? 0)])),
         });
         form.clearErrors();
         setEditing(row);
@@ -256,6 +266,15 @@ export default function BackOfficeProducts({ products, categories, locations, co
             preserveScroll: true,
             onSuccess: () => setShowForm(false),
         };
+        // Multi-location breakdown is entered as a {location_id: quantity}
+        // map for easy per-field editing, but the backend wants an array —
+        // only for businesses with more than one location does this map ever
+        // gain entries (see the form fields below), so it's an empty array
+        // and a no-op for single-location businesses.
+        form.transform((data) => ({
+            ...data,
+            location_stock: Object.entries(data.location_stock).map(([location_id, quantity]) => ({ location_id, quantity })),
+        }));
         if (editing) {
             form.put(`/office/products/${editing.id}`, options);
         } else {
@@ -688,18 +707,45 @@ export default function BackOfficeProducts({ products, categories, locations, co
                                         className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                                     />
                                 </div>
-                                <div>
-                                    <label className="text-xs font-semibold text-slate-500">
-                                        {editing ? 'Stock quantity (managed by tills after creation)' : 'Opening stock'}
-                                    </label>
-                                    <input
-                                        type="number" step="1" min="0"
-                                        value={form.data.stock_quantity}
-                                        onChange={(e) => form.setData('stock_quantity', e.target.value)}
-                                        disabled={!!editing}
-                                        className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:bg-slate-50 disabled:text-slate-400"
-                                    />
-                                </div>
+                                {locations.length <= 1 ? (
+                                    <div>
+                                        <label className="text-xs font-semibold text-slate-500">
+                                            {editing ? 'Stock quantity (managed by tills after creation)' : 'Opening stock'}
+                                        </label>
+                                        <input
+                                            type="number" step="1" min="0"
+                                            value={form.data.stock_quantity}
+                                            onChange={(e) => form.setData('stock_quantity', e.target.value)}
+                                            disabled={!!editing}
+                                            className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:bg-slate-50 disabled:text-slate-400"
+                                        />
+                                    </div>
+                                ) : (
+                                    <div className="sm:col-span-2">
+                                        <label className="text-xs font-semibold text-slate-500">
+                                            {editing ? 'Stock balance by location' : 'Opening stock by location'}
+                                        </label>
+                                        <div className="mt-1 grid grid-cols-2 sm:grid-cols-3 gap-2">
+                                            {locations.map((l) => (
+                                                <div key={l.id}>
+                                                    <label className="text-[11px] text-slate-400 truncate block">{l.name}</label>
+                                                    <input
+                                                        type="number" step="1" min="0"
+                                                        value={form.data.location_stock[l.id] ?? '0'}
+                                                        onChange={(e) => form.setData('location_stock', { ...form.data.location_stock, [l.id]: e.target.value })}
+                                                        className="mt-0.5 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                                    />
+                                                </div>
+                                            ))}
+                                        </div>
+                                        {editing && (
+                                            <p className="text-xs text-slate-400 mt-2">
+                                                Each location is reconciled independently to the exact number entered — a stock movement is
+                                                recorded only for the difference, so leaving a location unchanged is safe to resubmit.
+                                            </p>
+                                        )}
+                                    </div>
+                                )}
                                 <div>
                                     <label className="text-xs font-semibold text-slate-500">Low stock alert at</label>
                                     <input
@@ -718,20 +764,6 @@ export default function BackOfficeProducts({ products, categories, locations, co
                                         className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                                     />
                                 </div>
-                                {!editing && locations.length > 1 && (
-                                    <div>
-                                        <label className="text-xs font-semibold text-slate-500">Opening stock goes to</label>
-                                        <select
-                                            value={form.data.location_id}
-                                            onChange={(e) => form.setData('location_id', e.target.value)}
-                                            className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                                        >
-                                            {locations.map((l) => (
-                                                <option key={l.id} value={l.id}>{l.name}</option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                )}
                             </>
                         )}
 
@@ -885,7 +917,16 @@ export default function BackOfficeProducts({ products, categories, locations, co
                             <li><span className="font-mono">cost_price</span>, <span className="font-mono">sku</span>, <span className="font-mono">barcode</span>, <span className="font-mono">unit</span> and <span className="font-mono">low_stock_threshold</span> are optional.</li>
                             <li><span className="font-mono">category</span> must match an existing category name exactly, or leave it blank.</li>
                             <li><span className="font-mono">track_stock</span> is yes/no; ignored for services.</li>
-                            <li><span className="font-mono">stock_quantity</span> sets opening stock for new items only — it's ignored when updating an existing item, same as editing by hand.</li>
+                            {locations.length > 1 ? (
+                                <li>
+                                    One <span className="font-mono">stock: &lt;location name&gt;</span> column per location — download the
+                                    template below to get them pre-filled for your locations. Each location is reconciled to the exact
+                                    number in its column, so a blank cell leaves that location untouched and re-uploading the same file is
+                                    safe.
+                                </li>
+                            ) : (
+                                <li><span className="font-mono">stock_quantity</span> sets opening stock for new items only — it's ignored when updating an existing item, same as editing by hand.</li>
+                            )}
                         </ul>
                         <a
                             href="/office/products/import/template"
@@ -909,7 +950,9 @@ export default function BackOfficeProducts({ products, categories, locations, co
 
                     {locations.length > 1 && (
                         <div className="mt-4">
-                            <label className="text-xs font-semibold text-slate-500">New items' opening stock goes to</label>
+                            <label className="text-xs font-semibold text-slate-500">
+                                Fallback location (only used if the file has no "stock: &lt;location&gt;" columns)
+                            </label>
                             <select
                                 value={importForm.data.location_id}
                                 onChange={(e) => importForm.setData('location_id', e.target.value)}
