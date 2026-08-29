@@ -2,10 +2,13 @@
 
 namespace Tests\Feature;
 
+use App\Events\InvoicePaymentRecorded;
 use App\Events\ProductPriceChanged;
 use App\Events\ShiftStatusChanged;
 use App\Events\StockLevelChanged;
 use App\Events\TillCashMovementRecorded;
+use App\Models\Invoice;
+use App\Models\InvoicePayment;
 use App\Models\Location;
 use App\Models\Product;
 use App\Models\ProductStock;
@@ -173,5 +176,72 @@ class RealtimeBroadcastEventsTest extends TestCase
         Event::assertDispatched(TillCashMovementRecorded::class, fn ($e) => $e->movementId === $movement->id
             && $e->tillId === $till->id
             && $e->businessId === $tenantId);
+    }
+
+    public function test_invoice_payment_creation_dispatches_invoice_payment_recorded(): void
+    {
+        Event::fake([InvoicePaymentRecorded::class]);
+
+        $tenantId = 'tenant-events-invoice-payment';
+        $this->makeTenant($tenantId);
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Shop']);
+        $invoice = Invoice::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'location_id' => $location->id,
+            'customer_id' => (string) Str::uuid(),
+            'invoice_number' => 'INV-202608-001',
+            'status' => 'draft',
+            'issue_date' => now(),
+            'total' => 100,
+            'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        $payment = InvoicePayment::create([
+            'id' => (string) Str::uuid(),
+            'invoice_id' => $invoice->id,
+            'method' => 'cash',
+            'amount' => 50,
+            'currency_code' => 'USD',
+            'base_equivalent' => 50,
+            'recorded_by_user_id' => (string) Str::uuid(),
+            'paid_at' => now(),
+        ]);
+
+        Event::assertDispatched(InvoicePaymentRecorded::class, fn ($e) => $e->paymentId === $payment->id
+            && $e->invoiceId === $invoice->id
+            && $e->businessId === $tenantId
+            && $e->locationId === $location->id);
+    }
+
+    public function test_invoice_payment_without_a_location_does_not_dispatch(): void
+    {
+        Event::fake([InvoicePaymentRecorded::class]);
+
+        $tenantId = 'tenant-events-invoice-payment-no-location';
+        $this->makeTenant($tenantId);
+        $invoice = Invoice::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'customer_id' => (string) Str::uuid(),
+            'invoice_number' => 'INV-202608-002',
+            'status' => 'draft',
+            'issue_date' => now(),
+            'total' => 100,
+            'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        InvoicePayment::create([
+            'id' => (string) Str::uuid(),
+            'invoice_id' => $invoice->id,
+            'method' => 'cash',
+            'amount' => 50,
+            'currency_code' => 'USD',
+            'base_equivalent' => 50,
+            'recorded_by_user_id' => (string) Str::uuid(),
+            'paid_at' => now(),
+        ]);
+
+        Event::assertNotDispatched(InvoicePaymentRecorded::class);
     }
 }

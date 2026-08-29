@@ -23,3 +23,9 @@ Schedule::command('zimra:retry-failed')
     ->everyFifteenMinutes()
     ->withoutOverlapping()
     ->onOneServer();
+
+// ── Recurring invoices ───────────────────────────────────────────────────────
+Schedule::command('invoices:generate-recurring')
+    ->dailyAt('06:00')
+    ->withoutOverlapping()
+    ->onOneServer();

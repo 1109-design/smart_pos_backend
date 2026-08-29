@@ -9,12 +9,17 @@ use App\Models\Category;
 use App\Models\ChangeOwedLedger;
 use App\Models\ContainerDepositLedger;
 use App\Models\Coupon;
+use App\Models\CreditNote;
+use App\Models\CreditNoteItem;
 use App\Models\CreditTransaction;
 use App\Models\Currency;
 use App\Models\Customer;
 use App\Models\Employee;
 use App\Models\ExchangeRate;
 use App\Models\Expense;
+use App\Models\Invoice;
+use App\Models\InvoiceItem;
+use App\Models\InvoicePayment;
 use App\Models\Location;
 use App\Models\LoyaltyTransaction;
 use App\Models\Payment;
@@ -27,6 +32,9 @@ use App\Models\ProductVariant;
 use App\Models\ProductVariantStock;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
+use App\Models\Quotation;
+use App\Models\QuotationItem;
+use App\Models\RecurringInvoiceSchedule;
 use App\Models\RolePermission;
 use App\Models\SalaryPayment;
 use App\Models\Shift;
@@ -56,6 +64,7 @@ class SyncProcessor
         'stock_movements', 'loyalty_transactions', 'credit_transactions',
         'transaction_items', 'transaction_taxes', 'payments', 'po_audit_logs',
         'container_deposit_ledger', 'change_owed_ledger', 'till_cash_movements',
+        'invoice_payments', 'credit_note_items',
     ];
 
     // Tables with their own business_id column, guarded in assertOwnership().
@@ -88,6 +97,10 @@ class SyncProcessor
         'change_owed_ledger' => ChangeOwedLedger::class,
         'tills' => Till::class,
         'till_cash_movements' => TillCashMovement::class,
+        'quotations' => Quotation::class,
+        'invoices' => Invoice::class,
+        'credit_notes' => CreditNote::class,
+        'recurring_invoice_schedules' => RecurringInvoiceSchedule::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -108,6 +121,10 @@ class SyncProcessor
         'purchase_order_items' => [PurchaseOrderItem::class, 'purchase_order_id'],
         'stock_take_items' => [StockTakeItem::class, 'stock_take_id'],
         'po_audit_logs' => [PoAuditLog::class, 'po_id'],
+        'quotation_items' => [QuotationItem::class, 'quotation_id'],
+        'invoice_items' => [InvoiceItem::class, 'invoice_id'],
+        'invoice_payments' => [InvoicePayment::class, 'invoice_id'],
+        'credit_note_items' => [CreditNoteItem::class, 'credit_note_id'],
     ];
 
     // Deliberately unguarded, and why:
@@ -217,6 +234,9 @@ class SyncProcessor
             'loyalty_transactions', 'credit_transactions' => Customer::where('id', $parentId)->value('business_id'),
             'purchase_order_items', 'po_audit_logs' => PurchaseOrder::where('id', $parentId)->value('business_id'),
             'stock_take_items' => StockTake::where('id', $parentId)->value('business_id'),
+            'quotation_items' => Quotation::where('id', $parentId)->value('business_id'),
+            'invoice_items', 'invoice_payments' => Invoice::where('id', $parentId)->value('business_id'),
+            'credit_note_items' => CreditNote::where('id', $parentId)->value('business_id'),
             default => null,
         };
     }
@@ -1055,6 +1075,156 @@ class SyncProcessor
                     ]
                 );
                 break;
+
+            case 'quotations':
+                Quotation::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'quote_number' => $payload['quote_number'] ?? '',
+                        'status' => $payload['status'] ?? 'draft',
+                        'valid_until' => $payload['valid_until'] ?? null,
+                        'subtotal' => $payload['subtotal'] ?? 0,
+                        'discount_total' => $payload['discount_total'] ?? 0,
+                        'tax_total' => $payload['tax_total'] ?? 0,
+                        'total' => $payload['total'] ?? 0,
+                        'notes' => $payload['notes'] ?? null,
+                        'parent_quotation_id' => $payload['parent_quotation_id'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                        'sent_at' => $payload['sent_at'] ?? null,
+                        'accepted_at' => $payload['accepted_at'] ?? null,
+                        'rejected_at' => $payload['rejected_at'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'quotation_items':
+                QuotationItem::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'quotation_id' => $payload['quotation_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'product_name' => $payload['product_name'] ?? '',
+                        'quantity' => $payload['quantity'] ?? 0,
+                        'unit_price' => $payload['unit_price'] ?? 0,
+                        'discount_pct' => $payload['discount_pct'] ?? 0,
+                        'tax_rate_id' => $payload['tax_rate_id'] ?? null,
+                        'line_total' => $payload['line_total'] ?? 0,
+                        'invoiced_quantity' => $payload['invoiced_quantity'] ?? 0,
+                    ]
+                );
+                break;
+
+            case 'invoices':
+                Invoice::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'quotation_id' => $payload['quotation_id'] ?? null,
+                        'invoice_number' => $payload['invoice_number'] ?? '',
+                        'type' => $payload['type'] ?? 'standard',
+                        'status' => $payload['status'] ?? 'draft',
+                        'issue_date' => $payload['issue_date'] ?? now(),
+                        'due_date' => $payload['due_date'] ?? null,
+                        'payment_terms_days' => $payload['payment_terms_days'] ?? 0,
+                        'subtotal' => $payload['subtotal'] ?? 0,
+                        'discount_total' => $payload['discount_total'] ?? 0,
+                        'tax_total' => $payload['tax_total'] ?? 0,
+                        'deposit_required' => $payload['deposit_required'] ?? 0,
+                        'total' => $payload['total'] ?? 0,
+                        'amount_paid' => $payload['amount_paid'] ?? 0,
+                        'recurring_schedule_id' => $payload['recurring_schedule_id'] ?? null,
+                        'notes' => $payload['notes'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'invoice_items':
+                InvoiceItem::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'invoice_id' => $payload['invoice_id'] ?? null,
+                        'quotation_item_id' => $payload['quotation_item_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'product_name' => $payload['product_name'] ?? '',
+                        'quantity' => $payload['quantity'] ?? 0,
+                        'unit_price' => $payload['unit_price'] ?? 0,
+                        'discount_pct' => $payload['discount_pct'] ?? 0,
+                        'tax_rate_id' => $payload['tax_rate_id'] ?? null,
+                        'line_total' => $payload['line_total'] ?? 0,
+                    ]
+                );
+                break;
+
+            case 'invoice_payments':
+                // Append-only ledger — see IMMUTABLE (delete is ignored).
+                InvoicePayment::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'invoice_id' => $payload['invoice_id'] ?? null,
+                        'method' => $payload['method'] ?? 'cash',
+                        'amount' => $payload['amount'] ?? 0,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'base_equivalent' => $payload['base_equivalent'] ?? 0,
+                        'recorded_by_user_id' => $payload['recorded_by_user_id'] ?? null,
+                        'paid_at' => $payload['paid_at'] ?? now(),
+                    ]
+                );
+                break;
+
+            case 'credit_notes':
+                CreditNote::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'invoice_id' => $payload['invoice_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'credit_note_number' => $payload['credit_note_number'] ?? '',
+                        'reason' => $payload['reason'] ?? null,
+                        'subtotal' => $payload['subtotal'] ?? 0,
+                        'tax_total' => $payload['tax_total'] ?? 0,
+                        'total' => $payload['total'] ?? 0,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'credit_note_items':
+                // Append-only — see IMMUTABLE (delete is ignored).
+                CreditNoteItem::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'credit_note_id' => $payload['credit_note_id'] ?? null,
+                        'invoice_item_id' => $payload['invoice_item_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'product_name' => $payload['product_name'] ?? '',
+                        'quantity' => $payload['quantity'] ?? 0,
+                        'unit_price' => $payload['unit_price'] ?? 0,
+                        'line_total' => $payload['line_total'] ?? 0,
+                    ]
+                );
+                break;
+
+            case 'recurring_invoice_schedules':
+                RecurringInvoiceSchedule::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'template_json' => $payload['template_json'] ?? [],
+                        'frequency' => $payload['frequency'] ?? 'monthly',
+                        'next_run_date' => $payload['next_run_date'] ?? now(),
+                        'is_active' => $payload['is_active'] ?? true,
+                        'last_generated_invoice_id' => $payload['last_generated_invoice_id'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    ]
+                );
+                break;
         }
     }
 
@@ -1269,6 +1439,12 @@ class SyncProcessor
             'employees' => Employee::class,
             'salary_payments' => SalaryPayment::class,
             'tills' => Till::class,
+            'quotations' => Quotation::class,
+            'quotation_items' => QuotationItem::class,
+            'invoices' => Invoice::class,
+            'invoice_items' => InvoiceItem::class,
+            'credit_notes' => CreditNote::class,
+            'recurring_invoice_schedules' => RecurringInvoiceSchedule::class,
         ];
 
         $softDeleteIsActive = ['locations', 'categories', 'tax_rates', 'products', 'product_variants', 'suppliers', 'coupons', 'tills'];
