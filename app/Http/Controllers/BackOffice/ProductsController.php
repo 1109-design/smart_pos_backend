@@ -27,10 +27,9 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ProductsController extends Controller
 {
-    /** Column order for the downloadable import template, and the CSV columns import() reads. */
-    private const IMPORT_COLUMNS = [
-        'name', 'item_type', 'price', 'cost_price', 'sku', 'barcode',
-        'category', 'unit', 'track_stock', 'stock_quantity', 'low_stock_threshold',
+    /** Column order for the downloadable import template, before the stock column(s) — see template(). */
+    private const IMPORT_BASE_COLUMNS = [
+        'name', 'item_type', 'price', 'cost_price', 'sku', 'barcode', 'category', 'unit', 'track_stock',
     ];
 
     private const IMPORT_ROW_LIMIT = 2000;
@@ -166,13 +165,31 @@ class ProductsController extends Controller
         });
     }
 
-    /** A ready-to-fill CSV: header row + two worked examples (product and service). */
+    /**
+     * A ready-to-fill CSV: header row + two worked examples (product and
+     * service). A single-location business gets a flat "stock_quantity"
+     * column, same as always; a multi-location business instead gets one
+     * "stock: <location name>" column per active location, so opening
+     * balances can be populated per warehouse straight from the sheet — see
+     * import()'s matching logic below.
+     */
     public function template(): StreamedResponse
     {
+        $tenantLocations = Location::where('business_id', $this->tenantId())->where('is_active', true)->orderBy('name')->get(['name']);
+        $multiLocation = $tenantLocations->count() > 1;
+
+        $stockColumns = $multiLocation
+            ? $tenantLocations->map(fn (Location $location) => "stock: {$location->name}")->all()
+            : ['stock_quantity'];
+        $columns = array_merge(self::IMPORT_BASE_COLUMNS, $stockColumns, ['low_stock_threshold']);
+
+        $productStockExample = $multiLocation ? array_pad(['30'], count($stockColumns), '0') : ['50'];
+        $serviceStockExample = array_fill(0, count($stockColumns), '');
+
         $rows = [
-            self::IMPORT_COLUMNS,
-            ['Coca Cola 500ml', 'product', '1.50', '0.90', 'COKE500', '6001234567890', 'Beverages', 'piece', 'yes', '50', '10'],
-            ['Phone Screen Repair', 'service', '25.00', '', '', '', 'Repairs', '', 'no', '', ''],
+            $columns,
+            array_merge(['Coca Cola 500ml', 'product', '1.50', '0.90', 'COKE500', '6001234567890', 'Beverages', 'piece', 'yes'], $productStockExample, ['10']),
+            array_merge(['Phone Screen Repair', 'service', '25.00', '', '', '', 'Repairs', '', 'no'], $serviceStockExample, ['']),
         ];
 
         return response()->streamDownload(function () use ($rows) {
@@ -201,7 +218,9 @@ class ProductsController extends Controller
 
         // The whole file lands at one location — the owner picks it in the
         // import dialog (defaulting to the business's default location) since
-        // a CSV row has no natural place to carry that per-item.
+        // a CSV row has no natural place to carry that per-item. Superseded
+        // per-row by $locationColumns below when the file carries its own
+        // "stock: <location>" columns instead.
         $locationId = $request->string('location_id')->toString() ?: $locations->ensureDefaultLocation($tenantId)->id;
 
         $handle = fopen($request->file('file')->getRealPath(), 'r');
@@ -218,6 +237,19 @@ class ProductsController extends Controller
                 fclose($handle);
 
                 return back()->withErrors(['file' => "Missing required column \"{$required}\". Download the template for the expected format."]);
+            }
+        }
+
+        // Per-location stock columns look like "stock: Warehouse 1" — matched
+        // case-insensitively against this business's own location names, the
+        // way template() generates them for a multi-location business. A
+        // file without any of these just keeps using the flat stock_quantity
+        // column further down, unchanged.
+        $locationColumns = [];
+        foreach (Location::where('business_id', $tenantId)->where('is_active', true)->get(['id', 'name']) as $location) {
+            $key = 'stock: '.strtolower($location->name);
+            if (in_array($key, $header, true)) {
+                $locationColumns[$key] = $location;
             }
         }
 
@@ -246,7 +278,7 @@ class ProductsController extends Controller
                 $data[$key] = trim((string) ($row[$index] ?? ''));
             }
 
-            $validator = Validator::make($data, [
+            $rules = [
                 'name' => ['required', 'string', 'max:255'],
                 'item_type' => ['required', 'in:product,service'],
                 'price' => ['required', 'numeric', 'min:0'],
@@ -256,7 +288,12 @@ class ProductsController extends Controller
                 'unit' => ['nullable', 'string', 'max:30'],
                 'stock_quantity' => ['nullable', 'numeric', 'min:0'],
                 'low_stock_threshold' => ['nullable', 'numeric', 'min:0'],
-            ]);
+            ];
+            foreach (array_keys($locationColumns) as $key) {
+                $rules[$key] = ['nullable', 'numeric', 'min:0'];
+            }
+
+            $validator = Validator::make($data, $rules);
 
             if ($validator->fails()) {
                 $errors[] = "Row {$rowNumber}: ".implode(' ', $validator->errors()->all());
@@ -296,6 +333,18 @@ class ProductsController extends Controller
                 'low_stock_threshold' => $valid['low_stock_threshold'] ?? 5,
             ];
 
+            // This row's per-location balances, only for columns actually
+            // filled in — a blank cell leaves that location untouched rather
+            // than zeroing it out.
+            $rowLocationStock = [];
+            if (! $isService) {
+                foreach ($locationColumns as $key => $location) {
+                    if (($valid[$key] ?? '') !== '') {
+                        $rowLocationStock[$location->id] = (float) $valid[$key];
+                    }
+                }
+            }
+
             if ($existing) {
                 // Stock is ledger-owned after creation — same rule the manual edit form
                 // follows (it disables the field and resubmits the current value).
@@ -315,12 +364,36 @@ class ProductsController extends Controller
                 $payload['deposit_amount'] = null;
                 $payload['expiry_date'] = $existing->expiry_date?->toIso8601String();
                 $this->applyThroughSyncPipeline($processor, $existing->id, $payload);
+
+                foreach ($rowLocationStock as $rowLocationId => $quantity) {
+                    $this->applyLocationBalance($processor, $existing, $rowLocationId, $quantity);
+                }
+
                 $updated++;
             } else {
-                $payload['stock_quantity'] = $isService ? 0 : ($valid['stock_quantity'] ?? 0);
-                $payload['location_id'] = $isService ? null : $locationId;
                 $payload['is_active'] = true;
-                $this->applyThroughSyncPipeline($processor, (string) Str::uuid(), $payload);
+
+                if (! empty($rowLocationStock)) {
+                    // Same reasoning as store()'s multi-location branch: no
+                    // single location owns the opening figure, each entry
+                    // below gets its own movement instead.
+                    $payload['stock_quantity'] = 0;
+                    $payload['location_id'] = null;
+                } else {
+                    $payload['stock_quantity'] = $isService ? 0 : ($valid['stock_quantity'] ?? 0);
+                    $payload['location_id'] = $isService ? null : $locationId;
+                }
+
+                $newProductId = (string) Str::uuid();
+                $this->applyThroughSyncPipeline($processor, $newProductId, $payload);
+
+                if (! empty($rowLocationStock)) {
+                    $newProduct = Product::findOrFail($newProductId);
+                    foreach ($rowLocationStock as $rowLocationId => $quantity) {
+                        $this->applyLocationBalance($processor, $newProduct, $rowLocationId, $quantity);
+                    }
+                }
+
                 $created++;
             }
         }
@@ -411,18 +484,34 @@ class ProductsController extends Controller
     {
         $data = $this->validatePayload($request);
         $containerLinks = $data['container_links'];
-        unset($data['container_links']);
+        $locationStock = $data['location_stock'];
+        unset($data['container_links'], $data['location_stock']);
 
-        // Opening stock has to land somewhere. If the form didn't specify a
-        // location (or this is a service, where it's moot), fall back to the
-        // business's default rather than leaving it unattributed.
-        if ($data['track_stock'] && empty($data['location_id'])) {
+        // A per-location breakdown was submitted (multi-location businesses
+        // only) — the product itself carries no single opening figure; each
+        // location gets its own movement below instead, via the same delta
+        // primitive setOpeningBalance() uses (baseline is 0 for a brand new
+        // product, so the movement equals the entered quantity outright).
+        if (! empty($locationStock)) {
+            $data['location_id'] = null;
+            $data['stock_quantity'] = 0;
+        } elseif ($data['track_stock'] && empty($data['location_id'])) {
+            // Opening stock has to land somewhere. If the form didn't specify
+            // a location (or this is a service, where it's moot), fall back
+            // to the business's default rather than leaving it unattributed.
             $data['location_id'] = $locations->ensureDefaultLocation($this->tenantId())->id;
         }
 
         $uuid = (string) Str::uuid();
         $this->applyThroughSyncPipeline($processor, $uuid, $data);
         $this->applyContainerLinks($processor, $uuid, $containerLinks, existingLinks: collect());
+
+        if (! empty($locationStock)) {
+            $product = Product::findOrFail($uuid);
+            foreach ($locationStock as $entry) {
+                $this->applyLocationBalance($processor, $product, $entry['location_id'], (float) $entry['quantity']);
+            }
+        }
 
         return back()->with('success', 'Item created. Devices will receive it on their next sync.');
     }
@@ -432,7 +521,8 @@ class ProductsController extends Controller
         $existing = Product::where('business_id', $this->tenantId())->findOrFail($product);
         $data = $this->validatePayload($request, $existing);
         $containerLinks = $data['container_links'];
-        unset($data['container_links']);
+        $locationStock = $data['location_stock'];
+        unset($data['container_links'], $data['location_stock']);
 
         $this->applyThroughSyncPipeline($processor, $product, $data);
         $this->applyContainerLinks(
@@ -441,6 +531,10 @@ class ProductsController extends Controller
             $containerLinks,
             existingLinks: ProductContainerLink::where('beverage_product_id', $product)->get()
         );
+
+        foreach ($locationStock as $entry) {
+            $this->applyLocationBalance($processor, $existing, $entry['location_id'], (float) $entry['quantity']);
+        }
 
         return back()->with('success', 'Item updated. Devices will receive it on their next sync.');
     }
@@ -500,21 +594,35 @@ class ProductsController extends Controller
 
         $existing = Product::where('business_id', $tenantId)->where('track_stock', true)->findOrFail($product);
 
-        $currentQty = (float) StockMovement::where('product_id', $existing->id)
-            ->where('location_id', $data['location_id'])
+        $this->applyLocationBalance($processor, $existing, $data['location_id'], (float) $data['quantity']);
+
+        return back()->with('success', 'Opening balance updated. Devices will receive it on their next sync.');
+    }
+
+    /**
+     * Post a stock_movements entry for the *delta* between a location's live
+     * ledger total and the desired figure — the single reconciliation
+     * primitive behind setOpeningBalance() and the per-location breakdown on
+     * the create/edit form. Re-applying the same number twice is a no-op,
+     * same approach as the stock-take approval flow (recordVarianceMovement).
+     */
+    private function applyLocationBalance(SyncProcessor $processor, Product $product, string $locationId, float $desiredQty): void
+    {
+        $currentQty = (float) StockMovement::where('product_id', $product->id)
+            ->where('location_id', $locationId)
             ->sum('quantity_change');
 
-        $variance = (float) $data['quantity'] - $currentQty;
+        $variance = $desiredQty - $currentQty;
 
         if (abs($variance) < 0.0001) {
-            return back()->with('success', 'Balance already matches — nothing to change.');
+            return;
         }
 
         $uuid = (string) Str::uuid();
         $payload = [
-            'business_id' => $tenantId,
-            'location_id' => $data['location_id'],
-            'product_id' => $existing->id,
+            'business_id' => $product->business_id,
+            'location_id' => $locationId,
+            'product_id' => $product->id,
             'type' => 'opening_stock',
             'quantity_change' => $variance,
             'reason' => 'Opening balance set via BackOffice',
@@ -523,8 +631,6 @@ class ProductsController extends Controller
 
         $processor->process('stock_movements', $uuid, 'upsert', $payload);
         $this->publishSyncRecord($uuid, $payload, table: 'stock_movements');
-
-        return back()->with('success', 'Opening balance updated. Devices will receive it on their next sync.');
     }
 
     /**
@@ -563,6 +669,17 @@ class ProductsController extends Controller
                 Rule::exists('products', 'id')->where('business_id', $this->tenantId())->where('item_type', 'container'),
             ],
             'container_links.*.quantity_per_unit' => ['required_with:container_links', 'numeric', 'min:0.0001'],
+            // Per-location opening/current balance breakdown (multi-location
+            // businesses only) — see applyLocationBalance(). When present it
+            // takes over from the single stock_quantity/location_id pair.
+            'location_stock' => ['nullable', 'array'],
+            'location_stock.*.location_id' => [
+                'required_with:location_stock',
+                'string',
+                'distinct',
+                Rule::exists('locations', 'id')->where('business_id', $this->tenantId()),
+            ],
+            'location_stock.*.quantity' => ['required_with:location_stock', 'numeric', 'min:0'],
         ]);
 
         $isService = $validated['item_type'] === 'service';
@@ -613,6 +730,9 @@ class ProductsController extends Controller
             // Stripped off in store()/update() before the product payload is
             // built — not a Product column, handled by applyContainerLinks().
             'container_links' => $isContainer ? [] : ($validated['container_links'] ?? []),
+            // Stripped off in store()/update() before the product payload is
+            // built — not a Product column, handled by applyLocationBalance().
+            'location_stock' => $isService ? [] : ($validated['location_stock'] ?? []),
         ];
     }
 

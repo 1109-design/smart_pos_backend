@@ -773,6 +773,76 @@ class BackOfficeProductsTest extends TestCase
         ])->assertSessionHasErrors('location_id');
     }
 
+    public function test_creating_a_product_with_a_location_breakdown_posts_one_movement_per_location(): void
+    {
+        $tenantId = 'tenant-office-prod-create-breakdown';
+        $this->actingBackOfficeSession($tenantId);
+
+        $warehouse1 = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 1']);
+        $warehouse2 = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 2']);
+
+        $response = $this->post('/office/products', [
+            'name' => 'Multi-Location Item',
+            'item_type' => 'product',
+            'price' => 3,
+            'track_stock' => true,
+            'location_stock' => [
+                ['location_id' => $warehouse1->id, 'quantity' => 20],
+                ['location_id' => $warehouse2->id, 'quantity' => 15],
+            ],
+        ]);
+        $response->assertRedirect();
+
+        $product = Product::where('name', 'Multi-Location Item')->firstOrFail();
+
+        $this->assertDatabaseHas('stock_movements', [
+            'product_id' => $product->id, 'location_id' => $warehouse1->id, 'quantity_change' => 20,
+        ]);
+        $this->assertDatabaseHas('stock_movements', [
+            'product_id' => $product->id, 'location_id' => $warehouse2->id, 'quantity_change' => 15,
+        ]);
+        $this->assertDatabaseHas('product_stock', ['product_id' => $product->id, 'location_id' => $warehouse1->id, 'quantity' => 20]);
+        $this->assertDatabaseHas('product_stock', ['product_id' => $product->id, 'location_id' => $warehouse2->id, 'quantity' => 15]);
+        $this->assertSame('35.0000', $product->fresh()->stock_quantity);
+    }
+
+    public function test_editing_a_product_with_a_location_breakdown_reconciles_each_location_independently(): void
+    {
+        $tenantId = 'tenant-office-prod-edit-breakdown';
+        $this->actingBackOfficeSession($tenantId);
+
+        $warehouse1 = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 1']);
+        $warehouse2 = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 2']);
+
+        $this->post('/office/products', [
+            'name' => 'Edited Multi-Location Item',
+            'item_type' => 'product',
+            'price' => 3,
+            'track_stock' => true,
+            'location_stock' => [
+                ['location_id' => $warehouse1->id, 'quantity' => 10],
+                ['location_id' => $warehouse2->id, 'quantity' => 10],
+            ],
+        ])->assertRedirect();
+        $product = Product::where('name', 'Edited Multi-Location Item')->firstOrFail();
+
+        // Correct Warehouse 1 upward and leave Warehouse 2 untouched by
+        // resubmitting its current figure — must not double it up.
+        $this->put("/office/products/{$product->id}", [
+            'name' => 'Edited Multi-Location Item',
+            'item_type' => 'product',
+            'price' => 3,
+            'location_stock' => [
+                ['location_id' => $warehouse1->id, 'quantity' => 25],
+                ['location_id' => $warehouse2->id, 'quantity' => 10],
+            ],
+        ])->assertRedirect();
+
+        $this->assertDatabaseHas('product_stock', ['product_id' => $product->id, 'location_id' => $warehouse1->id, 'quantity' => 25]);
+        $this->assertDatabaseHas('product_stock', ['product_id' => $product->id, 'location_id' => $warehouse2->id, 'quantity' => 10]);
+        $this->assertSame('35.0000', $product->fresh()->stock_quantity);
+    }
+
     public function test_template_download_has_the_expected_headers(): void
     {
         $this->actingBackOfficeSession('tenant-office-prod-10');
@@ -785,5 +855,70 @@ class BackOfficeProductsTest extends TestCase
             'name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,stock_quantity,low_stock_threshold',
             $response->streamedContent()
         );
+    }
+
+    public function test_template_download_has_one_stock_column_per_location_for_multi_location_businesses(): void
+    {
+        $tenantId = 'tenant-office-prod-template-multi';
+        $this->actingBackOfficeSession($tenantId);
+
+        Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 1']);
+        Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 2']);
+
+        $response = $this->get('/office/products/import/template');
+
+        $response->assertOk();
+        $this->assertStringStartsWith(
+            'name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,"stock: Warehouse 1","stock: Warehouse 2",low_stock_threshold',
+            $response->streamedContent()
+        );
+    }
+
+    public function test_import_populates_per_location_balances_from_stock_columns(): void
+    {
+        $tenantId = 'tenant-office-prod-import-multi';
+        $this->actingBackOfficeSession($tenantId);
+
+        $warehouse1 = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 1']);
+        $warehouse2 = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 2']);
+
+        $csv = 'name,item_type,price,sku,"stock: Warehouse 1","stock: Warehouse 2"'."\n"
+            .'Split Stock Soda,product,2.00,SPLIT1,30,20'."\n";
+        $file = UploadedFile::fake()->createWithContent('import.csv', $csv);
+
+        $response = $this->post('/office/products/import', ['file' => $file]);
+
+        $response->assertRedirect();
+        $response->assertSessionMissing('import_errors');
+
+        $product = Product::where('sku', 'SPLIT1')->firstOrFail();
+        $this->assertDatabaseHas('product_stock', ['product_id' => $product->id, 'location_id' => $warehouse1->id, 'quantity' => 30]);
+        $this->assertDatabaseHas('product_stock', ['product_id' => $product->id, 'location_id' => $warehouse2->id, 'quantity' => 20]);
+        $this->assertSame('50.0000', $product->fresh()->stock_quantity);
+    }
+
+    public function test_reimporting_with_stock_columns_reconciles_without_double_counting(): void
+    {
+        $tenantId = 'tenant-office-prod-import-multi-reimport';
+        $this->actingBackOfficeSession($tenantId);
+
+        $warehouse1 = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse 1']);
+
+        $csvHeader = 'name,item_type,price,sku,"stock: Warehouse 1"';
+        $this->post('/office/products/import', [
+            'file' => UploadedFile::fake()->createWithContent('import.csv', $csvHeader."\n".'Reimport Item,product,2.00,REIMP1,40'."\n"),
+        ])->assertRedirect();
+
+        $product = Product::where('sku', 'REIMP1')->firstOrFail();
+        $this->assertDatabaseHas('product_stock', ['product_id' => $product->id, 'location_id' => $warehouse1->id, 'quantity' => 40]);
+
+        // Re-importing the same file (matched by SKU this time) with a
+        // corrected figure must reconcile to the new number, not add to it.
+        $this->post('/office/products/import', [
+            'file' => UploadedFile::fake()->createWithContent('import.csv', $csvHeader."\n".'Reimport Item,product,2.00,REIMP1,65'."\n"),
+        ])->assertRedirect();
+
+        $this->assertDatabaseHas('product_stock', ['product_id' => $product->id, 'location_id' => $warehouse1->id, 'quantity' => 65]);
+        $this->assertSame('65.0000', $product->fresh()->stock_quantity);
     }
 }
