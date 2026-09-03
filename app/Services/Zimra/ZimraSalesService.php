@@ -106,8 +106,22 @@ class ZimraSalesService
             ];
         }
 
+        // A chain registers one fiscal device per branch (ZIMRA requires its
+        // own fiscal day/receipt sequence per till/branch). Prefer the device
+        // registered for this sale's location; fall back to a business-wide
+        // device (location_id null) for businesses that haven't split by
+        // branch yet — keeps single-location businesses working unchanged.
         $device = ZimraDevice::where('business_id', $transaction->business_id)
             ->where('is_active', true)
+            ->where(function ($query) use ($transaction) {
+                if ($transaction->location_id) {
+                    $query->where('location_id', $transaction->location_id)
+                        ->orWhereNull('location_id');
+                } else {
+                    $query->whereNull('location_id');
+                }
+            })
+            ->orderByRaw('location_id IS NULL')
             ->first();
 
         if (! $device) {

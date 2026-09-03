@@ -5,7 +5,9 @@ namespace App\Http\Controllers\BackOffice;
 use App\Http\Controllers\Controller;
 use App\Models\Supplier;
 use App\Models\SyncRecord;
+use App\Services\BackOfficeAuthorizer;
 use App\Services\SyncProcessor;
+use App\Support\BackOfficePermission;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
@@ -14,6 +16,8 @@ use Inertia\Response;
 
 class SuppliersController extends Controller
 {
+    public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
+
     public function index(Request $request): Response
     {
         $this->authorizeManager();
@@ -121,8 +125,8 @@ class SuppliersController extends Controller
 
     private function authorizeManager(): void
     {
-        abort_if(
-            ! in_array(session('backoffice.role'), ['business_owner', 'manager']),
+        abort_unless(
+            $this->authorizer->can($this->tenantId(), session('backoffice.role'), BackOfficePermission::MANAGE_SUPPLIERS),
             403,
             'Access denied.'
         );

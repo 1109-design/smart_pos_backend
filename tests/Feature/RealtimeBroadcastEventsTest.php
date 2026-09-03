@@ -16,6 +16,8 @@ use App\Models\Shift;
 use App\Models\Tenant;
 use App\Models\Till;
 use App\Models\TillCashMovement;
+use App\Services\SyncProcessor;
+use App\Services\TransferService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;
@@ -66,6 +68,46 @@ class RealtimeBroadcastEventsTest extends TestCase
         $stock->update(['reserved_quantity' => 2]);
 
         Event::assertNotDispatched(StockLevelChanged::class);
+    }
+
+    /**
+     * Regression: LocationService::reserveInTransit/markIncoming mutate
+     * in_transit_quantity via a query-builder increment(), which never fires
+     * ProductStock's Eloquent 'updated' event at all — so the model-level
+     * hook alone could never broadcast an in-transit change. publishStock()
+     * (called by TransferService right after every such mutation) now
+     * dispatches StockLevelChanged explicitly instead of relying on it.
+     */
+    public function test_dispatching_a_transfer_broadcasts_stock_level_changed_for_both_locations(): void
+    {
+        Event::fake([StockLevelChanged::class]);
+
+        $tenantId = 'tenant-events-transfer-intransit';
+        $this->makeTenant($tenantId);
+        $warehouse = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse', 'type' => 'warehouse']);
+        $shop = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Shop', 'type' => 'shop']);
+        $product = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Widget', 'price' => 10, 'track_stock' => true]);
+
+        app(SyncProcessor::class)->process('stock_movements', (string) Str::uuid(), 'upsert', [
+            'business_id' => $tenantId, 'location_id' => $warehouse->id, 'product_id' => $product->id,
+            'type' => 'opening_stock', 'quantity_change' => 20, 'reason' => 'Test',
+        ]);
+
+        $transfer = app(TransferService::class)->request([
+            'business_id' => $tenantId,
+            'from_location_id' => $warehouse->id,
+            'to_location_id' => $shop->id,
+            'requested_by_user_id' => (string) Str::uuid(),
+            'items' => [['product_id' => $product->id, 'product_name' => $product->name, 'qty_requested' => 5]],
+        ]);
+
+        Event::fake([StockLevelChanged::class]);
+        app(TransferService::class)->dispatch($transfer->id, [
+            ['item_id' => $transfer->items->first()->id, 'qty_sent' => 5],
+        ], (string) Str::uuid());
+
+        Event::assertDispatched(StockLevelChanged::class, fn ($e) => $e->locationId === $warehouse->id && $e->productId === $product->id);
+        Event::assertDispatched(StockLevelChanged::class, fn ($e) => $e->locationId === $shop->id && $e->productId === $product->id);
     }
 
     public function test_product_price_change_dispatches_product_price_changed(): void

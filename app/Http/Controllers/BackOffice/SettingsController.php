@@ -5,6 +5,7 @@ namespace App\Http\Controllers\BackOffice;
 use App\Http\Controllers\Controller;
 use App\Models\Business;
 use App\Models\User;
+use App\Services\BackOfficeAuthorizer;
 use App\Services\CatalogueResetService;
 use App\Services\StockResetService;
 use App\Services\SyncProcessor;
@@ -15,6 +16,8 @@ use Inertia\Response;
 
 class SettingsController extends Controller
 {
+    public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
+
     public function edit(): Response
     {
         $this->authorizeOwner();
@@ -34,7 +37,30 @@ class SettingsController extends Controller
                 'at' => $business?->catalogue_reset_at?->toIso8601String(),
                 'by' => $catalogueResetByUser?->name,
             ],
+            'workflows' => [
+                'stock_transfer_requires_approval' => $business?->workflowRequiresApproval('stock_transfer_requires_approval') ?? false,
+            ],
         ]);
+    }
+
+    /**
+     * Opt-in per-business workflow toggles — see Business::workflowRequiresApproval()
+     * and TransferService::dispatch() for the one currently wired up.
+     */
+    public function updateWorkflowSettings(Request $request): RedirectResponse
+    {
+        $this->authorizeOwner();
+
+        $data = $request->validate([
+            'stock_transfer_requires_approval' => ['required', 'boolean'],
+        ]);
+
+        $business = Business::find($this->tenantId());
+        $business?->update([
+            'workflow_settings' => array_merge($business->workflow_settings ?? [], $data),
+        ]);
+
+        return back()->with('success', 'Workflow settings updated.');
     }
 
     /**
@@ -101,9 +127,7 @@ class SettingsController extends Controller
 
     private function authorizeOwner(): void
     {
-        if ((session('backoffice')['role'] ?? null) !== 'business_owner') {
-            abort(403, 'Only the business owner can do this.');
-        }
+        abort_unless($this->authorizer->isBusinessOwner(), 403, 'Only the business owner can do this.');
     }
 
     private function tenantId(): ?string

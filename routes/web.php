@@ -9,12 +9,14 @@ use App\Http\Controllers\BackOffice\LocationsController as BackOfficeLocations;
 use App\Http\Controllers\BackOffice\ProductsController as BackOfficeProducts;
 use App\Http\Controllers\BackOffice\PurchaseOrdersController as BackOfficePurchaseOrders;
 use App\Http\Controllers\BackOffice\ReportsController as BackOfficeReports;
+use App\Http\Controllers\BackOffice\RolesController as BackOfficeRoles;
 use App\Http\Controllers\BackOffice\SessionController as BackOfficeSession;
 use App\Http\Controllers\BackOffice\SettingsController as BackOfficeSettings;
 use App\Http\Controllers\BackOffice\ShiftsController as BackOfficeShifts;
 use App\Http\Controllers\BackOffice\StockTakesController as BackOfficeStockTakes;
 use App\Http\Controllers\BackOffice\StoremanController as BackOfficeStoreman;
 use App\Http\Controllers\BackOffice\SuppliersController as BackOfficeSuppliers;
+use App\Http\Controllers\BackOffice\TillsController as BackOfficeTills;
 use App\Http\Controllers\BackOffice\TransactionsController as BackOfficeTransactions;
 use App\Http\Controllers\BackOffice\TransfersController as BackOfficeTransfers;
 use App\Http\Controllers\BackOffice\UsersController as BackOfficeUsers;
@@ -106,6 +108,7 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::put('products/{product}', [BackOfficeProducts::class, 'update'])->name('products.update');
         Route::patch('products/{product}/toggle-active', [BackOfficeProducts::class, 'toggleActive'])->name('products.toggle-active');
         Route::post('products/{product}/opening-balance', [BackOfficeProducts::class, 'setOpeningBalance'])->name('products.opening-balance');
+        Route::post('products/{product}/location-overrides', [BackOfficeProducts::class, 'setLocationOverrides'])->name('products.location-overrides');
         Route::post('products/receive-stock', [BackOfficeProducts::class, 'receiveStock'])->name('products.receive-stock');
         Route::get('products/receive-stock/template', [BackOfficeProducts::class, 'receiveStockTemplate'])->name('products.receive-stock.template');
         Route::post('products/receive-stock/import', [BackOfficeProducts::class, 'receiveStockImport'])->name('products.receive-stock.import');
@@ -125,11 +128,17 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::post('users', [BackOfficeUsers::class, 'store'])->name('users.store');
         Route::put('users/{user}', [BackOfficeUsers::class, 'update'])->name('users.update');
         Route::put('users/{user}/password', [BackOfficeUsers::class, 'changePassword'])->name('users.change-password');
+        Route::put('users/{user}/locations', [BackOfficeUsers::class, 'updateLocations'])->name('users.update-locations');
+        Route::get('roles', [BackOfficeRoles::class, 'index'])->name('roles.index');
+        Route::post('roles', [BackOfficeRoles::class, 'store'])->name('roles.store');
+        Route::put('roles/{role}', [BackOfficeRoles::class, 'update'])->name('roles.update');
         Route::patch('users/{user}/toggle-active', [BackOfficeUsers::class, 'toggleActive'])->name('users.toggle-active');
         Route::get('locations', [BackOfficeLocations::class, 'index'])->name('locations.index');
         Route::post('locations', [BackOfficeLocations::class, 'store'])->name('locations.store');
         Route::put('locations/{location}', [BackOfficeLocations::class, 'update'])->name('locations.update');
         Route::patch('locations/{location}/toggle-active', [BackOfficeLocations::class, 'toggleActive'])->name('locations.toggle-active');
+        Route::get('tills', [BackOfficeTills::class, 'index'])->name('tills.index');
+        Route::put('tills/{till}/location', [BackOfficeTills::class, 'reassignLocation'])->name('tills.reassign-location');
         Route::get('transfers', [BackOfficeTransfers::class, 'index'])->name('transfers.index');
         Route::post('transfers', [BackOfficeTransfers::class, 'store'])->name('transfers.store');
         Route::post('transfers/{transfer}/approve', [BackOfficeTransfers::class, 'approve'])->name('transfers.approve');
@@ -139,6 +148,7 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::get('settings', [BackOfficeSettings::class, 'edit'])->name('settings.edit');
         Route::post('settings/reset-stock', [BackOfficeSettings::class, 'resetStock'])->name('settings.reset-stock');
         Route::post('settings/reset-catalogue', [BackOfficeSettings::class, 'resetCatalogue'])->name('settings.reset-catalogue');
+        Route::post('settings/workflows', [BackOfficeSettings::class, 'updateWorkflowSettings'])->name('settings.workflows');
 
         Route::get('suppliers', [BackOfficeSuppliers::class, 'index'])->name('suppliers.index');
         Route::post('suppliers', [BackOfficeSuppliers::class, 'store'])->name('suppliers.store');

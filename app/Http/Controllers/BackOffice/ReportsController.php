@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Payment;
 use App\Models\Transaction;
 use App\Models\TransactionItem;
+use App\Services\BackOfficeAuthorizer;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -13,11 +14,12 @@ use Inertia\Response;
 
 class ReportsController extends Controller
 {
-    public function __invoke(Request $request): Response
+    public function __invoke(Request $request, BackOfficeAuthorizer $authorizer): Response
     {
         $session = session('backoffice');
         $currency = $session['currency_code'] ?? 'USD';
         $tenantId = $this->tenantId();
+        $locationIds = $authorizer->currentLocationScope();
 
         $from = $request->date('from', 'Y-m-d') ?? now()->startOfMonth()->toDateString();
         $to = $request->date('to', 'Y-m-d') ?? now()->toDateString();
@@ -29,6 +31,7 @@ class ReportsController extends Controller
         $summary = Transaction::where('business_id', $tenantId)
             ->where('status', 'completed')
             ->whereBetween('created_at', [$fromStart, $toEnd])
+            ->when($locationIds, fn ($q) => $q->whereIn('location_id', $locationIds))
             ->selectRaw('COUNT(*) as total_transactions, COALESCE(SUM(total), 0) as gross_revenue, COALESCE(SUM(discount_total), 0) as total_discounts, COALESCE(SUM(tax_total), 0) as total_tax, COALESCE(SUM(subtotal), 0) as net_sales')
             ->first();
 
@@ -36,6 +39,7 @@ class ReportsController extends Controller
         $dailyBreakdown = Transaction::where('business_id', $tenantId)
             ->where('status', 'completed')
             ->whereBetween('created_at', [$fromStart, $toEnd])
+            ->when($locationIds, fn ($q) => $q->whereIn('location_id', $locationIds))
             ->selectRaw('DATE(created_at) as date, COUNT(*) as transactions, COALESCE(SUM(total), 0) as revenue, COALESCE(SUM(discount_total), 0) as discounts')
             ->groupByRaw('DATE(created_at)')
             ->orderBy('date')
@@ -46,6 +50,7 @@ class ReportsController extends Controller
             ->where('transactions.business_id', $tenantId)
             ->where('transactions.status', 'completed')
             ->whereBetween('transactions.created_at', [$fromStart, $toEnd])
+            ->when($locationIds, fn ($q) => $q->whereIn('transactions.location_id', $locationIds))
             ->selectRaw('payments.method, COUNT(*) as count, COALESCE(SUM(payments.base_equivalent), 0) as total')
             ->groupBy('payments.method')
             ->orderByDesc('total')
@@ -57,6 +62,7 @@ class ReportsController extends Controller
             ->where('transactions.business_id', $tenantId)
             ->where('transactions.status', 'completed')
             ->whereBetween('transactions.created_at', [$fromStart, $toEnd])
+            ->when($locationIds, fn ($q) => $q->whereIn('transactions.location_id', $locationIds))
             ->selectRaw('products.name, products.sku, SUM(transaction_items.quantity) as units_sold, COALESCE(SUM(transaction_items.line_total), 0) as revenue, COALESCE(AVG(transaction_items.unit_price), 0) as avg_price')
             ->groupBy('products.id', 'products.name', 'products.sku')
             ->orderByDesc('revenue')
@@ -68,6 +74,7 @@ class ReportsController extends Controller
             ->where('transactions.status', 'completed')
             ->whereBetween('transactions.created_at', [$fromStart, $toEnd])
             ->whereNotNull('transactions.user_id')
+            ->when($locationIds, fn ($q) => $q->whereIn('transactions.location_id', $locationIds))
             ->join('users', 'transactions.user_id', '=', 'users.id')
             ->selectRaw('users.name, COUNT(transactions.id) as transactions, COALESCE(SUM(transactions.total), 0) as revenue')
             ->groupBy('users.id', 'users.name')

@@ -776,6 +776,101 @@ class BackOfficeProductsTest extends TestCase
         ])->assertSessionHasErrors('location_id');
     }
 
+    public function test_setting_location_overrides_stores_threshold_and_price_without_touching_quantity(): void
+    {
+        $tenantId = 'tenant-office-prod-overrides-1';
+        $this->actingBackOfficeSession($tenantId);
+
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Branch A']);
+
+        $this->post('/office/products', [
+            'name' => 'Overridable Item',
+            'item_type' => 'product',
+            'price' => 10,
+            'low_stock_threshold' => 5,
+            'stock_quantity' => 20,
+            'track_stock' => true,
+            'location_id' => $location->id,
+        ])->assertRedirect();
+        $product = Product::where('name', 'Overridable Item')->firstOrFail();
+
+        $response = $this->post("/office/products/{$product->id}/location-overrides", [
+            'location_id' => $location->id,
+            'low_stock_threshold' => 2,
+            'price_override' => 12.5,
+        ]);
+        $response->assertRedirect();
+
+        $this->assertDatabaseHas('product_stock', [
+            'product_id' => $product->id,
+            'location_id' => $location->id,
+            'low_stock_threshold' => 2,
+            'price_override' => 12.5,
+            'quantity' => 20,
+        ]);
+
+        $syncRecord = SyncRecord::where('table_name', 'product_stock')
+            ->where('device_id', null)
+            ->latest('id')->first();
+        $this->assertNotNull($syncRecord);
+        $this->assertSame(2.0, (float) $syncRecord->payload['low_stock_threshold']);
+        $this->assertSame(12.5, (float) $syncRecord->payload['price_override']);
+    }
+
+    public function test_clearing_a_location_override_falls_back_to_the_product_default(): void
+    {
+        $tenantId = 'tenant-office-prod-overrides-2';
+        $this->actingBackOfficeSession($tenantId);
+
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Branch A']);
+
+        $this->post('/office/products', [
+            'name' => 'Clearable Item',
+            'item_type' => 'product',
+            'price' => 10,
+            'low_stock_threshold' => 5,
+            'stock_quantity' => 20,
+            'track_stock' => true,
+            'location_id' => $location->id,
+        ])->assertRedirect();
+        $product = Product::where('name', 'Clearable Item')->firstOrFail();
+
+        $this->post("/office/products/{$product->id}/location-overrides", [
+            'location_id' => $location->id,
+            'low_stock_threshold' => 2,
+            'price_override' => 12.5,
+        ])->assertRedirect();
+
+        // Submitting without the fields clears them back to null.
+        $this->post("/office/products/{$product->id}/location-overrides", [
+            'location_id' => $location->id,
+        ])->assertRedirect();
+
+        $stock = ProductStock::where('product_id', $product->id)->where('location_id', $location->id)->first();
+        $this->assertNull($stock->low_stock_threshold);
+        $this->assertNull($stock->price_override);
+        $this->assertSame(5.0, $stock->resolvedLowStockThreshold());
+        $this->assertSame(10.0, $stock->resolvedPrice());
+    }
+
+    public function test_location_overrides_rejects_a_location_from_another_tenant(): void
+    {
+        $otherTenantId = 'tenant-office-prod-overrides-other';
+        Tenant::firstOrCreate(['id' => $otherTenantId], ['business_name' => $otherTenantId, 'owner_email' => $otherTenantId.'@example.com', 'pairing_code' => substr(md5($otherTenantId), 0, 6)]);
+        $foreignLocation = Location::create(['id' => (string) Str::uuid(), 'business_id' => $otherTenantId, 'name' => 'Their Branch']);
+
+        $tenantId = 'tenant-office-prod-overrides-3';
+        $this->actingBackOfficeSession($tenantId);
+
+        $productId = (string) Str::uuid();
+        Product::create(['id' => $productId, 'business_id' => $tenantId, 'name' => 'Guarded Item', 'item_type' => 'product', 'price' => 1, 'track_stock' => true]);
+
+        $this->post("/office/products/{$productId}/location-overrides", [
+            'location_id' => $foreignLocation->id,
+            'low_stock_threshold' => 1,
+        ])->assertSessionHasErrors('location_id');
+    }
+
     public function test_receive_stock_adds_quantity_and_recomputes_weighted_average_cost(): void
     {
         $tenantId = 'tenant-office-prod-receive-1';

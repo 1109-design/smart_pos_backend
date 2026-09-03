@@ -5,6 +5,7 @@ namespace App\Http\Controllers\BackOffice;
 use App\Http\Controllers\Controller;
 use App\Models\Payment;
 use App\Models\Transaction;
+use App\Services\BackOfficeAuthorizer;
 use App\Services\QrCodeGenerator;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -13,11 +14,12 @@ use Inertia\Response;
 
 class TransactionsController extends Controller
 {
-    public function __invoke(Request $request): Response
+    public function __invoke(Request $request, BackOfficeAuthorizer $authorizer): Response
     {
         $session = session('backoffice');
         $currency = $session['currency_code'] ?? 'USD';
         $tenantId = $this->tenantId();
+        $locationIds = $authorizer->currentLocationScope();
 
         $from = $request->date('from', 'Y-m-d') ?? now()->subDays(6)->toDateString();
         $to = $request->date('to', 'Y-m-d') ?? now()->toDateString();
@@ -30,6 +32,7 @@ class TransactionsController extends Controller
             ->leftJoin('users', 'transactions.user_id', '=', 'users.id')
             ->where('transactions.business_id', $tenantId)
             ->whereBetween('transactions.created_at', [$fromStart, $toEnd])
+            ->when($locationIds, fn ($q) => $q->whereIn('transactions.location_id', $locationIds))
             ->when($fiscalFilter !== '' && $fiscalFilter !== 'all', function ($query) use ($fiscalFilter) {
                 if ($fiscalFilter === 'none') {
                     $query->whereNull('transactions.fiscal_status');
@@ -78,6 +81,7 @@ class TransactionsController extends Controller
 
         $fiscalSummary = Transaction::where('business_id', $tenantId)
             ->whereBetween('created_at', [$fromStart, $toEnd])
+            ->when($locationIds, fn ($q) => $q->whereIn('location_id', $locationIds))
             ->selectRaw("
                 COUNT(*) as total,
                 SUM(CASE WHEN fiscal_status = 'fiscalised' THEN 1 ELSE 0 END) as fiscalised,

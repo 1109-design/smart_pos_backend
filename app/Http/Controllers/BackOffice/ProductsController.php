@@ -12,8 +12,10 @@ use App\Models\ProductStock;
 use App\Models\StockMovement;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
+use App\Services\BackOfficeAuthorizer;
 use App\Services\LocationService;
 use App\Services\SyncProcessor;
+use App\Support\BackOfficePermission;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
@@ -757,9 +759,13 @@ class ProductsController extends Controller
      * touches history. Owner-only given the blast radius (every till loses
      * every product from its sell screen at once).
      */
-    public function archiveAll(SyncProcessor $processor): RedirectResponse
+    public function archiveAll(SyncProcessor $processor, BackOfficeAuthorizer $authorizer): RedirectResponse
     {
-        abort_unless(session('backoffice.role') === 'business_owner', 403, 'Only the business owner can archive all items.');
+        abort_unless(
+            $authorizer->can($this->tenantId(), session('backoffice.role'), BackOfficePermission::ARCHIVE_ALL_PRODUCTS),
+            403,
+            'Only the business owner can archive all items.'
+        );
 
         $tenantId = $this->tenantId();
         $archived = 0;
@@ -1089,6 +1095,53 @@ class ProductsController extends Controller
         $this->applyLocationBalance($processor, $existing, $data['location_id'], (float) $data['quantity']);
 
         return back()->with('success', 'Opening balance updated. Devices will receive it on their next sync.');
+    }
+
+    /**
+     * Set (or clear) this location's override for low-stock threshold and/or
+     * selling price. Null clears the override and falls back to the
+     * product's business-wide default — see ProductStock::resolvedPrice()/
+     * resolvedLowStockThreshold(). Unlike setOpeningBalance() this writes
+     * product_stock directly rather than posting a stock_movements delta:
+     * these two fields aren't ledger-derived quantities.
+     */
+    public function setLocationOverrides(Request $request, string $product, SyncProcessor $processor): RedirectResponse
+    {
+        $tenantId = $this->tenantId();
+
+        $data = $request->validate([
+            'location_id' => ['required', 'string', Rule::exists('locations', 'id')->where('business_id', $tenantId)],
+            'low_stock_threshold' => ['nullable', 'numeric', 'min:0'],
+            'price_override' => ['nullable', 'numeric', 'min:0'],
+        ]);
+
+        $existing = Product::where('business_id', $tenantId)->findOrFail($product);
+
+        $stock = ProductStock::firstOrNew([
+            'product_id' => $existing->id,
+            'location_id' => $data['location_id'],
+        ]);
+
+        $uuid = $stock->id ?? (string) Str::uuid();
+        $payload = [
+            'business_id' => $tenantId,
+            'product_id' => $existing->id,
+            'location_id' => $data['location_id'],
+            // Preserve every field this endpoint doesn't touch — SyncProcessor's
+            // product_stock case treats a missing key as an explicit reset
+            // (see LocationService::publishStock for the same footgun), so a
+            // partial payload here would silently wipe quantity/reservations.
+            'quantity' => (float) ($stock->quantity ?? 0),
+            'reserved_quantity' => (float) ($stock->reserved_quantity ?? 0),
+            'in_transit_quantity' => (float) ($stock->in_transit_quantity ?? 0),
+            'low_stock_threshold' => $data['low_stock_threshold'] ?? null,
+            'price_override' => $data['price_override'] ?? null,
+        ];
+
+        $processor->process('product_stock', $uuid, 'upsert', $payload);
+        $this->publishSyncRecord($uuid, $payload, table: 'product_stock');
+
+        return back()->with('success', 'Location overrides updated. Devices will receive it on their next sync.');
     }
 
     /**

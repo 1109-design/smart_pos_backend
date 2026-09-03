@@ -7,7 +7,10 @@ use App\Models\Product;
 use App\Models\StockMovement;
 use App\Models\StockTake;
 use App\Models\SyncRecord;
+use App\Services\BackOfficeAuthorizer;
 use App\Services\SyncProcessor;
+use App\Support\BackOfficePermission;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
@@ -16,15 +19,16 @@ use Inertia\Response;
 
 class StockTakesController extends Controller
 {
+    public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
+
     public function index(Request $request): Response
     {
         $this->authorizeManager();
 
-        $tenantId = $this->tenantId();
         $status = $request->string('status')->toString() ?: 'all';
 
-        $stockTakes = StockTake::with(['location:id,name'])
-            ->where('business_id', $tenantId)
+        $stockTakes = $this->scopedStockTakes()
+            ->with('location:id,name')
             ->when($status !== 'all', fn ($q) => $q->where('status', $status))
             ->latest()
             ->paginate(20)
@@ -40,8 +44,8 @@ class StockTakesController extends Controller
     {
         $this->authorizeManager();
 
-        $take = StockTake::with(['location:id,name', 'items'])
-            ->where('business_id', $this->tenantId())
+        $take = $this->scopedStockTakes()
+            ->with(['location:id,name', 'items'])
             ->findOrFail($stockTake);
 
         return Inertia::render('BackOffice/StockTakeShow', [
@@ -69,7 +73,7 @@ class StockTakesController extends Controller
             'review_comment' => ['nullable', 'string', 'max:1000'],
         ]);
 
-        $take = StockTake::with('items')->where('business_id', $this->tenantId())->findOrFail($stockTake);
+        $take = $this->scopedStockTakes()->with('items')->findOrFail($stockTake);
 
         $userId = $this->userId();
 
@@ -137,7 +141,7 @@ class StockTakesController extends Controller
             'review_comment' => ['nullable', 'string', 'max:1000'],
         ]);
 
-        $take = StockTake::where('business_id', $this->tenantId())->findOrFail($stockTake);
+        $take = $this->scopedStockTakes()->findOrFail($stockTake);
 
         try {
             if ($take->status !== 'pending_approval') {
@@ -163,7 +167,7 @@ class StockTakesController extends Controller
     {
         $this->authorizeManager();
 
-        $take = StockTake::where('business_id', $this->tenantId())->findOrFail($stockTake);
+        $take = $this->scopedStockTakes()->findOrFail($stockTake);
 
         try {
             if ($take->status !== 'pending_approval') {
@@ -242,10 +246,25 @@ class StockTakesController extends Controller
         ]);
     }
 
+    /**
+     * Base query every action uses: this tenant's stock takes, further
+     * narrowed to the acting user's location scope when they're restricted
+     * to specific branches — a stock take belongs to one location, and this
+     * had no scoping at all before, unlike the comparable PurchaseOrders
+     * pattern.
+     */
+    private function scopedStockTakes(): Builder
+    {
+        $scope = $this->authorizer->currentLocationScope();
+
+        return StockTake::where('business_id', $this->tenantId())
+            ->when($scope !== null, fn ($q) => $q->whereIn('location_id', $scope));
+    }
+
     private function authorizeManager(): void
     {
-        abort_if(
-            ! in_array(session('backoffice.role'), ['business_owner', 'manager']),
+        abort_unless(
+            $this->authorizer->can($this->tenantId(), session('backoffice.role'), BackOfficePermission::MANAGE_STOCKTAKES),
             403,
             'Access denied.'
         );

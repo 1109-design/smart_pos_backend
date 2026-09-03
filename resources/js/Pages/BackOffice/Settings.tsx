@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Head, useForm, usePage } from '@inertiajs/react';
+import { Head, router, useForm, usePage } from '@inertiajs/react';
 import BackOfficeLayout from '@/Layouts/BackOfficeLayout';
 import Modal from '@/Components/Modal';
 
@@ -9,20 +9,29 @@ interface StockReset {
     by: string | null;
 }
 
+interface Workflows {
+    stock_transfer_requires_approval: boolean;
+}
+
 interface Props {
     stock_reset: StockReset;
     catalogue_reset: StockReset;
+    workflows: Workflows;
 }
 
 const CONFIRM_WORD = 'RESET';
 const CATALOGUE_CONFIRM_PHRASE = 'DELETE EVERYTHING';
 
-export default function BackOfficeSettings({ stock_reset, catalogue_reset }: Props) {
+export default function BackOfficeSettings({ stock_reset, catalogue_reset, workflows }: Props) {
     const [showConfirm, setShowConfirm] = useState(false);
     const [showCatalogueConfirm, setShowCatalogueConfirm] = useState(false);
     const { flash } = usePage().props as unknown as { flash: { success: string | null } };
     const form = useForm({ confirm: '' });
     const catalogueForm = useForm({ confirm: '' });
+
+    const toggleWorkflow = (key: keyof Workflows, value: boolean) => {
+        router.post(`/office/settings/workflows`, { [key]: value }, { preserveScroll: true });
+    };
 
     const openConfirm = () => {
         form.reset();
@@ -66,6 +75,27 @@ export default function BackOfficeSettings({ stock_reset, catalogue_reset }: Pro
                     {flash.success}
                 </div>
             )}
+
+            <div className="mb-3">
+                <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wider">Workflows</h2>
+            </div>
+            <div className="mb-8 bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+                <label className="flex items-start justify-between gap-4 cursor-pointer">
+                    <div>
+                        <p className="text-sm font-medium text-slate-800">Require approval before dispatching a stock transfer</p>
+                        <p className="text-xs text-slate-500 mt-1">
+                            When off (default), a requested transfer can be dispatched straight away. When on, it must be
+                            approved first.
+                        </p>
+                    </div>
+                    <input
+                        type="checkbox"
+                        checked={workflows.stock_transfer_requires_approval}
+                        onChange={(e) => toggleWorkflow('stock_transfer_requires_approval', e.target.checked)}
+                        className="mt-1 w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 flex-shrink-0"
+                    />
+                </label>
+            </div>
 
             <div className="mb-3">
                 <h2 className="text-sm font-semibold text-red-700 uppercase tracking-wider">Danger zone</h2>

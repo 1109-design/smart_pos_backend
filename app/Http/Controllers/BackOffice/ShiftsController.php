@@ -5,6 +5,7 @@ namespace App\Http\Controllers\BackOffice;
 use App\Http\Controllers\Controller;
 use App\Models\Location;
 use App\Models\Shift;
+use App\Services\BackOfficeAuthorizer;
 use App\Services\LocationService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -13,11 +14,12 @@ use Inertia\Response;
 
 class ShiftsController extends Controller
 {
-    public function __invoke(Request $request, LocationService $locationService): Response
+    public function __invoke(Request $request, LocationService $locationService, BackOfficeAuthorizer $authorizer): Response
     {
         $session = session('backoffice');
         $currency = $session['currency_code'] ?? 'USD';
         $tenantId = $this->tenantId();
+        $scope = $authorizer->currentLocationScope();
 
         $locationService->ensureDefaultLocation($tenantId);
 
@@ -25,6 +27,23 @@ class ShiftsController extends Controller
         $to = $request->date('to', 'Y-m-d') ?? now()->toDateString();
         $status = $request->string('status')->toString() ?: 'all';
         $locationId = $request->string('location')->toString() ?: 'all';
+
+        // A scoped user's "all" means "all locations I can see," not every
+        // branch — and a location outside their scope (guessed in the URL)
+        // clamps back to 'all' (i.e. their own scope) rather than leaking
+        // data or echoing back a filter value the location dropdown doesn't
+        // even offer them.
+        if ($scope !== null && $locationId !== 'all' && ! in_array($locationId, $scope, true)) {
+            $locationId = 'all';
+        }
+
+        // effectiveLocationIds is null only when there's truly no filter to
+        // apply (unscoped user asking for "all").
+        $effectiveLocationIds = match (true) {
+            $locationId !== 'all' => [$locationId],
+            $scope !== null => $scope,
+            default => null,
+        };
 
         $fromStart = Carbon::parse($from)->startOfDay();
         $toEnd = Carbon::parse($to)->endOfDay();
@@ -38,7 +57,7 @@ class ShiftsController extends Controller
             ->where('shifts.status', 'open')
             ->leftJoin('users', 'shifts.cashier_id', '=', 'users.id')
             ->leftJoin('locations', 'shifts.location_id', '=', 'locations.id')
-            ->when($locationId !== 'all', fn ($query) => $query->where('shifts.location_id', $locationId))
+            ->when($effectiveLocationIds !== null, fn ($query) => $query->whereIn('shifts.location_id', $effectiveLocationIds))
             ->orderBy('shifts.opened_at')
             ->get([
                 'shifts.id', 'shifts.opened_at', 'shifts.opening_float',
@@ -53,7 +72,7 @@ class ShiftsController extends Controller
             ->leftJoin('locations', 'shifts.location_id', '=', 'locations.id')
             ->whereBetween('shifts.opened_at', [$fromStart, $toEnd])
             ->when($status !== 'all', fn ($query) => $query->where('shifts.status', $status))
-            ->when($locationId !== 'all', fn ($query) => $query->where('shifts.location_id', $locationId))
+            ->when($effectiveLocationIds !== null, fn ($query) => $query->whereIn('shifts.location_id', $effectiveLocationIds))
             ->orderByDesc('shifts.opened_at')
             ->select([
                 'shifts.id', 'shifts.opened_at', 'shifts.closed_at', 'shifts.status',
@@ -69,7 +88,7 @@ class ShiftsController extends Controller
 
         $summary = Shift::where('business_id', $tenantId)
             ->whereBetween('opened_at', [$fromStart, $toEnd])
-            ->when($locationId !== 'all', fn ($query) => $query->where('location_id', $locationId))
+            ->when($effectiveLocationIds !== null, fn ($query) => $query->whereIn('location_id', $effectiveLocationIds))
             ->selectRaw("
                 COUNT(*) as total_shifts,
                 SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as open_count,
@@ -86,6 +105,7 @@ class ShiftsController extends Controller
         $byLocation = Shift::where('shifts.business_id', $tenantId)
             ->leftJoin('locations', 'shifts.location_id', '=', 'locations.id')
             ->whereBetween('shifts.opened_at', [$fromStart, $toEnd])
+            ->when($scope !== null, fn ($query) => $query->whereIn('shifts.location_id', $scope))
             ->selectRaw("
                 shifts.location_id,
                 COALESCE(locations.name, 'Unassigned') as location_name,
@@ -103,7 +123,11 @@ class ShiftsController extends Controller
             'shifts' => $shifts,
             'summary' => $summary,
             'by_location' => $byLocation,
-            'locations' => Location::where('business_id', $tenantId)->where('is_active', true)->orderBy('name')->get(['id', 'name']),
+            'locations' => Location::where('business_id', $tenantId)
+                ->where('is_active', true)
+                ->when($scope !== null, fn ($q) => $q->whereIn('id', $scope))
+                ->orderBy('name')
+                ->get(['id', 'name']),
             'currency' => $currency,
             'filters' => ['from' => $from, 'to' => $to, 'status' => $status, 'location' => $locationId],
         ]);

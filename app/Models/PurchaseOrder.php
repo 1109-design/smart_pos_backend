@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class PurchaseOrder extends Model
 {
@@ -19,9 +20,9 @@ class PurchaseOrder extends Model
     protected function casts(): array
     {
         return [
-            'total_ordered'         => 'decimal:4',
-            'total_received'        => 'decimal:4',
-            'expected_date'         => 'datetime',
+            'total_ordered' => 'decimal:4',
+            'total_received' => 'decimal:4',
+            'expected_date' => 'datetime',
             'additional_costs_json' => 'array',
         ];
     }
@@ -29,5 +30,10 @@ class PurchaseOrder extends Model
     public function receivingLocation(): BelongsTo
     {
         return $this->belongsTo(Location::class, 'receiving_location_id');
+    }
+
+    public function items(): HasMany
+    {
+        return $this->hasMany(PurchaseOrderItem::class);
     }
 }

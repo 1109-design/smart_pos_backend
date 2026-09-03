@@ -139,4 +139,90 @@ class BackOfficeUserCreationTest extends TestCase
 
         $response->assertForbidden();
     }
+
+    /**
+     * Regression: assignableRoles() used to always include 'business_owner'
+     * regardless of the acting session's own role. Since manager has
+     * MANAGE_USERS by default, this let a manager mint a new full-access
+     * owner (or promote an existing user to one) — directly contradicting
+     * the "owner cannot be restricted/assigned by others" rule the rest of
+     * the roles system enforces everywhere else.
+     */
+    public function test_manager_cannot_create_a_user_with_the_business_owner_role(): void
+    {
+        $tenantId = 'tenant-bo-create-5';
+        Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);
+        $manager = User::factory()->create(['business_id' => $tenantId, 'email' => $tenantId.'-manager@example.com']);
+        $manager->assignRole('manager');
+
+        $session = [
+            'backoffice' => [
+                'tenant_id' => $tenantId,
+                'user_id' => $manager->id,
+                'user_name' => $manager->name,
+                'user_email' => $manager->email,
+                'role' => 'manager',
+                'business_name' => $tenantId,
+                'currency_code' => 'USD',
+            ],
+        ];
+
+        $response = $this->withSession($session)->post('/office/users', [
+            'name' => 'Self-Promoted',
+            'email' => 'self-promoted@example.com',
+            'role' => 'business_owner',
+            'pin' => '9999',
+        ]);
+
+        $response->assertSessionHasErrors('role');
+        $this->assertDatabaseMissing('users', ['email' => 'self-promoted@example.com']);
+    }
+
+    public function test_manager_cannot_promote_an_existing_user_to_business_owner(): void
+    {
+        $tenantId = 'tenant-bo-create-6';
+        Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);
+        $manager = User::factory()->create(['business_id' => $tenantId, 'email' => $tenantId.'-manager@example.com']);
+        $manager->assignRole('manager');
+        $target = User::factory()->create(['business_id' => $tenantId, 'email' => $tenantId.'-target@example.com']);
+        $target->assignRole('cashier');
+
+        $session = [
+            'backoffice' => [
+                'tenant_id' => $tenantId,
+                'user_id' => $manager->id,
+                'user_name' => $manager->name,
+                'user_email' => $manager->email,
+                'role' => 'manager',
+                'business_name' => $tenantId,
+                'currency_code' => 'USD',
+            ],
+        ];
+
+        $response = $this->withSession($session)->put("/office/users/{$target->id}", [
+            'name' => $target->name,
+            'email' => $target->email,
+            'role' => 'business_owner',
+            'is_active' => true,
+        ]);
+
+        $response->assertSessionHasErrors('role');
+        $this->assertSame('cashier', $target->fresh()->roles->first()?->name);
+    }
+
+    public function test_owner_can_still_create_a_user_with_the_business_owner_role(): void
+    {
+        $ctx = $this->ownerSession('tenant-bo-create-7');
+
+        $response = $this->withSession($ctx['session'])->post('/office/users', [
+            'name' => 'Co-Owner',
+            'email' => 'co-owner@example.com',
+            'role' => 'business_owner',
+            'pin' => '5555',
+        ]);
+
+        $response->assertRedirect(route('office.users.index'));
+        $created = User::where('email', 'co-owner@example.com')->first();
+        $this->assertSame('business_owner', $created->roles->first()?->name);
+    }
 }

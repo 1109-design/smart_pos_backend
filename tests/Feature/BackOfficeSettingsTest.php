@@ -426,4 +426,42 @@ class BackOfficeSettingsTest extends TestCase
         $this->assertDatabaseHas('suppliers', ['id' => $supplier->id]);
         $this->assertDatabaseHas('customers', ['id' => $customer->id]);
     }
+
+    public function test_owner_can_turn_on_the_stock_transfer_approval_workflow(): void
+    {
+        $tenantId = 'tenant-office-workflow-1';
+        $this->actingBackOfficeSession($tenantId);
+        Business::create(['id' => $tenantId, 'name' => $tenantId]);
+
+        $this->post('/office/settings/workflows', ['stock_transfer_requires_approval' => true])
+            ->assertRedirect();
+
+        $this->assertTrue(
+            Business::find($tenantId)->workflowRequiresApproval('stock_transfer_requires_approval')
+        );
+    }
+
+    public function test_turning_a_workflow_off_again_does_not_disturb_other_workflow_keys(): void
+    {
+        $tenantId = 'tenant-office-workflow-2';
+        $this->actingBackOfficeSession($tenantId);
+        Business::create(['id' => $tenantId, 'name' => $tenantId, 'workflow_settings' => ['some_other_key' => true]]);
+
+        $this->post('/office/settings/workflows', ['stock_transfer_requires_approval' => true])->assertRedirect();
+        $this->post('/office/settings/workflows', ['stock_transfer_requires_approval' => false])->assertRedirect();
+
+        $business = Business::find($tenantId);
+        $this->assertFalse($business->workflowRequiresApproval('stock_transfer_requires_approval'));
+        $this->assertTrue($business->workflow_settings['some_other_key']);
+    }
+
+    public function test_workflow_settings_are_owner_only(): void
+    {
+        $tenantId = 'tenant-office-workflow-3';
+        $this->actingBackOfficeSession($tenantId, 'manager');
+        Business::create(['id' => $tenantId, 'name' => $tenantId]);
+
+        $this->post('/office/settings/workflows', ['stock_transfer_requires_approval' => true])
+            ->assertForbidden();
+    }
 }

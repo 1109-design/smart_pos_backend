@@ -26,8 +26,10 @@ use App\Models\Payment;
 use App\Models\PoAuditLog;
 use App\Models\Product;
 use App\Models\ProductContainerLink;
+use App\Models\ProductPriceTier;
 use App\Models\ProductStock;
 use App\Models\ProductTaxRate;
+use App\Models\ProductUnit;
 use App\Models\ProductVariant;
 use App\Models\ProductVariantStock;
 use App\Models\PurchaseOrder;
@@ -55,6 +57,7 @@ use App\Models\User;
 use App\Services\Zimra\ZimraSalesService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class SyncProcessor
@@ -125,6 +128,8 @@ class SyncProcessor
         'invoice_items' => [InvoiceItem::class, 'invoice_id'],
         'invoice_payments' => [InvoicePayment::class, 'invoice_id'],
         'credit_note_items' => [CreditNoteItem::class, 'credit_note_id'],
+        'product_units' => [ProductUnit::class, 'product_id'],
+        'product_price_tiers' => [ProductPriceTier::class, 'product_id'],
     ];
 
     // Deliberately unguarded, and why:
@@ -133,7 +138,16 @@ class SyncProcessor
     //    business_id can only create/update the caller's OWN row — it can never touch another
     //    tenant's row of the same role name. Safe by construction.
 
-    public function process(string $table, string $uuid, string $operation, array $payload): void
+    /**
+     * @param  bool  $trusted  False only for payloads that originated from a
+     *                         device sync push (or a conflict-resolution replay
+     *                         of one) — see the 'tills' case, which refuses to
+     *                         let an untrusted payload move an existing till to
+     *                         a different location. Every other call site here
+     *                         is server-authored (BackOffice controllers, artisan
+     *                         commands), so the default is true.
+     */
+    public function process(string $table, string $uuid, string $operation, array $payload, bool $trusted = true): void
     {
         $this->assertOwnership($table, $uuid, $payload);
 
@@ -143,7 +157,7 @@ class SyncProcessor
             return;
         }
 
-        $this->handleUpsert($table, $uuid, $payload);
+        $this->handleUpsert($table, $uuid, $payload, $trusted);
     }
 
     /**
@@ -222,7 +236,7 @@ class SyncProcessor
     protected function resolveParentOwner(string $table, string $parentId): ?string
     {
         return match ($table) {
-            'product_stock', 'product_variants' => Product::where('id', $parentId)->value('business_id'),
+            'product_stock', 'product_variants', 'product_units', 'product_price_tiers' => Product::where('id', $parentId)->value('business_id'),
             'product_variant_stock' => Product::query()
                 ->join('product_variants', 'product_variants.product_id', '=', 'products.id')
                 ->where('product_variants.id', $parentId)
@@ -266,7 +280,7 @@ class SyncProcessor
         }
     }
 
-    protected function handleUpsert(string $table, string $uuid, array $payload): void
+    protected function handleUpsert(string $table, string $uuid, array $payload, bool $trusted = true): void
     {
         switch ($table) {
             case 'locations':
@@ -294,6 +308,9 @@ class SyncProcessor
                         'id' => $uuid,
                         'quantity' => $payload['quantity'] ?? 0,
                         'reserved_quantity' => $payload['reserved_quantity'] ?? 0,
+                        'in_transit_quantity' => $payload['in_transit_quantity'] ?? 0,
+                        'low_stock_threshold' => $payload['low_stock_threshold'] ?? null,
+                        'price_override' => $payload['price_override'] ?? null,
                     ]
                 );
                 break;
@@ -513,6 +530,29 @@ class SyncProcessor
                         'beverage_product_id' => $payload['beverage_product_id'] ?? null,
                         'container_product_id' => $payload['container_product_id'] ?? null,
                         'quantity_per_unit' => $payload['quantity_per_unit'] ?? 1,
+                    ]
+                );
+                break;
+
+            case 'product_units':
+                ProductUnit::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'product_id' => $payload['product_id'] ?? null,
+                        'unit_name' => $payload['unit_name'] ?? '',
+                        'conversion_factor' => $payload['conversion_factor'] ?? 1,
+                        'is_base_unit' => $payload['is_base_unit'] ?? false,
+                    ]
+                );
+                break;
+
+            case 'product_price_tiers':
+                ProductPriceTier::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'product_id' => $payload['product_id'] ?? null,
+                        'min_qty' => $payload['min_qty'] ?? 0,
+                        'unit_price' => $payload['unit_price'] ?? 0,
                     ]
                 );
                 break;
@@ -854,11 +894,29 @@ class SyncProcessor
                 break;
 
             case 'tills':
+                $existingTill = Till::find($uuid);
+                $tillLocationId = $payload['location_id'] ?? null;
+
+                // A till's location is deliberately moved only through the
+                // authorized BackOffice reassignment endpoint (which calls
+                // this method with $trusted: true) — never by a device simply
+                // pushing a different location_id for a till it already knows
+                // about. First-time creation from a device is unaffected.
+                if (! $trusted && $existingTill && $existingTill->location_id !== null
+                    && $tillLocationId !== $existingTill->location_id) {
+                    Log::warning('Ignored untrusted attempt to move a till to a different location via sync push', [
+                        'till_id' => $uuid,
+                        'current_location_id' => $existingTill->location_id,
+                        'attempted_location_id' => $tillLocationId,
+                    ]);
+                    $tillLocationId = $existingTill->location_id;
+                }
+
                 Till::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'business_id' => $payload['business_id'] ?? null,
-                        'location_id' => $payload['location_id'] ?? null,
+                        'location_id' => $tillLocationId,
                         'device_id' => $payload['device_id'] ?? null,
                         'name' => $payload['name'] ?? '',
                         'register_number' => $payload['register_number'] ?? 1,
@@ -1309,11 +1367,19 @@ class SyncProcessor
 
         $product = Product::find($productId);
         if ($product) {
+            // Full field snapshot, not just what this recompute touched — a
+            // device applying this record does a full replace (same as this
+            // class's own updateOrCreate calls elsewhere), so an incomplete
+            // payload would silently wipe every other device's copy of this
+            // location's threshold/price override and in-transit quantity.
             $this->emitBroadcastSyncRecord('product_stock', $stock->id, $product->business_id, [
                 'product_id' => $stock->product_id,
                 'location_id' => $stock->location_id,
                 'quantity' => (float) $stock->quantity,
                 'reserved_quantity' => (float) $stock->reserved_quantity,
+                'in_transit_quantity' => (float) $stock->in_transit_quantity,
+                'low_stock_threshold' => $stock->low_stock_threshold !== null ? (float) $stock->low_stock_threshold : null,
+                'price_override' => $stock->price_override !== null ? (float) $stock->price_override : null,
                 'updated_at' => $stock->updated_at?->toIso8601String(),
             ]);
         }
@@ -1445,6 +1511,8 @@ class SyncProcessor
             'invoice_items' => InvoiceItem::class,
             'credit_notes' => CreditNote::class,
             'recurring_invoice_schedules' => RecurringInvoiceSchedule::class,
+            'product_units' => ProductUnit::class,
+            'product_price_tiers' => ProductPriceTier::class,
         ];
 
         $softDeleteIsActive = ['locations', 'categories', 'tax_rates', 'products', 'product_variants', 'suppliers', 'coupons', 'tills'];

@@ -112,7 +112,8 @@ class SyncController extends Controller
                             $record['table'],
                             $record['uuid'],
                             $record['operation'],
-                            $enrichedPayload
+                            $enrichedPayload,
+                            trusted: false
                         );
 
                         SyncRecord::create([
@@ -313,7 +314,7 @@ class SyncController extends Controller
                     $enrichedPayload['business_id'] = $device->tenant_id;
                 }
 
-                $processor->process($conflict->table_name, $conflict->record_uuid, 'upsert', $enrichedPayload);
+                $processor->process($conflict->table_name, $conflict->record_uuid, 'upsert', $enrichedPayload, trusted: false);
 
                 SyncRecord::create([
                     'business_id' => $device?->tenant_id,
@@ -338,7 +339,7 @@ class SyncController extends Controller
                     $enrichedPayload['business_id'] = $device->tenant_id;
                 }
 
-                $processor->process($conflict->table_name, $conflict->record_uuid, 'upsert', $enrichedPayload);
+                $processor->process($conflict->table_name, $conflict->record_uuid, 'upsert', $enrichedPayload, trusted: false);
 
                 SyncRecord::create([
                     'business_id' => $device?->tenant_id,

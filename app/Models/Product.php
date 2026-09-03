@@ -5,6 +5,7 @@ namespace App\Models;
 use App\Events\ProductPriceChanged;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Product extends Model
 {
@@ -42,5 +43,17 @@ class Product extends Model
             'is_active' => 'boolean',
             'expiry_date' => 'datetime',
         ];
+    }
+
+    /** Alternate selling units (e.g. "box" = 100 base units) — see PricingService. */
+    public function units(): HasMany
+    {
+        return $this->hasMany(ProductUnit::class);
+    }
+
+    /** Quantity-break prices, always keyed in the product's base unit — see PricingService. */
+    public function priceTiers(): HasMany
+    {
+        return $this->hasMany(ProductPriceTier::class);
     }
 }

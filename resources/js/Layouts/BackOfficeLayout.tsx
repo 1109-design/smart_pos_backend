@@ -85,8 +85,10 @@ const ALL_NAV = [
     { label: 'Stocktakes',      href: '/office/stocktakes',      Icon: IconBox,            roles: ['business_owner', 'manager'] },
     { label: 'Customers',       href: '/office/customers',       Icon: IconUsers,          roles: ['business_owner', 'manager'] },
     { label: 'Locations',       href: '/office/locations',       Icon: IconMapPin,         roles: ['business_owner', 'manager'] },
+    { label: 'Tills',           href: '/office/tills',           Icon: IconMapPin,         roles: ['business_owner', 'manager'] },
     { label: 'Reports',         href: '/office/reports',         Icon: IconDocumentReport, roles: null },
     { label: 'Users',           href: '/office/users',           Icon: IconUsers,          roles: ['business_owner', 'manager'] },
+    { label: 'Roles',           href: '/office/roles',           Icon: IconUsers,          roles: ['business_owner'] },
     { label: 'Settings',        href: '/office/settings',        Icon: IconCog,            roles: ['business_owner'] },
 ];
 

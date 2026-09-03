@@ -7,8 +7,10 @@ use App\Models\Location;
 use App\Models\Product;
 use App\Models\ProductStock;
 use App\Models\StockTransfer;
+use App\Services\BackOfficeAuthorizer;
 use App\Services\LocationService;
 use App\Services\TransferService;
+use App\Support\BackOfficePermission;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
@@ -24,6 +26,8 @@ use Inertia\Response;
  */
 class StoremanController extends Controller
 {
+    public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
+
     /**
      * A location counts as "surplus" for a product once its stock clears
      * this multiple of the product's own low-stock threshold — comfortably
@@ -42,7 +46,11 @@ class StoremanController extends Controller
         $tenantId = $this->tenantId();
         $locationService->ensureDefaultLocation($tenantId);
 
-        $locations = Location::where('business_id', $tenantId)->where('is_active', true)->get(['id', 'name', 'type', 'parent_id']);
+        $scope = $this->authorizer->currentLocationScope();
+        $locations = Location::where('business_id', $tenantId)
+            ->where('is_active', true)
+            ->when($scope !== null, fn ($q) => $q->whereIn('id', $scope))
+            ->get(['id', 'name', 'type', 'parent_id']);
 
         [$stockHealth, $suggestions] = $this->stockHealthAndSuggestions($tenantId, $locations);
 
@@ -72,8 +80,10 @@ class StoremanController extends Controller
             'qty' => ['required', 'numeric', 'min:0.0001'],
         ]);
 
+        $scope = $this->authorizer->currentLocationScope();
         $locationCount = Location::where('business_id', $tenantId)
             ->whereIn('id', [$data['from_location_id'], $data['to_location_id']])
+            ->when($scope !== null, fn ($q) => $q->whereIn('id', $scope))
             ->count();
         abort_if($locationCount !== 2, 404);
 
@@ -121,16 +131,33 @@ class StoremanController extends Controller
                 'product_stock.location_id',
                 'product_stock.product_id',
                 'product_stock.quantity',
+                'product_stock.reserved_quantity',
+                'product_stock.in_transit_quantity',
                 'products.name as product_name',
-                'products.low_stock_threshold',
+                // This location's own threshold if it's been overridden,
+                // else the product's business-wide default — see
+                // ProductStock::resolvedLowStockThreshold() for the same
+                // fallback done in PHP where a full model is already loaded.
+                'product_stock.low_stock_threshold as location_threshold',
+                'products.low_stock_threshold as product_threshold',
             ]);
+
+        // What's actually sellable/movable right now — excludes stock
+        // already held for an order or already committed to another
+        // in-transit transfer, matching ProductStock::
+        // getAvailableQuantityAttribute(). Without this, a warehouse that
+        // looks like it has surplus on the raw quantity column could
+        // already be fully spoken for by other holds/transfers, and every
+        // suggestion built from it would fail at actual dispatch time.
+        $available = fn ($r) => max(0.0, (float) $r->quantity - (float) $r->reserved_quantity - (float) $r->in_transit_quantity);
 
         $byLocation = $rows->groupBy('location_id');
 
-        $health = $locations->map(function (Location $location) use ($byLocation) {
+        $health = $locations->map(function (Location $location) use ($byLocation, $available) {
             $rows = $byLocation->get($location->id, collect());
-            $low = $rows->filter(fn ($r) => (float) $r->quantity <= (float) $r->low_stock_threshold)->count();
-            $surplus = $rows->filter(fn ($r) => (float) $r->quantity > (float) $r->low_stock_threshold * self::SURPLUS_MULTIPLIER)->count();
+            $threshold = fn ($r) => (float) ($r->location_threshold ?? $r->product_threshold);
+            $low = $rows->filter(fn ($r) => $available($r) <= $threshold($r))->count();
+            $surplus = $rows->filter(fn ($r) => $available($r) > $threshold($r) * self::SURPLUS_MULTIPLIER)->count();
 
             return [
                 'id' => $location->id,
@@ -156,8 +183,8 @@ class StoremanController extends Controller
             $warehouseRows = $byLocation->get($warehouse->id, collect())->keyBy('product_id');
 
             foreach ($shopRows as $productId => $shopRow) {
-                $threshold = (float) $shopRow->low_stock_threshold;
-                $shopQty = (float) $shopRow->quantity;
+                $threshold = (float) ($shopRow->location_threshold ?? $shopRow->product_threshold);
+                $shopQty = $available($shopRow);
                 if ($shopQty > $threshold) {
                     continue;
                 }
@@ -167,7 +194,8 @@ class StoremanController extends Controller
                     continue;
                 }
 
-                $warehouseSurplus = (float) $warehouseRow->quantity - $threshold;
+                $warehouseAvailable = $available($warehouseRow);
+                $warehouseSurplus = $warehouseAvailable - $threshold;
                 if ($warehouseSurplus <= 0) {
                     continue;
                 }
@@ -183,7 +211,7 @@ class StoremanController extends Controller
                     'to_location_id' => $shop->id,
                     'to_location_name' => $shop->name,
                     'shop_quantity' => $shopQty,
-                    'warehouse_quantity' => (float) $warehouseRow->quantity,
+                    'warehouse_quantity' => $warehouseAvailable,
                     'suggested_qty' => round($suggestedQty, 2),
                 ];
             }
@@ -232,8 +260,8 @@ class StoremanController extends Controller
 
     private function authorizeManager(): void
     {
-        abort_if(
-            ! in_array(session('backoffice.role'), ['business_owner', 'manager']),
+        abort_unless(
+            $this->authorizer->can($this->tenantId(), session('backoffice.role'), BackOfficePermission::MANAGE_STOREMAN),
             403,
             'Access denied.'
         );

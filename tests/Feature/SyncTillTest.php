@@ -223,4 +223,55 @@ class SyncTillTest extends TestCase
         $response->assertJsonCount(1, 'errors');
         $this->assertDatabaseHas('tills', ['id' => $victimTill->id, 'name' => 'Victim Till']);
     }
+
+    /**
+     * Regression for the "till reassignment is only safe through the
+     * authorized BackOffice endpoint" fix: a device pushing a payload for a
+     * till it's fully entitled to sync (same business) can still update its
+     * name/active flag, but cannot silently move it to a different
+     * location_id — that's reserved for TillsController::reassignLocation.
+     */
+    public function test_device_cannot_move_an_existing_till_to_a_different_location_via_sync_push(): void
+    {
+        $tenantId = 'tenant-sync-till-no-relocate';
+        $token = $this->actingDeviceToken($tenantId);
+        $originalLocationId = (string) Str::uuid();
+        $till = Till::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'location_id' => $originalLocationId,
+            'name' => 'Front Counter',
+            'register_number' => 1,
+            'is_active' => true,
+        ]);
+
+        $attemptedLocationId = (string) Str::uuid();
+
+        $response = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'tills',
+                    'uuid' => $till->id,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'location_id' => $attemptedLocationId,
+                        'name' => 'Front Counter Renamed',
+                        'register_number' => 1,
+                        'is_active' => true,
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ]);
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'accepted');
+
+        // Name change went through — only location_id was refused.
+        $this->assertDatabaseHas('tills', [
+            'id' => $till->id,
+            'name' => 'Front Counter Renamed',
+            'location_id' => $originalLocationId,
+        ]);
+    }
 }

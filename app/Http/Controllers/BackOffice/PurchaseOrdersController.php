@@ -7,7 +7,10 @@ use App\Models\PoAuditLog;
 use App\Models\PurchaseOrder;
 use App\Models\Supplier;
 use App\Models\SyncRecord;
+use App\Services\BackOfficeAuthorizer;
 use App\Services\SyncProcessor;
+use App\Support\BackOfficePermission;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -15,6 +18,8 @@ use Inertia\Response;
 
 class PurchaseOrdersController extends Controller
 {
+    public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
+
     /**
      * Purchase orders are created and received at the till, where goods are
      * physically handled — this page is visibility from the web plus a
@@ -29,8 +34,8 @@ class PurchaseOrdersController extends Controller
         $status = $request->string('status')->toString() ?: 'all';
         $supplierId = $request->string('supplier')->toString() ?: 'all';
 
-        $orders = PurchaseOrder::with(['receivingLocation:id,name'])
-            ->where('business_id', $tenantId)
+        $orders = $this->scopedOrders()
+            ->with('receivingLocation:id,name')
             ->when($status !== 'all', fn ($q) => $q->where('status', $status))
             ->when($supplierId !== 'all', fn ($q) => $q->where('supplier_id', $supplierId))
             ->latest()
@@ -48,8 +53,8 @@ class PurchaseOrdersController extends Controller
     {
         $this->authorizeManager();
 
-        $order = PurchaseOrder::with(['receivingLocation:id,name', 'items'])
-            ->where('business_id', $this->tenantId())
+        $order = $this->scopedOrders()
+            ->with(['receivingLocation:id,name', 'items'])
             ->findOrFail($purchaseOrder);
 
         $audit = PoAuditLog::where('po_id', $order->id)->latest('created_at')->get();
@@ -64,7 +69,7 @@ class PurchaseOrdersController extends Controller
     {
         $this->authorizeManager();
 
-        $order = PurchaseOrder::where('business_id', $this->tenantId())->findOrFail($purchaseOrder);
+        $order = $this->scopedOrders()->findOrFail($purchaseOrder);
 
         abort_if(! in_array($order->status, ['draft', 'sent'], true), 422, 'Only a draft or sent order can be cancelled from here.');
 
@@ -104,10 +109,24 @@ class PurchaseOrdersController extends Controller
         return redirect()->route('office.purchase-orders.index')->with('success', "{$order->po_number} cancelled.");
     }
 
+    /**
+     * Base query every action uses: this tenant's orders, further narrowed
+     * to the acting user's location scope when they're restricted to
+     * specific branches. Centralized so a new action (like cancel(), which
+     * previously skipped this) can't forget to apply it.
+     */
+    private function scopedOrders(): Builder
+    {
+        $scope = $this->authorizer->currentLocationScope();
+
+        return PurchaseOrder::where('business_id', $this->tenantId())
+            ->when($scope !== null, fn ($q) => $q->whereIn('receiving_location_id', $scope));
+    }
+
     private function authorizeManager(): void
     {
-        abort_if(
-            ! in_array(session('backoffice.role'), ['business_owner', 'manager']),
+        abort_unless(
+            $this->authorizer->can($this->tenantId(), session('backoffice.role'), BackOfficePermission::MANAGE_PURCHASE_ORDERS),
             403,
             'Access denied.'
         );

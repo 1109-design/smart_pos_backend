@@ -22,6 +22,11 @@ class Till extends Model
         ];
     }
 
+    public function locationAudits(): HasMany
+    {
+        return $this->hasMany(TillLocationAudit::class);
+    }
+
     public function location(): BelongsTo
     {
         return $this->belongsTo(Location::class);

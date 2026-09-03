@@ -7,7 +7,9 @@ use App\Models\Customer;
 use App\Models\LoyaltyTransaction;
 use App\Models\SyncRecord;
 use App\Models\Transaction;
+use App\Services\BackOfficeAuthorizer;
 use App\Services\SyncProcessor;
+use App\Support\BackOfficePermission;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -15,6 +17,8 @@ use Inertia\Response;
 
 class CustomersController extends Controller
 {
+    public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
+
     /**
      * Customers and their loyalty ledger are populated entirely by the till
      * via sync — this page is read plus a light edit (credit limit,
@@ -113,8 +117,8 @@ class CustomersController extends Controller
 
     private function authorizeManager(): void
     {
-        abort_if(
-            ! in_array(session('backoffice.role'), ['business_owner', 'manager']),
+        abort_unless(
+            $this->authorizer->can($this->tenantId(), session('backoffice.role'), BackOfficePermission::MANAGE_CUSTOMERS),
             403,
             'Access denied.'
         );
