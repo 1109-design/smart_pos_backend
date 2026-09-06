@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\ApprovalRequest;
 use App\Models\Bundle;
 use App\Models\BundleItem;
 use App\Models\Business;
@@ -32,13 +33,18 @@ use App\Models\ProductTaxRate;
 use App\Models\ProductUnit;
 use App\Models\ProductVariant;
 use App\Models\ProductVariantStock;
+use App\Models\Project;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
 use App\Models\Quotation;
 use App\Models\QuotationItem;
 use App\Models\RecurringInvoiceSchedule;
+use App\Models\Requisition;
+use App\Models\RequisitionItem;
 use App\Models\RolePermission;
 use App\Models\SalaryPayment;
+use App\Models\SheetCut;
+use App\Models\SheetLot;
 use App\Models\Shift;
 use App\Models\StockMovement;
 use App\Models\StockTake;
@@ -54,7 +60,11 @@ use App\Models\Transaction;
 use App\Models\TransactionItem;
 use App\Models\TransactionTax;
 use App\Models\User;
+use App\Services\Accounting\GrvPostingService;
+use App\Services\Accounting\PurchaseOrderApprovalGate;
+use App\Services\Accounting\SalePostingService;
 use App\Services\Zimra\ZimraSalesService;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
@@ -67,7 +77,7 @@ class SyncProcessor
         'stock_movements', 'loyalty_transactions', 'credit_transactions',
         'transaction_items', 'transaction_taxes', 'payments', 'po_audit_logs',
         'container_deposit_ledger', 'change_owed_ledger', 'till_cash_movements',
-        'invoice_payments', 'credit_note_items',
+        'invoice_payments', 'credit_note_items', 'sheet_cuts',
     ];
 
     // Tables with their own business_id column, guarded in assertOwnership().
@@ -95,6 +105,10 @@ class SyncProcessor
         'bundles' => Bundle::class,
         'products' => Product::class,
         'stock_transfers' => StockTransfer::class,
+        'approval_requests' => ApprovalRequest::class,
+        'requisitions' => Requisition::class,
+        'projects' => Project::class,
+        'sheet_lots' => SheetLot::class,
         'users' => User::class,
         'container_deposit_ledger' => ContainerDepositLedger::class,
         'change_owed_ledger' => ChangeOwedLedger::class,
@@ -114,6 +128,8 @@ class SyncProcessor
         'product_variants' => [ProductVariant::class, 'product_id'],
         'product_variant_stock' => [ProductVariantStock::class, 'variant_id'],
         'stock_transfer_items' => [StockTransferItem::class, 'stock_transfer_id'],
+        'requisition_items' => [RequisitionItem::class, 'requisition_id'],
+        'sheet_cuts' => [SheetCut::class, 'sheet_lot_id'],
         'bundle_items' => [BundleItem::class, 'bundle_id'],
         'product_container_links' => [ProductContainerLink::class, 'beverage_product_id'],
         'transaction_items' => [TransactionItem::class, 'transaction_id'],
@@ -242,6 +258,8 @@ class SyncProcessor
                 ->where('product_variants.id', $parentId)
                 ->value('products.business_id'),
             'stock_transfer_items' => StockTransfer::where('id', $parentId)->value('business_id'),
+            'requisition_items' => Requisition::where('id', $parentId)->value('business_id'),
+            'sheet_cuts' => SheetLot::where('id', $parentId)->value('business_id'),
             'bundle_items' => Bundle::where('id', $parentId)->value('business_id'),
             'product_container_links' => Product::where('id', $parentId)->value('business_id'),
             'transaction_items', 'transaction_taxes', 'payments' => Transaction::where('id', $parentId)->value('business_id'),
@@ -345,6 +363,30 @@ class SyncProcessor
                 );
                 break;
 
+            case 'approval_requests':
+                ApprovalRequest::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'subject_type' => $payload['subject_type'] ?? '',
+                        'subject_id' => $payload['subject_id'] ?? null,
+                        'action' => $payload['action'] ?? '',
+                        'requested_by_user_id' => $payload['requested_by_user_id'] ?? null,
+                        'status' => $payload['status'] ?? 'pending',
+                        'approver_user_id' => $payload['approver_user_id'] ?? null,
+                        'approved_at' => $payload['approved_at'] ?? null,
+                        'reason' => $payload['reason'] ?? null,
+                        // Accept either a raw map (normal case: the outer HTTP
+                        // JSON body already encodes it) or a pre-encoded JSON
+                        // string, so a double-encode on either side degrades
+                        // gracefully instead of corrupting the array cast.
+                        'payload_json' => is_string($payload['payload_json'] ?? null)
+                            ? json_decode($payload['payload_json'], true)
+                            : ($payload['payload_json'] ?? null),
+                    ]
+                );
+                break;
+
             case 'stock_transfer_items':
                 StockTransferItem::updateOrCreate(
                     ['id' => $uuid],
@@ -357,6 +399,87 @@ class SyncProcessor
                         'qty_sent' => $payload['qty_sent'] ?? 0,
                         'qty_received' => $payload['qty_received'] ?? 0,
                         'notes' => $payload['notes'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'requisitions':
+                Requisition::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'requisition_number' => $payload['requisition_number'] ?? '',
+                        'location_id' => $payload['location_id'] ?? null,
+                        'purpose' => $payload['purpose'] ?? 'general',
+                        'project_id' => $payload['project_id'] ?? null,
+                        'notes' => $payload['notes'] ?? null,
+                        'status' => $payload['status'] ?? 'pending',
+                        'requested_by_user_id' => $payload['requested_by_user_id'] ?? null,
+                        'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
+                        'approved_at' => $payload['approved_at'] ?? null,
+                        'issued_by_user_id' => $payload['issued_by_user_id'] ?? null,
+                        'issued_at' => $payload['issued_at'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'requisition_items':
+                RequisitionItem::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'requisition_id' => $payload['requisition_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'product_name' => $payload['product_name'] ?? '',
+                        'quantity_requested' => $payload['quantity_requested'] ?? 0,
+                        'quantity_issued' => $payload['quantity_issued'] ?? 0,
+                        'unit_cost' => $payload['unit_cost'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'projects':
+                Project::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'name' => $payload['name'] ?? '',
+                        'reference' => $payload['reference'] ?? null,
+                        'notes' => $payload['notes'] ?? null,
+                        'budget' => $payload['budget'] ?? null,
+                        'status' => $payload['status'] ?? 'active',
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                        'closed_at' => $payload['closed_at'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'sheet_lots':
+                SheetLot::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'original_width' => $payload['original_width'] ?? null,
+                        'original_height' => $payload['original_height'] ?? null,
+                        'area' => $payload['area'] ?? 0,
+                        'status' => $payload['status'] ?? 'available',
+                        'received_by_user_id' => $payload['received_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'sheet_cuts':
+                SheetCut::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'sheet_lot_id' => $payload['sheet_lot_id'] ?? null,
+                        'width' => $payload['width'] ?? 0,
+                        'height' => $payload['height'] ?? 0,
+                        'area' => $payload['area'] ?? 0,
+                        'transaction_id' => $payload['transaction_id'] ?? null,
+                        'user_id' => $payload['user_id'] ?? null,
+                        'cut_at' => $payload['cut_at'] ?? now(),
                     ]
                 );
                 break;
@@ -464,6 +587,8 @@ class SyncProcessor
                         'cost_price' => $payload['cost_price'] ?? 0,
                         'deposit_amount' => $payload['deposit_amount'] ?? null,
                         'unit' => $payload['unit'] ?? 'piece',
+                        'sheet_width' => $payload['sheet_width'] ?? null,
+                        'sheet_height' => $payload['sheet_height'] ?? null,
                         'track_stock' => $payload['track_stock'] ?? true,
                         // stock_quantity is accepted from payload for initial setup.
                         // It will be overridden below if movements exist (multi-device safe).
@@ -628,12 +753,36 @@ class SyncProcessor
                     'status' => $payload['status'] ?? 'completed',
                     'sale_number' => $payload['sale_number'] ?? null,
                     'notes' => $payload['notes'] ?? null,
+                    'void_reason' => $payload['void_reason'] ?? null,
                 ];
-                if (! $txExists && isset($payload['created_at'])) {
-                    // Preserve the device's sale timestamp on first insert
-                    $txData['created_at'] = $payload['created_at'];
-                }
                 $tx = Transaction::updateOrCreate(['id' => $uuid], $txData);
+
+                if (! $txExists && isset($payload['created_at'])) {
+                    // Preserve the device's sale timestamp on first insert.
+                    // Setting created_at inside the updateOrCreate() payload
+                    // above does NOT work — Eloquent's automatic timestamp
+                    // management overwrites it with "now" during the insert
+                    // regardless of what's in the attributes array. A plain
+                    // Eloquent save() with $timestamps disabled doesn't work
+                    // either: Model::getDates() excludes created_at/updated_at
+                    // entirely once usesTimestamps() is false, so the value
+                    // skips Carbon casting both in and out — an ISO 8601
+                    // string (as the device sends) fails outright against
+                    // MySQL's native datetime format, and even a
+                    // MySQL-shaped string would come back as a plain PHP
+                    // string on every future read, not a Carbon instance.
+                    // A raw query update sidesteps Eloquent entirely for
+                    // just this column. Getting this right matters beyond
+                    // accounting: reports that group sales by date
+                    // (ReportsController's daily breakdown,
+                    // SalePostingService's trans_date) would otherwise
+                    // silently use "when this synced" instead of "when the
+                    // sale happened" for any till that syncs late.
+                    DB::table('transactions')->where('id', $uuid)->update([
+                        'created_at' => Carbon::parse($payload['created_at'])->format('Y-m-d H:i:s'),
+                    ]);
+                    $tx->refresh();
+                }
 
                 // Queue ZIMRA fiscalisation whenever a transaction becomes
                 // completed — either brand new, or transitioning from another
@@ -647,6 +796,15 @@ class SyncProcessor
                 // never a duplicate submission.
                 if ($tx->status === 'completed' && $previousStatus !== 'completed') {
                     app(ZimraSalesService::class)->queueFiscalisation($tx);
+                }
+
+                // Accounting (Phase 11b) — same transition-based trigger as
+                // ZIMRA above, plus voiding, which needs to reverse whatever
+                // was already posted rather than post something new. No-ops
+                // quietly if this sale's items/payments haven't all synced
+                // yet; the accounting:post-pending-sales sweep catches it.
+                if ($tx->status !== $previousStatus) {
+                    app(SalePostingService::class)->postIfReady($tx);
                 }
                 break;
 
@@ -666,6 +824,13 @@ class SyncProcessor
                         'notes' => $payload['notes'] ?? null,
                     ]
                 );
+
+                // The transaction row itself may well have synced first with
+                // its items still missing — retry posting now that one more
+                // piece has landed (see the 'transactions' case above).
+                if ($parentTx = Transaction::find($payload['transaction_id'] ?? null)) {
+                    app(SalePostingService::class)->postIfReady($parentTx);
+                }
                 break;
 
             case 'transaction_taxes':
@@ -694,12 +859,18 @@ class SyncProcessor
                         'base_equivalent' => $payload['base_equivalent'] ?? 0,
                         'change_given' => $payload['change_given'] ?? 0,
                         'reference' => $payload['reference'] ?? null,
+                        'rounding_adjustment' => $payload['rounding_adjustment'] ?? 0,
                     ]
                 );
+
+                // Same retry-on-arrival reasoning as transaction_items above.
+                if ($parentTx = Transaction::find($payload['transaction_id'] ?? null)) {
+                    app(SalePostingService::class)->postIfReady($parentTx);
+                }
                 break;
 
             case 'stock_movements':
-                StockMovement::updateOrCreate(
+                $movement = StockMovement::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'business_id' => $payload['business_id'] ?? null,
@@ -729,6 +900,12 @@ class SyncProcessor
                     }
                     $this->recomputeProductStock($payload['product_id']);
                 }
+
+                // Purchasing & Cash Vault Blueprint, part A — a 'receive'
+                // movement that references a real PurchaseOrder (a known
+                // supplier) gets a GRV and a GL posting; walk-in receiving
+                // (reference_id null) is a no-op inside the service itself.
+                app(GrvPostingService::class)->recordReceipt($movement);
                 break;
 
             case 'loyalty_transactions':
@@ -828,6 +1005,9 @@ class SyncProcessor
                 break;
 
             case 'purchase_orders':
+                $existingPo = PurchaseOrder::find($uuid);
+                [$status, $justGated] = $this->gatePurchaseOrderStatus($existingPo, $payload);
+
                 PurchaseOrder::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -836,7 +1016,7 @@ class SyncProcessor
                         'supplier_id' => $payload['supplier_id'] ?? null,
                         'supplier_name' => $payload['supplier_name'] ?? null,
                         'po_number' => $payload['po_number'] ?? '',
-                        'status' => $payload['status'] ?? 'draft',
+                        'status' => $status,
                         // total_ordered/total_received accepted from payload for initial insert.
                         // They will be overridden below if items exist (multi-device safe).
                         'total_ordered' => $payload['total_ordered'] ?? 0,
@@ -848,6 +1028,10 @@ class SyncProcessor
                     ]
                 );
                 $this->recomputePurchaseOrderTotals($uuid);
+
+                if ($justGated) {
+                    app(PurchaseOrderApprovalGate::class)->requestApproval($uuid);
+                }
                 break;
 
             case 'purchase_order_items':
@@ -1003,6 +1187,7 @@ class SyncProcessor
                     [
                         'business_id' => $payload['business_id'] ?? null,
                         'recorded_by_user_id' => $recordedByUserId,
+                        'project_id' => $payload['project_id'] ?? null,
                         'category' => $payload['category'] ?? '',
                         'description' => $payload['description'] ?? null,
                         'amount' => $payload['amount'] ?? 0,
@@ -1459,6 +1644,50 @@ class SyncProcessor
             'total_ordered' => $totalOrdered,
             'total_received' => $totalReceived,
         ]);
+    }
+
+    /**
+     * Purchasing & Cash Vault Blueprint, part D — a PO over the business's
+     * configured threshold is held at 'pending_approval' instead of moving
+     * to 'sent', with a remote ApprovalRequest raised for an owner/manager
+     * to clear (see PurchaseOrderApprovalGate). Only the first transition
+     * into 'sent' (from null/'draft') is ever gated — once a PO has reached
+     * pending_approval, this device's payload is a stale copy of the
+     * original submission (it doesn't know a review is pending yet), so its
+     * 'sent' claim is ignored rather than re-applied. Resolving the request
+     * writes the final status directly (bypassing this method entirely —
+     * see PurchaseOrderApprovalGate::resolve()), so there's no path back
+     * into this gate once a decision has been made.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array{0: string, 1: bool} the status to persist, and whether this call just newly raised the gate
+     */
+    private function gatePurchaseOrderStatus(?PurchaseOrder $existing, array $payload): array
+    {
+        $incomingStatus = $payload['status'] ?? 'draft';
+
+        if ($existing?->status === 'pending_approval') {
+            return ['pending_approval', false];
+        }
+
+        $isFirstSubmission = $incomingStatus === 'sent' && ($existing === null || $existing->status === 'draft');
+        if (! $isFirstSubmission) {
+            return [$incomingStatus, false];
+        }
+
+        $threshold = Business::find($payload['business_id'] ?? null)?->poApprovalThreshold();
+        $totalOrdered = (float) ($payload['total_ordered'] ?? 0);
+
+        // A PO with no creator can never raise a properly-attributed
+        // ApprovalRequest (requested_by_user_id and po_audit_logs.user_id
+        // both require a real user) — gating it anyway would strand it at
+        // pending_approval with nothing able to resolve it, so it's left
+        // ungated instead of risking that dead end.
+        if ($threshold !== null && $totalOrdered > $threshold && ! empty($payload['created_by_user_id'])) {
+            return ['pending_approval', true];
+        }
+
+        return [$incomingStatus, false];
     }
 
     /**

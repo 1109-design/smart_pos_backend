@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\Product;
 use App\Models\StockMovement;
 use App\Models\StockTake;
@@ -17,7 +16,7 @@ use Illuminate\Support\Str;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class StockTakesController extends Controller
+class StockTakesController extends BackOfficeController
 {
     public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
 
@@ -268,15 +267,5 @@ class StockTakesController extends Controller
             403,
             'Access denied.'
         );
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
-    }
-
-    private function userId(): ?string
-    {
-        return session('backoffice')['user_id'] ?? null;
     }
 }

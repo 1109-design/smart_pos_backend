@@ -15,6 +15,7 @@ class Product extends Model
         'id', 'business_id', 'category_id', 'name', 'item_type', 'sku', 'barcode',
         'price', 'min_price', 'discount_percent', 'cost_price', 'deposit_amount', 'unit',
         'track_stock', 'stock_quantity', 'low_stock_threshold',
+        'sheet_width', 'sheet_height',
         'image_path', 'expiry_date', 'is_active', 'merged_into_product_id',
     ];
 
@@ -39,6 +40,8 @@ class Product extends Model
             'deposit_amount' => 'decimal:4',
             'stock_quantity' => 'decimal:4',
             'low_stock_threshold' => 'decimal:4',
+            'sheet_width' => 'decimal:4',
+            'sheet_height' => 'decimal:4',
             'track_stock' => 'boolean',
             'is_active' => 'boolean',
             'expiry_date' => 'datetime',

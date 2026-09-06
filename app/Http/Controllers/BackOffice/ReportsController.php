@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\Payment;
 use App\Models\Transaction;
 use App\Models\TransactionItem;
@@ -12,7 +11,7 @@ use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class ReportsController extends Controller
+class ReportsController extends BackOfficeController
 {
     public function __invoke(Request $request, BackOfficeAuthorizer $authorizer): Response
     {
@@ -90,10 +89,5 @@ class ReportsController extends Controller
             'currency' => $currency,
             'filters' => ['from' => $from, 'to' => $to],
         ]);
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
     }
 }

@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\Bundle;
 use App\Models\BundleItem;
 use App\Models\Product;
@@ -15,7 +14,7 @@ use Illuminate\Validation\Rule;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class BundlesController extends Controller
+class BundlesController extends BackOfficeController
 {
     public function index(): Response
     {
@@ -185,10 +184,5 @@ class BundlesController extends Controller
             'source_updated_at' => now(),
             'synced_at' => now(),
         ]);
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
     }
 }

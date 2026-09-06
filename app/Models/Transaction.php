@@ -14,7 +14,7 @@ class Transaction extends Model
         'id', 'business_id', 'location_id', 'user_id', 'customer_id',
         'subtotal', 'tax_total', 'discount_total', 'deposit_total',
         'surcharge_total', 'total',
-        'base_currency', 'status', 'sale_number', 'notes',
+        'base_currency', 'status', 'sale_number', 'notes', 'void_reason',
         'fiscal_status', 'fiscal_receipt_number', 'fiscal_qr_code',
     ];
 

@@ -28,6 +28,7 @@ class Business extends Model
         'catalogue_reset_at',
         'catalogue_reset_by_user_id',
         'workflow_settings',
+        'accounting_go_live_date',
     ];
 
     protected function casts(): array
@@ -38,7 +39,17 @@ class Business extends Model
             'stock_reset_at' => 'datetime',
             'catalogue_reset_at' => 'datetime',
             'workflow_settings' => 'array',
+            'accounting_go_live_date' => 'date',
         ];
+    }
+
+    /**
+     * Phase 11 accounting posting is entirely inactive until this is set —
+     * see the migration for accounting_go_live_date for why.
+     */
+    public function accountingIsLive(): bool
+    {
+        return $this->accounting_go_live_date !== null;
     }
 
     /**
@@ -49,5 +60,17 @@ class Business extends Model
     public function workflowRequiresApproval(string $key): bool
     {
         return (bool) ($this->workflow_settings[$key] ?? false);
+    }
+
+    /**
+     * Purchasing & Cash Vault Blueprint, part D — null (never configured,
+     * the default) means no PO is ever gated, same opt-in shape as
+     * workflowRequiresApproval() above.
+     */
+    public function poApprovalThreshold(): ?float
+    {
+        $value = $this->workflow_settings['po_approval_threshold'] ?? null;
+
+        return $value !== null ? (float) $value : null;
     }
 }

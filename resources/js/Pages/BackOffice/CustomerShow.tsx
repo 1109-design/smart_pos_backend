@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Head, Link, useForm } from '@inertiajs/react';
 import BackOfficeLayout from '@/Layouts/BackOfficeLayout';
 import StatusBadge from '@/Components/StatusBadge';
+import AccountStatement from '@/Components/AccountStatement';
 
 interface Customer {
     id: string;
@@ -32,13 +33,35 @@ interface PurchaseEntry {
     created_at: string;
 }
 
+interface StatementLine {
+    date: string;
+    description: string | null;
+    debit: number;
+    credit: number;
+    running_balance: number;
+}
+
+interface Statement {
+    opening_balance: number;
+    closing_balance: number;
+    lines: StatementLine[];
+}
+
+interface Aging {
+    buckets: { current: number; days_31_60: number; days_61_90: number; days_91_120: number; over_120: number };
+    total_outstanding: number;
+    credit_balance: number;
+}
+
 interface Props {
     customer: Customer;
     loyalty_history: LoyaltyEntry[];
     purchase_history: PurchaseEntry[];
+    statement: Statement;
+    aging: Aging;
 }
 
-export default function BackOfficeCustomerShow({ customer, loyalty_history, purchase_history }: Props) {
+export default function BackOfficeCustomerShow({ customer, loyalty_history, purchase_history, statement, aging }: Props) {
     const [editing, setEditing] = useState(false);
     const form = useForm({
         name: customer.name,
@@ -218,6 +241,8 @@ export default function BackOfficeCustomerShow({ customer, loyalty_history, purc
                             )}
                         </div>
                     </div>
+
+                    <AccountStatement statement={statement} aging={aging} balanceLabel="owes you" />
                 </div>
             </div>
         </BackOfficeLayout>

@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\Location;
 use App\Models\Shift;
 use App\Models\SyncRecord;
@@ -16,7 +15,7 @@ use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class TillsController extends Controller
+class TillsController extends BackOfficeController
 {
     public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
 
@@ -153,15 +152,5 @@ class TillsController extends Controller
             403,
             'Access denied.'
         );
-    }
-
-    private function userId(): ?string
-    {
-        return session('backoffice')['user_id'] ?? null;
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
     }
 }

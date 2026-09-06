@@ -29,3 +29,19 @@ Schedule::command('invoices:generate-recurring')
     ->dailyAt('06:00')
     ->withoutOverlapping()
     ->onOneServer();
+
+// ── Accounting (Phase 11b) ───────────────────────────────────────────────────
+// Catches any sale whose items/payments hadn't all synced yet when it first
+// tried to post — see SalePostingService.
+Schedule::command('accounting:post-pending-sales')
+    ->everyFifteenMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
+// Phase 9 / 11d — catches up straight-line depreciation for every active
+// asset. Daily is more than enough cadence for a monthly charge; idempotent
+// either way.
+Schedule::command('accounting:post-asset-depreciation')
+    ->daily()
+    ->withoutOverlapping()
+    ->onOneServer();

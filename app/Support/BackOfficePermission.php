@@ -26,6 +26,16 @@ final class BackOfficePermission
 
     public const ARCHIVE_ALL_PRODUCTS = 'archive_all_products';
 
+    public const MANAGE_APPROVALS = 'manage_approvals';
+
+    public const VIEW_FINANCIAL_STATEMENTS = 'view_financial_statements';
+
+    public const MANAGE_JOURNAL_ENTRIES = 'manage_journal_entries';
+
+    public const MANAGE_REQUISITIONS = 'manage_requisitions';
+
+    public const MANAGE_ASSETS = 'manage_assets';
+
     /**
      * Single source of truth for the catalogue — all() and label() both
      * derive from this instead of separately re-listing every permission,
@@ -42,6 +52,11 @@ final class BackOfficePermission
         self::MANAGE_STOREMAN => 'Create suggested transfers',
         self::MANAGE_TILLS => 'Move tills between locations',
         self::ARCHIVE_ALL_PRODUCTS => 'Archive all products',
+        self::MANAGE_APPROVALS => 'Approve/reject pending requests',
+        self::VIEW_FINANCIAL_STATEMENTS => 'View financial statements',
+        self::MANAGE_JOURNAL_ENTRIES => 'Post and reverse manual journal entries',
+        self::MANAGE_REQUISITIONS => 'Request and approve stock requisitions',
+        self::MANAGE_ASSETS => 'Manage the asset register',
     ];
 
     /**
@@ -72,7 +87,7 @@ final class BackOfficePermission
     {
         return match ($role) {
             'business_owner' => self::all(),
-            'manager' => array_values(array_diff(self::all(), [self::ARCHIVE_ALL_PRODUCTS])),
+            'manager' => array_values(array_diff(self::all(), [self::ARCHIVE_ALL_PRODUCTS, self::MANAGE_JOURNAL_ENTRIES, self::MANAGE_ASSETS])),
             default => [],
         };
     }

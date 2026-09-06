@@ -19,7 +19,7 @@ interface ContainerLinkRow {
 interface ProductRow {
     id: string;
     name: string;
-    item_type: 'product' | 'service' | 'container';
+    item_type: 'product' | 'service' | 'container' | 'sheet';
     sku: string | null;
     barcode: string | null;
     price: string;
@@ -27,6 +27,8 @@ interface ProductRow {
     min_price: string | null;
     discount_percent: string | null;
     deposit_amount: string | null;
+    sheet_width: string | null;
+    sheet_height: string | null;
     expiry_date: string | null;
     unit: string;
     track_stock: boolean;
@@ -51,7 +53,7 @@ interface ContainerOption {
 interface MergeCandidate {
     id: string;
     name: string;
-    item_type: 'product' | 'service' | 'container';
+    item_type: 'product' | 'service' | 'container' | 'sheet';
     sku: string | null;
 }
 
@@ -84,12 +86,14 @@ interface Props {
 
 const EMPTY_FORM = {
     name: '',
-    item_type: 'product' as 'product' | 'service' | 'container',
+    item_type: 'product' as 'product' | 'service' | 'container' | 'sheet',
     price: '',
     cost_price: '',
     min_price: '',
     discount_percent: '',
     deposit_amount: '',
+    sheet_width: '',
+    sheet_height: '',
     expiry_date: '',
     sku: '',
     barcode: '',
@@ -159,12 +163,14 @@ function StockByLocation({ rows, onEdit }: { rows: StockLocationRow[]; onEdit: (
 function typeBadgeClass(itemType: ProductRow['item_type']): string {
     if (itemType === 'service') return 'bg-sky-50 text-sky-700';
     if (itemType === 'container') return 'bg-amber-50 text-amber-700';
+    if (itemType === 'sheet') return 'bg-violet-50 text-violet-700';
     return 'bg-slate-100 text-slate-600';
 }
 
 function typeLabel(itemType: ProductRow['item_type']): string {
     if (itemType === 'service') return 'Service';
     if (itemType === 'container') return 'Container';
+    if (itemType === 'sheet') return 'Sheet';
     return 'Product';
 }
 
@@ -252,6 +258,8 @@ export default function BackOfficeProducts({ products, categories, locations, co
             min_price: row.min_price ?? '',
             discount_percent: row.discount_percent ?? '',
             deposit_amount: row.deposit_amount ?? '',
+            sheet_width: row.sheet_width ?? '',
+            sheet_height: row.sheet_height ?? '',
             expiry_date: row.expiry_date ? row.expiry_date.slice(0, 10) : '',
             sku: row.sku ?? '',
             barcode: row.barcode ?? '',
@@ -297,6 +305,7 @@ export default function BackOfficeProducts({ products, categories, locations, co
 
     const isService = form.data.item_type === 'service';
     const isContainer = form.data.item_type === 'container';
+    const isSheet = form.data.item_type === 'sheet';
     const activeContainers = containers;
 
     const addContainerLink = () => {
@@ -606,8 +615,8 @@ export default function BackOfficeProducts({ products, categories, locations, co
                     <p className="text-base font-semibold text-slate-800 mb-4">{editing ? 'Edit Item' : 'New Item'}</p>
 
                     {/* Type selector */}
-                    <div className="grid grid-cols-3 gap-3 mb-4">
-                        {(['product', 'service', 'container'] as const).map((type) => (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+                        {(['product', 'service', 'container', 'sheet'] as const).map((type) => (
                             <button
                                 type="button"
                                 key={type}
@@ -618,9 +627,17 @@ export default function BackOfficeProducts({ products, categories, locations, co
                                         : 'border-slate-200 hover:border-emerald-300'
                                 }`}
                             >
-                                <p className="text-sm font-semibold text-slate-800">{type === 'product' ? 'Product' : type === 'service' ? 'Service' : 'Container'}</p>
+                                <p className="text-sm font-semibold text-slate-800">
+                                    {type === 'product' ? 'Product' : type === 'service' ? 'Service' : type === 'container' ? 'Container' : 'Sheet'}
+                                </p>
                                 <p className="text-xs text-slate-500">
-                                    {type === 'product' ? 'Physical goods with stock' : type === 'service' ? 'No stock — e.g. repair, delivery' : 'Returnable bottle/crate + deposit'}
+                                    {type === 'product'
+                                        ? 'Physical goods with stock'
+                                        : type === 'service'
+                                        ? 'No stock — e.g. repair, delivery'
+                                        : type === 'container'
+                                        ? 'Returnable bottle/crate + deposit'
+                                        : 'Sold whole or cut, priced by area'}
                                 </p>
                             </button>
                         ))}
@@ -638,6 +655,38 @@ export default function BackOfficeProducts({ products, categories, locations, co
                             />
                             {form.errors.name && <p className="text-xs text-red-500 mt-1">{form.errors.name}</p>}
                         </div>
+
+                        {isSheet && (
+                            <div className="sm:col-span-2 rounded-xl bg-sky-50 border border-sky-100 px-4 py-3">
+                                <p className="text-xs text-sky-800 mb-3">
+                                    Default size of one whole sheet as purchased — each unit received creates one
+                                    trackable sheet with this area. Price below is per unit area (e.g. per m²);
+                                    selling a whole sheet or a custom cut both derive from it.
+                                </p>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="text-xs font-semibold text-slate-500">Sheet width</label>
+                                        <input
+                                            type="number" step="0.0001" min="0.0001"
+                                            value={form.data.sheet_width}
+                                            onChange={(e) => form.setData('sheet_width', e.target.value)}
+                                            className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                        />
+                                        {form.errors.sheet_width && <p className="text-xs text-red-500 mt-1">{form.errors.sheet_width}</p>}
+                                    </div>
+                                    <div>
+                                        <label className="text-xs font-semibold text-slate-500">Sheet height</label>
+                                        <input
+                                            type="number" step="0.0001" min="0.0001"
+                                            value={form.data.sheet_height}
+                                            onChange={(e) => form.setData('sheet_height', e.target.value)}
+                                            className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                        />
+                                        {form.errors.sheet_height && <p className="text-xs text-red-500 mt-1">{form.errors.sheet_height}</p>}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
 
                         {isContainer ? (
                             <div className="sm:col-span-2 rounded-xl bg-amber-50 border border-amber-100 px-4 py-3">
@@ -735,7 +784,15 @@ export default function BackOfficeProducts({ products, categories, locations, co
                                         className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                                     />
                                 </div>
-                                {locations.length <= 1 ? (
+                                {isSheet ? (
+                                    <div className="sm:col-span-2">
+                                        <p className="text-xs text-slate-400">
+                                            Stock is tracked per physical sheet, not as a flat count — receive sheets
+                                            from Purchasing to create them; the total here reflects remaining area
+                                            (m²) across every sheet and offcut.
+                                        </p>
+                                    </div>
+                                ) : locations.length <= 1 ? (
                                     <div>
                                         <label className="text-xs font-semibold text-slate-500">
                                             {editing ? 'Stock quantity (managed by tills after creation)' : 'Opening stock'}

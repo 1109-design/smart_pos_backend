@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\BackOfficeRolePermission;
 use App\Services\BackOfficeAuthorizer;
 use App\Support\BackOfficePermission;
@@ -13,7 +12,7 @@ use Inertia\Inertia;
 use Inertia\Response;
 use Spatie\Permission\Models\Role;
 
-class RolesController extends Controller
+class RolesController extends BackOfficeController
 {
     public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
 
@@ -114,10 +113,5 @@ class RolesController extends Controller
     private function authorizeOwner(): void
     {
         abort_unless($this->authorizer->isBusinessOwner(), 403, 'Only the business owner can manage roles.');
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
     }
 }

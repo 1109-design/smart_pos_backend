@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\Accounting\GlAccount;
 use App\Models\User;
 use App\Services\BusinessProvisioner;
 use Database\Seeders\RolesAndPermissionsSeeder;
@@ -57,6 +58,14 @@ class BusinessProvisionerTest extends TestCase
             $this->assertTrue($owner->hasRole('business_owner'));
             $this->assertTrue(Hash::check('4321', $owner->pin_hash));
         });
+    }
+
+    public function test_provision_seeds_a_chart_of_accounts_for_the_new_business(): void
+    {
+        $tenant = $this->provision();
+
+        $this->assertGreaterThan(0, GlAccount::where('business_id', $tenant->id)->count());
+        $this->assertDatabaseHas('gl_accounts', ['business_id' => $tenant->id, 'code' => '1000', 'name' => 'Cash']);
     }
 
     public function test_duplicate_business_names_receive_unique_domains(): void

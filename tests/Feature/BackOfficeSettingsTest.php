@@ -464,4 +464,17 @@ class BackOfficeSettingsTest extends TestCase
         $this->post('/office/settings/workflows', ['stock_transfer_requires_approval' => true])
             ->assertForbidden();
     }
+
+    public function test_owner_can_set_and_clear_the_po_approval_threshold(): void
+    {
+        $tenantId = 'tenant-office-workflow-4';
+        $this->actingBackOfficeSession($tenantId);
+        Business::create(['id' => $tenantId, 'name' => $tenantId]);
+
+        $this->post('/office/settings/workflows', ['po_approval_threshold' => 500])->assertRedirect();
+        $this->assertSame(500.0, Business::find($tenantId)->poApprovalThreshold());
+
+        $this->post('/office/settings/workflows', ['po_approval_threshold' => null])->assertRedirect();
+        $this->assertNull(Business::find($tenantId)->poApprovalThreshold());
+    }
 }

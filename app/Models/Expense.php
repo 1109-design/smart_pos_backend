@@ -9,9 +9,8 @@ class Expense extends Model
 {
     use HasUuids;
 
-
     protected $fillable = [
-        'id', 'business_id', 'recorded_by_user_id', 'category', 'description',
+        'id', 'business_id', 'recorded_by_user_id', 'project_id', 'category', 'description',
         'amount', 'currency_code', 'base_equivalent', 'exchange_rate',
         'payment_method', 'mobile_provider', 'payment_reference',
         'receipt_path', 'notes', 'expense_date', 'deleted_at',
@@ -20,11 +19,11 @@ class Expense extends Model
     protected function casts(): array
     {
         return [
-            'amount'         => 'decimal:4',
+            'amount' => 'decimal:4',
             'base_equivalent' => 'decimal:4',
-            'exchange_rate'  => 'decimal:8',
-            'expense_date'   => 'datetime',
-            'deleted_at'     => 'datetime',
+            'exchange_rate' => 'decimal:8',
+            'expense_date' => 'datetime',
+            'deleted_at' => 'datetime',
         ];
     }
 }

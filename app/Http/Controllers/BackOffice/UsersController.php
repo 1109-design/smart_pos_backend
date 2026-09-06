@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\BackOfficeRolePermission;
 use App\Models\Location;
 use App\Models\SyncRecord;
@@ -19,7 +18,7 @@ use Inertia\Inertia;
 use Inertia\Response;
 use Spatie\Permission\Models\Role;
 
-class UsersController extends Controller
+class UsersController extends BackOfficeController
 {
     public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
 
@@ -276,11 +275,6 @@ class UsersController extends Controller
     private function ensureRoleExists(string $role): void
     {
         Role::firstOrCreate(['name' => $role, 'guard_name' => 'web']);
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
     }
 
     /**

@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\Location;
 use App\Models\Product;
 use App\Models\ProductStock;
@@ -24,7 +23,7 @@ use Inertia\Response;
  * stock running low, what transfers need my attention right now, and what
  * should I move from the warehouse to fix it.
  */
-class StoremanController extends Controller
+class StoremanController extends BackOfficeController
 {
     public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
 
@@ -265,15 +264,5 @@ class StoremanController extends Controller
             403,
             'Access denied.'
         );
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
-    }
-
-    private function userId(): ?string
-    {
-        return session('backoffice')['user_id'] ?? null;
     }
 }

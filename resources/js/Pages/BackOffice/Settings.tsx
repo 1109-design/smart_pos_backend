@@ -11,6 +11,7 @@ interface StockReset {
 
 interface Workflows {
     stock_transfer_requires_approval: boolean;
+    po_approval_threshold: number | null;
 }
 
 interface Props {
@@ -29,8 +30,19 @@ export default function BackOfficeSettings({ stock_reset, catalogue_reset, workf
     const form = useForm({ confirm: '' });
     const catalogueForm = useForm({ confirm: '' });
 
+    const [poThreshold, setPoThreshold] = useState(workflows.po_approval_threshold?.toString() ?? '');
+
     const toggleWorkflow = (key: keyof Workflows, value: boolean) => {
         router.post(`/office/settings/workflows`, { [key]: value }, { preserveScroll: true });
+    };
+
+    const savePoThreshold = (e: React.FormEvent) => {
+        e.preventDefault();
+        router.post(
+            '/office/settings/workflows',
+            { po_approval_threshold: poThreshold === '' ? null : poThreshold },
+            { preserveScroll: true }
+        );
     };
 
     const openConfirm = () => {
@@ -95,6 +107,23 @@ export default function BackOfficeSettings({ stock_reset, catalogue_reset, workf
                         className="mt-1 w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 flex-shrink-0"
                     />
                 </label>
+
+                <div className="border-t border-slate-100 mt-5 pt-5">
+                    <p className="text-sm font-medium text-slate-800">Require owner approval for large purchase orders</p>
+                    <p className="text-xs text-slate-500 mt-1 mb-3">
+                        A purchase order over this amount is held for an owner or manager to approve before it's sent to
+                        the supplier. Leave blank to never require approval, regardless of order size.
+                    </p>
+                    <form onSubmit={savePoThreshold} className="flex items-center gap-2">
+                        <input
+                            type="number" step="0.01" min="0" placeholder="No threshold"
+                            value={poThreshold}
+                            onChange={(e) => setPoThreshold(e.target.value)}
+                            className="w-40 text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                        <button type="submit" className="btn-primary py-2 px-4">Save</button>
+                    </form>
+                </div>
             </div>
 
             <div className="mb-3">

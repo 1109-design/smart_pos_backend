@@ -3,7 +3,7 @@ import { Head, Link, router, usePage } from '@inertiajs/react';
 import BackOfficeLayout from '@/Layouts/BackOfficeLayout';
 import StatusBadge from '@/Components/StatusBadge';
 
-type PoStatus = 'draft' | 'sent' | 'partial' | 'received' | 'cancelled';
+type PoStatus = 'draft' | 'pending_approval' | 'sent' | 'partial' | 'received' | 'cancelled';
 
 interface PurchaseOrderRow {
     id: string;
@@ -30,6 +30,7 @@ interface Props {
 
 const STATUS_STYLE: Record<PoStatus, { label: string; variant: 'amber' | 'blue' | 'violet' | 'green' | 'red' }> = {
     draft: { label: 'Draft', variant: 'amber' },
+    pending_approval: { label: 'Pending Approval', variant: 'amber' },
     sent: { label: 'Sent', variant: 'blue' },
     partial: { label: 'Partially Received', variant: 'violet' },
     received: { label: 'Received', variant: 'green' },

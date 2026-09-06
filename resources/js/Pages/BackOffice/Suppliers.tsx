@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Head, router, useForm, usePage } from '@inertiajs/react';
+import { Head, Link, router, useForm, usePage } from '@inertiajs/react';
 import BackOfficeLayout from '@/Layouts/BackOfficeLayout';
 import Modal from '@/Components/Modal';
 import StatusBadge from '@/Components/StatusBadge';
@@ -114,7 +114,9 @@ export default function BackOfficeSuppliers({ suppliers, filters }: Props) {
                     <div key={supplier.id} className={`bg-white rounded-2xl border border-slate-100 shadow-sm p-5 ${!supplier.is_active ? 'opacity-50' : ''}`}>
                         <div className="flex items-start justify-between gap-2 mb-3">
                             <div className="min-w-0">
-                                <p className="text-sm font-semibold text-slate-900 truncate">{supplier.name}</p>
+                                <Link href={`/office/suppliers/${supplier.id}`} className="text-sm font-semibold text-slate-900 truncate hover:text-emerald-700 hover:underline block">
+                                    {supplier.name}
+                                </Link>
                                 {supplier.contact_name && <p className="text-xs text-slate-500 mt-0.5 truncate">{supplier.contact_name}</p>}
                             </div>
                             {!supplier.is_active && <StatusBadge label="Inactive" variant="gray" />}

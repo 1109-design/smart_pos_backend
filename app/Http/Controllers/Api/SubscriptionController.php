@@ -4,16 +4,18 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\ActivationCode;
-use App\Models\Device;
 use App\Models\Location;
 use App\Models\Setting;
 use App\Models\SubscriptionHistory;
 use App\Models\Tenant;
+use App\Services\DeviceResolver;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class SubscriptionController extends Controller
 {
+    public function __construct(private readonly DeviceResolver $deviceResolver) {}
+
     /**
      * Heartbeat — the device calls this periodically (piggybacked on sync)
      * to re-confirm its entitlement while online. The Flutter app persists
@@ -22,7 +24,7 @@ class SubscriptionController extends Controller
      */
     public function status(Request $request): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         if (! $device || $device->is_revoked) {
             return response()->json(['message' => 'Device revoked.'], 403);
@@ -70,7 +72,7 @@ class SubscriptionController extends Controller
      */
     public function updateName(Request $request): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         if (! $device || $device->is_revoked) {
             return response()->json(['message' => 'Device revoked.'], 403);
@@ -99,7 +101,7 @@ class SubscriptionController extends Controller
      */
     public function reportSelfPickedLocation(Request $request): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         if (! $device || $device->is_revoked) {
             return response()->json(['message' => 'Device revoked.'], 403);
@@ -133,7 +135,7 @@ class SubscriptionController extends Controller
             'activation_code' => 'required|string|max:16',
         ]);
 
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         if (! $device || $device->is_revoked) {
             return response()->json(['message' => 'Device revoked.'], 403);
@@ -186,17 +188,5 @@ class SubscriptionController extends Controller
             'is_active' => $tenant->isSubscriptionActive(),
             'server_time' => now()->toIso8601String(),
         ]);
-    }
-
-    private function resolveDevice(Request $request): ?Device
-    {
-        $token = $request->bearerToken();
-        if (! $token) {
-            return null;
-        }
-
-        $tokenId = explode('|', $token)[0] ?? null;
-
-        return Device::where('token_id', $tokenId)->first();
     }
 }

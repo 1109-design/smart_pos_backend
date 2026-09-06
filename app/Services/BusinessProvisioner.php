@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Tenant;
 use App\Models\User;
+use App\Services\Accounting\ChartOfAccountsSeeder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
@@ -67,6 +68,8 @@ class BusinessProvisioner
                 ]);
 
                 $owner->assignRole('business_owner');
+
+                (new ChartOfAccountsSeeder)->seedForBusiness($tenant->id);
             } finally {
                 tenancy()->end();
             }

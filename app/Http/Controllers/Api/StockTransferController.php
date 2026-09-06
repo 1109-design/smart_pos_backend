@@ -3,19 +3,19 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\Device;
 use App\Models\StockTransfer;
+use App\Services\DeviceResolver;
 use App\Services\TransferService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class StockTransferController extends Controller
 {
-    public function __construct(private readonly TransferService $transferService) {}
+    public function __construct(private readonly TransferService $transferService, private readonly DeviceResolver $deviceResolver) {}
 
     public function index(Request $request): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         $query = StockTransfer::with(['fromLocation:id,name', 'toLocation:id,name', 'items'])
             ->where('business_id', $device?->tenant_id)
@@ -37,7 +37,7 @@ class StockTransferController extends Controller
 
     public function show(Request $request, string $id): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         $transfer = StockTransfer::with(['fromLocation', 'toLocation', 'items.product', 'requestedBy', 'approvedBy'])
             ->where('business_id', $device?->tenant_id)
@@ -48,7 +48,7 @@ class StockTransferController extends Controller
 
     public function store(Request $request): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         $data = $request->validate([
             'from_location_id' => 'required|uuid|exists:locations,id',
@@ -108,17 +108,5 @@ class StockTransferController extends Controller
         $transfer = $this->transferService->cancel($id);
 
         return response()->json(['data' => $transfer]);
-    }
-
-    private function resolveDevice(Request $request): ?Device
-    {
-        $token = $request->bearerToken();
-        if (! $token) {
-            return null;
-        }
-
-        $tokenId = explode('|', $token)[0] ?? null;
-
-        return Device::where('token_id', $tokenId)->first();
     }
 }

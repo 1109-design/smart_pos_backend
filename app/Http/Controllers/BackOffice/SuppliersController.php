@@ -2,9 +2,9 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\Supplier;
 use App\Models\SyncRecord;
+use App\Services\Accounting\PartyLedgerService;
 use App\Services\BackOfficeAuthorizer;
 use App\Services\SyncProcessor;
 use App\Support\BackOfficePermission;
@@ -14,7 +14,7 @@ use Illuminate\Support\Str;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class SuppliersController extends Controller
+class SuppliersController extends BackOfficeController
 {
     public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
 
@@ -36,6 +36,24 @@ class SuppliersController extends Controller
         return Inertia::render('BackOffice/Suppliers', [
             'suppliers' => $suppliers,
             'filters' => ['search' => $search->toString()],
+        ]);
+    }
+
+    public function show(string $supplier, PartyLedgerService $ledger): Response
+    {
+        $this->authorizeManager();
+
+        $tenantId = $this->tenantId();
+        $record = Supplier::where('business_id', $tenantId)->findOrFail($supplier);
+
+        return Inertia::render('BackOffice/SupplierShow', [
+            'supplier' => $record,
+            // Creditor ledger (Phase 11c) — derived from the general
+            // ledger, so it can never drift from the Accounts Payable
+            // control account. Empty/zero until purchasing/GRV posting
+            // (Phase 11d) exists to actually create supplier liabilities.
+            'statement' => $ledger->statement($tenantId, 'supplier', $record->id),
+            'aging' => $ledger->agingBuckets($tenantId, 'supplier', $record->id),
         ]);
     }
 
@@ -130,10 +148,5 @@ class SuppliersController extends Controller
             403,
             'Access denied.'
         );
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
     }
 }

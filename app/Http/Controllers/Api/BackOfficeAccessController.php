@@ -3,22 +3,24 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\Device;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Services\DeviceResolver;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 
 class BackOfficeAccessController extends Controller
 {
+    public function __construct(private readonly DeviceResolver $deviceResolver) {}
+
     /**
      * Everything a device needs to show the owner how to reach the BackOffice:
      * the portal URL and the business pairing code.
      */
     public function info(Request $request): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
         $tenant = $device ? Tenant::find($device->tenant_id) : null;
 
         if (! $tenant) {
@@ -44,7 +46,7 @@ class BackOfficeAccessController extends Controller
             'password' => 'required|string|min:8|max:255',
         ]);
 
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
         if (! $device) {
             return response()->json(['message' => 'Device is not paired to a business.'], 403);
         }
@@ -68,17 +70,5 @@ class BackOfficeAccessController extends Controller
         $user->update(['password' => Hash::make($data['password'])]);
 
         return response()->json(['message' => 'Back Office password updated.']);
-    }
-
-    private function resolveDevice(Request $request): ?Device
-    {
-        $token = $request->bearerToken();
-        if (! $token) {
-            return null;
-        }
-
-        $tokenId = explode('|', $token)[0] ?? null;
-
-        return Device::where('token_id', $tokenId)->first();
     }
 }

@@ -32,7 +32,7 @@ class SyncController extends Controller
             'records.*.updated_at' => 'required|date',
         ]);
 
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
         $accepted = [];
         $conflicts = [];
         $errors = [];
@@ -173,7 +173,7 @@ class SyncController extends Controller
             'tables.*' => 'string',
         ]);
 
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
         $tables = $request->input('tables', []);
         $serverTime = now();
 
@@ -225,7 +225,7 @@ class SyncController extends Controller
     /** Returns pending sync counts and cursors for this device */
     public function status(Request $request): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         $query = SyncRecord::query()
             ->where('business_id', $device?->tenant_id);
@@ -260,7 +260,7 @@ class SyncController extends Controller
 
     public function conflicts(Request $request): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
         $status = $request->query('status', 'pending');
         $limit = max(1, min(200, (int) $request->query('limit', 100)));
 
@@ -280,7 +280,7 @@ class SyncController extends Controller
 
     public function resolveConflict(Request $request, int $id, SyncProcessor $processor): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
         $resolvedBy = $request->user()?->id;
         $data = $request->validate([
             'action' => 'required|in:accept_server,retry_local,merged',
@@ -367,11 +367,6 @@ class SyncController extends Controller
             'message' => 'Conflict resolved',
             'conflict' => $conflict->fresh(),
         ]);
-    }
-
-    private function resolveDevice(Request $request): ?Device
-    {
-        return $this->deviceResolver->fromRequest($request);
     }
 
     private function resolveIncomingUpdatedAt(array $record)

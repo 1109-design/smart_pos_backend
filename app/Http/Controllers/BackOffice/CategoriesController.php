@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\Category;
 use App\Models\SyncRecord;
 use App\Services\SyncProcessor;
@@ -10,7 +9,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
-class CategoriesController extends Controller
+class CategoriesController extends BackOfficeController
 {
     public function store(Request $request, SyncProcessor $processor): RedirectResponse
     {
@@ -86,10 +85,5 @@ class CategoriesController extends Controller
             'source_updated_at' => now(),
             'synced_at' => now(),
         ]);
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
     }
 }

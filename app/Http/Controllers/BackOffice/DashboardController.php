@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\Customer;
 use App\Models\Payment;
 use App\Models\Product;
@@ -14,7 +13,7 @@ use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class DashboardController extends Controller
+class DashboardController extends BackOfficeController
 {
     public function __invoke(Request $request, BackOfficeAuthorizer $authorizer): Response
     {
@@ -153,10 +152,5 @@ class DashboardController extends Controller
             'active_shift' => $activeShift,
             'currency' => $currency,
         ]);
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
     }
 }

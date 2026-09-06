@@ -3,9 +3,9 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\Device;
 use App\Models\Location;
 use App\Models\Product;
+use App\Services\DeviceResolver;
 use App\Services\LocationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -13,11 +13,11 @@ use Illuminate\Support\Str;
 
 class LocationController extends Controller
 {
-    public function __construct(private readonly LocationService $locationService) {}
+    public function __construct(private readonly LocationService $locationService, private readonly DeviceResolver $deviceResolver) {}
 
     public function index(Request $request): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
         $businessId = $device?->tenant_id;
 
         $locations = Location::where('business_id', $businessId)
@@ -30,7 +30,7 @@ class LocationController extends Controller
 
     public function store(Request $request): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         $data = $request->validate([
             'name' => 'required|string|max:255',
@@ -54,7 +54,7 @@ class LocationController extends Controller
 
     public function show(Request $request, string $id): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         $location = Location::where('business_id', $device?->tenant_id)
             ->findOrFail($id);
@@ -64,7 +64,7 @@ class LocationController extends Controller
 
     public function update(Request $request, string $id): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         $location = Location::where('business_id', $device?->tenant_id)->findOrFail($id);
 
@@ -90,7 +90,7 @@ class LocationController extends Controller
      */
     public function stock(Request $request, string $id): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         $location = Location::where('business_id', $device?->tenant_id)->findOrFail($id);
 
@@ -113,24 +113,12 @@ class LocationController extends Controller
      */
     public function productStock(Request $request, string $productId): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         $product = Product::where('business_id', $device?->tenant_id)->findOrFail($productId);
 
         $breakdown = $this->locationService->stockByLocation($product->id);
 
         return response()->json(['data' => $breakdown]);
-    }
-
-    private function resolveDevice(Request $request): ?Device
-    {
-        $token = $request->bearerToken();
-        if (! $token) {
-            return null;
-        }
-
-        $tokenId = explode('|', $token)[0] ?? null;
-
-        return Device::where('token_id', $tokenId)->first();
     }
 }

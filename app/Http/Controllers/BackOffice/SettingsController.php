@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\Business;
 use App\Models\User;
 use App\Services\BackOfficeAuthorizer;
@@ -14,7 +13,7 @@ use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class SettingsController extends Controller
+class SettingsController extends BackOfficeController
 {
     public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
 
@@ -39,20 +38,24 @@ class SettingsController extends Controller
             ],
             'workflows' => [
                 'stock_transfer_requires_approval' => $business?->workflowRequiresApproval('stock_transfer_requires_approval') ?? false,
+                'po_approval_threshold' => $business?->poApprovalThreshold(),
             ],
         ]);
     }
 
     /**
      * Opt-in per-business workflow toggles — see Business::workflowRequiresApproval()
-     * and TransferService::dispatch() for the one currently wired up.
+     * and TransferService::dispatch() for the one currently wired up. Each
+     * toggle is posted independently by the frontend (one field per
+     * request), so every key here is optional rather than required.
      */
     public function updateWorkflowSettings(Request $request): RedirectResponse
     {
         $this->authorizeOwner();
 
         $data = $request->validate([
-            'stock_transfer_requires_approval' => ['required', 'boolean'],
+            'stock_transfer_requires_approval' => ['sometimes', 'boolean'],
+            'po_approval_threshold' => ['sometimes', 'nullable', 'numeric', 'min:0'],
         ]);
 
         $business = Business::find($this->tenantId());
@@ -128,10 +131,5 @@ class SettingsController extends Controller
     private function authorizeOwner(): void
     {
         abort_unless($this->authorizer->isBusinessOwner(), 403, 'Only the business owner can do this.');
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
     }
 }

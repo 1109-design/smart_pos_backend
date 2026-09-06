@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Head, router } from '@inertiajs/react';
+import { Head, Link, router } from '@inertiajs/react';
 import BackOfficeLayout from '@/Layouts/BackOfficeLayout';
 import { ColumnTrendChart, LineTrendChart, RankedBarChart, TrendPoint } from '@/Components/Charts';
 
@@ -148,6 +148,26 @@ export default function BackOfficeReports({ summary, daily_breakdown, payment_me
                     />
                     <button onClick={applyFilter} className="btn-primary py-2 flex-shrink-0">Apply</button>
                 </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 mb-8">
+                {[
+                    { label: 'Debtor Age Analysis', href: '/office/reports/debtors' },
+                    { label: 'Creditor Age Analysis', href: '/office/reports/creditors' },
+                    { label: 'Quoted vs In-Stock', href: '/office/reports/quoted-vs-stock' },
+                    { label: 'Sheet Yield', href: '/office/reports/sheet-yield' },
+                    { label: 'Trial Balance', href: '/office/reports/trial-balance' },
+                    { label: 'Income Statement', href: '/office/reports/income-statement' },
+                    { label: 'Balance Sheet', href: '/office/reports/balance-sheet' },
+                ].map(({ label, href }) => (
+                    <Link
+                        key={href}
+                        href={href}
+                        className="text-xs font-semibold text-slate-600 bg-white border border-slate-200 rounded-full px-3.5 py-1.5 hover:border-emerald-300 hover:text-emerald-700 transition-colors"
+                    >
+                        {label}
+                    </Link>
+                ))}
             </div>
 
             {/* Summary cards */}

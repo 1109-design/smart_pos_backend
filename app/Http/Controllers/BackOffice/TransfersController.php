@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\Location;
 use App\Models\Product;
 use App\Models\StockTransfer;
@@ -13,7 +12,7 @@ use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class TransfersController extends Controller
+class TransfersController extends BackOfficeController
 {
     public function __construct(private readonly TransferService $transferService) {}
 
@@ -151,15 +150,5 @@ class TransfersController extends Controller
         $count = Location::where('business_id', $this->tenantId())->whereIn('id', $locationIds)->count();
 
         abort_if($count !== count(array_unique($locationIds)), 404);
-    }
-
-    private function userId(): ?string
-    {
-        return session('backoffice')['user_id'] ?? null;
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
     }
 }

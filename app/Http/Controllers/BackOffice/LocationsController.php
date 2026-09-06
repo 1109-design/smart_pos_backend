@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\Location;
 use App\Models\SyncRecord;
 use App\Services\LocationService;
@@ -14,7 +13,7 @@ use Illuminate\Validation\Rule;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class LocationsController extends Controller
+class LocationsController extends BackOfficeController
 {
     public function index(LocationService $locations): Response
     {
@@ -130,10 +129,5 @@ class LocationsController extends Controller
             'source_updated_at' => now(),
             'synced_at' => now(),
         ]);
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
     }
 }

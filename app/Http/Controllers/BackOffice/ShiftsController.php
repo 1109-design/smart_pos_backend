@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\Location;
 use App\Models\Shift;
 use App\Services\BackOfficeAuthorizer;
@@ -12,7 +11,7 @@ use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class ShiftsController extends Controller
+class ShiftsController extends BackOfficeController
 {
     public function __invoke(Request $request, LocationService $locationService, BackOfficeAuthorizer $authorizer): Response
     {
@@ -131,10 +130,5 @@ class ShiftsController extends Controller
             'currency' => $currency,
             'filters' => ['from' => $from, 'to' => $to, 'status' => $status, 'location' => $locationId],
         ]);
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
     }
 }

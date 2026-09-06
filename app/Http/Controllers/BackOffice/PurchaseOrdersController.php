@@ -2,10 +2,12 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
+use App\Models\Accounting\JournalHeader;
+use App\Models\GoodsReceivedVoucher;
 use App\Models\PoAuditLog;
 use App\Models\PurchaseOrder;
 use App\Models\Supplier;
+use App\Models\SupplierInvoice;
 use App\Models\SyncRecord;
 use App\Services\BackOfficeAuthorizer;
 use App\Services\SyncProcessor;
@@ -16,7 +18,7 @@ use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class PurchaseOrdersController extends Controller
+class PurchaseOrdersController extends BackOfficeController
 {
     public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
 
@@ -59,9 +61,51 @@ class PurchaseOrdersController extends Controller
 
         $audit = PoAuditLog::where('po_id', $order->id)->latest('created_at')->get();
 
+        // Purchasing & Cash Vault Blueprint, part A — GRVs are created
+        // automatically by GrvPostingService whenever a synced receipt
+        // references this PO; nothing here creates one. Each GRV's posted
+        // status shows whether it actually reached the general ledger.
+        $grvs = GoodsReceivedVoucher::where('purchase_order_id', $order->id)
+            ->with('items')
+            ->orderByDesc('received_date')
+            ->get()
+            ->map(function (GoodsReceivedVoucher $grv) {
+                $posted = JournalHeader::where('source_type', 'grv')
+                    ->where('source_id', $grv->id)
+                    ->where('status', 'posted')
+                    ->exists();
+
+                // Part B — has the supplier's actual bill been recorded
+                // against this voucher yet? Drives whether the page shows
+                // an invoice-entry form or the invoice that's already there.
+                $invoice = SupplierInvoice::where('grv_id', $grv->id)->first();
+
+                return [
+                    'id' => $grv->id,
+                    'grv_number' => $grv->grv_number,
+                    'received_date' => $grv->received_date->toDateString(),
+                    'posted_to_ledger' => $posted,
+                    'value' => (float) $grv->items->sum(fn ($i) => (float) $i->quantity_accepted * (float) $i->unit_cost),
+                    'invoice' => $invoice ? [
+                        'invoice_number' => $invoice->invoice_number,
+                        'invoice_date' => $invoice->invoice_date->toDateString(),
+                        'amount' => (float) $invoice->amount,
+                    ] : null,
+                    'items' => $grv->items->map(fn ($item) => [
+                        'product_name' => $item->product_name,
+                        'quantity_received' => (float) $item->quantity_received,
+                        'quantity_accepted' => (float) $item->quantity_accepted,
+                        'quantity_rejected' => (float) $item->quantity_rejected,
+                        'unit_cost' => (float) $item->unit_cost,
+                        'landed_unit_cost' => $item->landed_unit_cost !== null ? (float) $item->landed_unit_cost : null,
+                    ]),
+                ];
+            });
+
         return Inertia::render('BackOffice/PurchaseOrderShow', [
             'order' => $order,
             'audit' => $audit,
+            'grvs' => $grvs,
         ]);
     }
 
@@ -130,15 +174,5 @@ class PurchaseOrdersController extends Controller
             403,
             'Access denied.'
         );
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
-    }
-
-    private function userId(): ?string
-    {
-        return session('backoffice')['user_id'] ?? null;
     }
 }
