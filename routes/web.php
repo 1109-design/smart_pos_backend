@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\ActivationCodeController;
+use App\Http\Controllers\BackOffice\AssetsController as BackOfficeAssets;
 use App\Http\Controllers\BackOffice\BundlesController as BackOfficeBundles;
 use App\Http\Controllers\BackOffice\CategoriesController as BackOfficeCategories;
 use App\Http\Controllers\BackOffice\CustomersController as BackOfficeCustomers;
@@ -164,6 +165,12 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::post('product-requests', [BackOfficeProductRequests::class, 'store'])->name('product-requests.store');
         Route::patch('product-requests/{productRequest}/toggle-status', [BackOfficeProductRequests::class, 'toggleStatus'])->name('product-requests.toggle-status');
         Route::delete('product-requests/{productRequest}', [BackOfficeProductRequests::class, 'destroy'])->name('product-requests.destroy');
+
+        Route::get('assets', [BackOfficeAssets::class, 'index'])->name('assets.index');
+        Route::post('assets', [BackOfficeAssets::class, 'store'])->name('assets.store');
+        Route::put('assets/{asset}', [BackOfficeAssets::class, 'update'])->name('assets.update');
+        Route::post('assets/{asset}/dispose', [BackOfficeAssets::class, 'dispose'])->name('assets.dispose');
+        Route::delete('assets/{asset}', [BackOfficeAssets::class, 'destroy'])->name('assets.destroy');
 
         Route::get('storeman', [BackOfficeStoreman::class, 'index'])->name('storeman.index');
         Route::post('storeman/suggested-transfer', [BackOfficeStoreman::class, 'createSuggestedTransfer'])->name('storeman.suggested-transfer');

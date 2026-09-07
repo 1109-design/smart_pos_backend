@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\Asset;
 use App\Models\Bundle;
 use App\Models\BundleItem;
 use App\Models\Business;
@@ -86,6 +87,7 @@ class SyncProcessor
         'container_deposit_ledger' => ContainerDepositLedger::class,
         'change_owed_ledger' => ChangeOwedLedger::class,
         'product_requests' => ProductRequest::class,
+        'assets' => Asset::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -924,6 +926,33 @@ class SyncProcessor
                 );
                 break;
 
+            case 'assets':
+                Asset::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                        'name' => $payload['name'] ?? '',
+                        'category' => $payload['category'] ?? 'Other',
+                        'asset_tag' => $payload['asset_tag'] ?? null,
+                        'purchase_date' => $payload['purchase_date'] ?? now(),
+                        'purchase_cost' => $payload['purchase_cost'] ?? 0,
+                        'salvage_value' => $payload['salvage_value'] ?? 0,
+                        'depreciation_method' => $payload['depreciation_method'] ?? 'none',
+                        'useful_life_years' => $payload['useful_life_years'] ?? null,
+                        'depreciation_rate_percent' => $payload['depreciation_rate_percent'] ?? null,
+                        'status' => $payload['status'] ?? 'active',
+                        'disposed_at' => $payload['disposed_at'] ?? null,
+                        'disposal_value' => $payload['disposal_value'] ?? null,
+                        'notes' => $payload['notes'] ?? null,
+                        'created_at' => $payload['created_at'] ?? now(),
+                        'updated_at' => $payload['updated_at'] ?? now(),
+                        'deleted_at' => $payload['deleted_at'] ?? null,
+                    ]
+                );
+                break;
+
             case 'stock_takes':
                 $currentStatus = StockTake::where('id', $uuid)->value('status');
                 $incomingStatus = $payload['status'] ?? 'draft';
@@ -1251,6 +1280,7 @@ class SyncProcessor
             'employees' => Employee::class,
             'salary_payments' => SalaryPayment::class,
             'product_requests' => ProductRequest::class,
+            'assets' => Asset::class,
         ];
 
         $softDeleteIsActive = ['locations', 'categories', 'tax_rates', 'products', 'product_variants', 'suppliers', 'coupons'];
