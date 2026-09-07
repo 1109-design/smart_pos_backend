@@ -21,6 +21,7 @@ use App\Models\Payment;
 use App\Models\PoAuditLog;
 use App\Models\Product;
 use App\Models\ProductContainerLink;
+use App\Models\ProductRequest;
 use App\Models\ProductStock;
 use App\Models\ProductTaxRate;
 use App\Models\ProductVariant;
@@ -84,6 +85,7 @@ class SyncProcessor
         'users' => User::class,
         'container_deposit_ledger' => ContainerDepositLedger::class,
         'change_owed_ledger' => ChangeOwedLedger::class,
+        'product_requests' => ProductRequest::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -906,6 +908,22 @@ class SyncProcessor
                 );
                 break;
 
+            case 'product_requests':
+                ProductRequest::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'requested_by_user_id' => $payload['requested_by_user_id'] ?? null,
+                        'product_name' => $payload['product_name'] ?? '',
+                        'note' => $payload['note'] ?? null,
+                        'status' => $payload['status'] ?? 'open',
+                        'created_at' => $payload['created_at'] ?? now(),
+                        'deleted_at' => $payload['deleted_at'] ?? null,
+                    ]
+                );
+                break;
+
             case 'stock_takes':
                 $currentStatus = StockTake::where('id', $uuid)->value('status');
                 $incomingStatus = $payload['status'] ?? 'draft';
@@ -1232,6 +1250,7 @@ class SyncProcessor
             'stock_takes' => StockTake::class,
             'employees' => Employee::class,
             'salary_payments' => SalaryPayment::class,
+            'product_requests' => ProductRequest::class,
         ];
 
         $softDeleteIsActive = ['locations', 'categories', 'tax_rates', 'products', 'product_variants', 'suppliers', 'coupons'];
