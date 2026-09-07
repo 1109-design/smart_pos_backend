@@ -25,6 +25,7 @@ use App\Models\Location;
 use App\Models\LoyaltyTransaction;
 use App\Models\Payment;
 use App\Models\PoAuditLog;
+use App\Models\ProcurementBudget;
 use App\Models\Product;
 use App\Models\ProductContainerLink;
 use App\Models\ProductPriceTier;
@@ -59,10 +60,14 @@ use App\Models\TillCashMovement;
 use App\Models\Transaction;
 use App\Models\TransactionItem;
 use App\Models\TransactionTax;
+use App\Models\UnitOfMeasure;
 use App\Models\User;
 use App\Services\Accounting\GrvPostingService;
+use App\Services\Accounting\OpeningBalanceService;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
+use App\Services\Accounting\SalaryPostingService;
 use App\Services\Accounting\SalePostingService;
+use App\Services\Accounting\StockTakePostingService;
 use App\Services\Zimra\ZimraSalesService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -118,6 +123,8 @@ class SyncProcessor
         'invoices' => Invoice::class,
         'credit_notes' => CreditNote::class,
         'recurring_invoice_schedules' => RecurringInvoiceSchedule::class,
+        'procurement_budgets' => ProcurementBudget::class,
+        'units_of_measure' => UnitOfMeasure::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -345,6 +352,15 @@ class SyncProcessor
                 break;
 
             case 'stock_transfers':
+                $currentTransferStatus = StockTransfer::where('id', $uuid)->value('status');
+                $incomingTransferStatus = $payload['status'] ?? 'pending';
+
+                if (! StockTransfer::isValidTransition($currentTransferStatus, $incomingTransferStatus)) {
+                    throw new \RuntimeException(
+                        "Invalid stock transfer transition: '{$currentTransferStatus}' -> '{$incomingTransferStatus}'"
+                    );
+                }
+
                 StockTransfer::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -352,7 +368,7 @@ class SyncProcessor
                         'transfer_number' => $payload['transfer_number'] ?? '',
                         'from_location_id' => $payload['from_location_id'] ?? null,
                         'to_location_id' => $payload['to_location_id'] ?? null,
-                        'status' => $payload['status'] ?? 'pending',
+                        'status' => $incomingTransferStatus,
                         'notes' => $payload['notes'] ?? null,
                         'requested_by_user_id' => $payload['requested_by_user_id'] ?? null,
                         'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
@@ -453,6 +469,20 @@ class SyncProcessor
                 );
                 break;
 
+            case 'procurement_budgets':
+                ProcurementBudget::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'name' => $payload['name'] ?? '',
+                        'period_start' => $payload['period_start'] ?? null,
+                        'period_end' => $payload['period_end'] ?? null,
+                        'amount' => $payload['amount'] ?? 0,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
             case 'sheet_lots':
                 SheetLot::updateOrCreate(
                     ['id' => $uuid],
@@ -536,6 +566,17 @@ class SyncProcessor
                 );
                 break;
 
+            case 'units_of_measure':
+                UnitOfMeasure::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'name' => $payload['name'] ?? '',
+                        'is_active' => $payload['is_active'] ?? true,
+                    ]
+                );
+                break;
+
             case 'tax_rates':
                 TaxRate::updateOrCreate(
                     ['id' => $uuid],
@@ -552,6 +593,21 @@ class SyncProcessor
                 break;
 
             case 'exchange_rates':
+                // A rate change must be backed by an approved
+                // change_exchange_rate approval_requests row before it can
+                // become active — see hasApprovedRequest() above. The
+                // Flutter client always generates the exchange_rates row's
+                // own uuid as the approval's subject_id (rates_tab_screen.dart,
+                // approval_resolution.dart), so a direct subject_id match is
+                // sufficient here; no approval_request_id payload field
+                // needed. Existing rows are immutable history in practice
+                // (a new rate is always a new uuid), so this only ever
+                // gates first-insert of a given rate id.
+                if (! $trusted && ! ExchangeRate::where('id', $uuid)->exists()
+                    && ! $this->hasApprovedRequest($payload['business_id'] ?? null, 'ExchangeRate', $uuid, ['change_exchange_rate'], $payload)) {
+                    throw new \RuntimeException('exchange_rates: a rate change requires an approved approval request.');
+                }
+
                 ExchangeRate::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -738,6 +794,27 @@ class SyncProcessor
                 $existingTx = Transaction::where('id', $uuid)->first();
                 $txExists = $existingTx !== null;
                 $previousStatus = $existingTx?->status;
+                $incomingStatus = $payload['status'] ?? 'completed';
+
+                // Untrusted (device-pushed) writes that move a sale into a
+                // void/refund status must be backed by an approved
+                // approval_requests row — see hasApprovedRequest() above.
+                // $previousStatus !== $incomingStatus also covers a brand
+                // new transaction born already voided/refunded (an offline
+                // void/refund of a sale that had never synced before),
+                // since $previousStatus is null there.
+                if (! $trusted && $previousStatus !== $incomingStatus) {
+                    $gatedActions = match ($incomingStatus) {
+                        'voided' => ['void_transaction'],
+                        'refunded', 'partial_refund' => ['refund_transaction'],
+                        default => null,
+                    };
+
+                    if ($gatedActions && ! $this->hasApprovedRequest($payload['business_id'] ?? null, 'Transaction', $uuid, $gatedActions, $payload)) {
+                        throw new \RuntimeException("transactions: {$incomingStatus} requires an approved approval request.");
+                    }
+                }
+
                 $txData = [
                     'business_id' => $payload['business_id'] ?? null,
                     'location_id' => $payload['location_id'] ?? null,
@@ -750,7 +827,7 @@ class SyncProcessor
                     'surcharge_total' => $payload['surcharge_total'] ?? 0,
                     'total' => $payload['total'] ?? 0,
                     'base_currency' => $payload['base_currency'] ?? 'USD',
-                    'status' => $payload['status'] ?? 'completed',
+                    'status' => $incomingStatus,
                     'sale_number' => $payload['sale_number'] ?? null,
                     'notes' => $payload['notes'] ?? null,
                     'void_reason' => $payload['void_reason'] ?? null,
@@ -905,7 +982,20 @@ class SyncProcessor
                 // movement that references a real PurchaseOrder (a known
                 // supplier) gets a GRV and a GL posting; walk-in receiving
                 // (reference_id null) is a no-op inside the service itself.
-                app(GrvPostingService::class)->recordReceipt($movement);
+                // quantity_rejected/rejection_reason are payload-only (never
+                // a stock_movements column — a rejected unit never entered
+                // inventory in the first place), reported by the till's
+                // receiving screen alongside the movement.
+                app(GrvPostingService::class)->recordReceipt(
+                    $movement,
+                    (float) ($payload['quantity_rejected'] ?? 0),
+                    $payload['rejection_reason'] ?? null,
+                );
+
+                // A 'stocktake' movement is one variance line from an
+                // approved stock take — post its GL effect the same
+                // tolerant-of-failure way as the GRV posting above.
+                app(StockTakePostingService::class)->recordVariance($movement);
                 break;
 
             case 'loyalty_transactions':
@@ -940,6 +1030,23 @@ class SyncProcessor
                 // Recompute customer credit_balance from the full ledger.
                 if (! empty($payload['customer_id'])) {
                     $this->recomputeCustomerBalances($payload['customer_id']);
+                }
+                // A one-time opening balance also needs to land in the
+                // formal books (if this business has any) — see
+                // OpeningBalanceService's doc comment. The till-side ledger
+                // update above already happened regardless of whether
+                // accounting is switched on.
+                if (($payload['type'] ?? null) === 'opening_balance' && ! empty($payload['customer_id'])) {
+                    $businessId = Customer::where('id', $payload['customer_id'])->value('business_id');
+                    if ($businessId) {
+                        app(OpeningBalanceService::class)->recordCustomerOpeningBalance(
+                            $businessId,
+                            $payload['customer_id'],
+                            (float) ($payload['amount'] ?? 0),
+                            isset($payload['created_at']) ? Carbon::parse($payload['created_at'])->toDateString() : now()->toDateString(),
+                            $payload['reference'] ?? null,
+                        );
+                    }
                 }
                 break;
 
@@ -1006,7 +1113,7 @@ class SyncProcessor
 
             case 'purchase_orders':
                 $existingPo = PurchaseOrder::find($uuid);
-                [$status, $justGated] = $this->gatePurchaseOrderStatus($existingPo, $payload);
+                [$status, $justGated, $gateReason] = $this->gatePurchaseOrderStatus($existingPo, $payload);
 
                 PurchaseOrder::updateOrCreate(
                     ['id' => $uuid],
@@ -1030,7 +1137,7 @@ class SyncProcessor
                 $this->recomputePurchaseOrderTotals($uuid);
 
                 if ($justGated) {
-                    app(PurchaseOrderApprovalGate::class)->requestApproval($uuid);
+                    app(PurchaseOrderApprovalGate::class)->requestApproval($uuid, $gateReason);
                 }
                 break;
 
@@ -1232,7 +1339,18 @@ class SyncProcessor
                 break;
 
             case 'stock_take_items':
-                StockTakeItem::updateOrCreate(
+                $existingItem = StockTakeItem::where('id', $uuid)->first();
+                $incomingCounted = array_key_exists('counted_qty', $payload) && $payload['counted_qty'] !== null
+                    ? (float) $payload['counted_qty']
+                    : null;
+                [$flagged, $recountCompletedAt] = $this->resolveStockTakeRecountState(
+                    $existingItem,
+                    $payload['stock_take_id'] ?? $existingItem?->stock_take_id,
+                    (float) ($payload['system_qty'] ?? $existingItem?->system_qty ?? 0),
+                    $incomingCounted,
+                );
+
+                $stockTakeItem = StockTakeItem::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'stock_take_id' => $payload['stock_take_id'] ?? null,
@@ -1241,8 +1359,40 @@ class SyncProcessor
                         'system_qty' => $payload['system_qty'] ?? 0,
                         'counted_qty' => $payload['counted_qty'] ?? null,
                         'notes' => $payload['notes'] ?? null,
+                        'flagged_for_recount' => $flagged,
+                        'recount_completed_at' => $recountCompletedAt,
                     ]
                 );
+
+                // A device's own push payload never carries
+                // flagged_for_recount/recount_completed_at (they're
+                // server-computed above) — pull() only ever replays a
+                // SyncRecord's ORIGINAL stored payload, never live model
+                // state, so without a fresh authoritative record here no
+                // device (including the one that just pushed this count)
+                // would ever learn it was flagged. Same "echo the real
+                // state back with device_id null" trick
+                // PurchaseOrderApprovalGate uses for the same reason.
+                if (! $trusted) {
+                    SyncRecord::create([
+                        'business_id' => $payload['business_id'] ?? null,
+                        'table_name' => 'stock_take_items',
+                        'record_uuid' => $uuid,
+                        'operation' => 'upsert',
+                        'payload' => [
+                            'stock_take_id' => $stockTakeItem->stock_take_id,
+                            'product_id' => $stockTakeItem->product_id,
+                            'product_name' => $stockTakeItem->product_name,
+                            'system_qty' => (float) $stockTakeItem->system_qty,
+                            'counted_qty' => $stockTakeItem->counted_qty !== null ? (float) $stockTakeItem->counted_qty : null,
+                            'notes' => $stockTakeItem->notes,
+                            'flagged_for_recount' => $stockTakeItem->flagged_for_recount,
+                            'recount_completed_at' => $stockTakeItem->recount_completed_at?->toIso8601String(),
+                        ],
+                        'source_updated_at' => now(),
+                        'synced_at' => now(),
+                    ]);
+                }
                 break;
 
             case 'role_permissions':
@@ -1300,7 +1450,7 @@ class SyncProcessor
                 break;
 
             case 'salary_payments':
-                SalaryPayment::updateOrCreate(
+                $salaryPayment = SalaryPayment::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'business_id' => $payload['business_id'] ?? null,
@@ -1317,6 +1467,8 @@ class SyncProcessor
                         'paid_at' => $payload['paid_at'] ?? now(),
                     ]
                 );
+
+                app(SalaryPostingService::class)->recordPayment($salaryPayment);
                 break;
 
             case 'quotations':
@@ -1662,20 +1814,117 @@ class SyncProcessor
      * @param  array<string, mixed>  $payload
      * @return array{0: string, 1: bool} the status to persist, and whether this call just newly raised the gate
      */
+    /**
+     * @return array{0: string, 1: bool, 2: ?string} [status, justGated, gateReason]
+     */
+    /**
+     * Server-side backstop for actions the spec requires a supervisor to
+     * approve before they take effect: void/refund/exchange-rate-change.
+     * The Flutter approval dialog (`requireApproval()`) already raises an
+     * `approval_requests` row before executing the action locally, but that
+     * row is just another sync record — a modified client (or a raw sync
+     * payload) could otherwise push the resulting mutation directly with no
+     * approval behind it at all, since none of these upserts previously
+     * checked for one server-side.
+     *
+     * Matching is subject_id-first (the common case: the approval's subject
+     * IS the record being upserted, e.g. voiding a transaction or changing
+     * an exchange rate). A caller may instead pass an explicit
+     * `approval_request_id` in $payload for the rare case where the upserted
+     * row is a NEW record distinct from the approval's subject (a refund's
+     * compensating transaction is a fresh uuid; the approval's subject is
+     * the original sale) — that id is verified directly instead.
+     *
+     * @param  array<string, mixed>  $payload
+     * @param  string[]  $actions
+     */
+    private function hasApprovedRequest(?string $businessId, string $subjectType, string $subjectId, array $actions, array $payload): bool
+    {
+        if (empty($businessId)) {
+            return false;
+        }
+
+        $query = ApprovalRequest::where('business_id', $businessId)
+            ->where('status', 'approved')
+            ->whereIn('action', $actions);
+
+        if (! empty($payload['approval_request_id'])) {
+            return (clone $query)->where('id', $payload['approval_request_id'])
+                ->where('subject_type', $subjectType)
+                ->exists();
+        }
+
+        return $query->where('subject_type', $subjectType)
+            ->where('subject_id', $subjectId)
+            ->exists();
+    }
+
+    /**
+     * STC·08 — decides flagged_for_recount/recount_completed_at for one
+     * stock_take_items upsert. See StockTakeItem::needsRecount() for how
+     * this gets enforced at approval time.
+     *
+     * @return array{0: bool, 1: ?Carbon} [flagged, recountCompletedAt]
+     */
+    private function resolveStockTakeRecountState(?StockTakeItem $existing, ?string $stockTakeId, float $systemQty, ?float $incomingCounted): array
+    {
+        // Already satisfied once — never re-litigate on a later edit, even
+        // if that edit happens to drift the variance again.
+        if ($existing?->recount_completed_at !== null) {
+            return [true, $existing->recount_completed_at];
+        }
+
+        // No count in this payload at all — nothing new to evaluate, keep
+        // whatever flag state (if any) already exists.
+        if ($incomingCounted === null) {
+            return [(bool) $existing?->flagged_for_recount, null];
+        }
+
+        $wasFlagged = (bool) $existing?->flagged_for_recount;
+        $countChanged = $existing === null || $existing->counted_qty === null
+            || abs((float) $existing->counted_qty - $incomingCounted) > 0.0001;
+
+        if ($wasFlagged && $countChanged) {
+            // This IS the recount the flag was waiting for — satisfied
+            // regardless of whether the new count is itself still off,
+            // which is then a judgment call for whoever approves the take.
+            return [true, now()];
+        }
+
+        $threshold = $stockTakeId ? $this->stockTakeVarianceThreshold($stockTakeId) : null;
+        if ($threshold === null) {
+            return [$wasFlagged, null];
+        }
+
+        $variancePercent = $systemQty > 0
+            ? abs($incomingCounted - $systemQty) / $systemQty * 100
+            : ($incomingCounted > 0 ? 100.0 : 0.0);
+
+        return [$variancePercent > $threshold, null];
+    }
+
+    private function stockTakeVarianceThreshold(string $stockTakeId): ?float
+    {
+        $businessId = StockTake::where('id', $stockTakeId)->value('business_id');
+
+        return $businessId ? Business::find($businessId)?->stockTakeVarianceThresholdPercent() : null;
+    }
+
     private function gatePurchaseOrderStatus(?PurchaseOrder $existing, array $payload): array
     {
         $incomingStatus = $payload['status'] ?? 'draft';
 
         if ($existing?->status === 'pending_approval') {
-            return ['pending_approval', false];
+            return ['pending_approval', false, null];
         }
 
         $isFirstSubmission = $incomingStatus === 'sent' && ($existing === null || $existing->status === 'draft');
         if (! $isFirstSubmission) {
-            return [$incomingStatus, false];
+            return [$incomingStatus, false, null];
         }
 
-        $threshold = Business::find($payload['business_id'] ?? null)?->poApprovalThreshold();
+        $businessId = $payload['business_id'] ?? null;
+        $threshold = Business::find($businessId)?->poApprovalThreshold();
         $totalOrdered = (float) ($payload['total_ordered'] ?? 0);
 
         // A PO with no creator can never raise a properly-attributed
@@ -1683,11 +1932,26 @@ class SyncProcessor
         // both require a real user) — gating it anyway would strand it at
         // pending_approval with nothing able to resolve it, so it's left
         // ungated instead of risking that dead end.
-        if ($threshold !== null && $totalOrdered > $threshold && ! empty($payload['created_by_user_id'])) {
-            return ['pending_approval', true];
+        $hasCreator = ! empty($payload['created_by_user_id']);
+
+        if ($threshold !== null && $totalOrdered > $threshold && $hasCreator) {
+            return ['pending_approval', true, "total exceeds this business's configured PO threshold"];
         }
 
-        return [$incomingStatus, false];
+        // PUR·02 — a period procurement budget catches what the flat
+        // per-PO threshold above can't: many individually-small POs that
+        // add up past what's been allocated for the period. Checked
+        // against spend excluding this PO (it isn't 'sent' yet at this
+        // point) plus its own total, so the PO that actually tips the
+        // balance is the one that gets held.
+        if ($hasCreator && $businessId) {
+            $budget = ProcurementBudget::activeFor($businessId, now());
+            if ($budget && $budget->spentSoFar() + $totalOrdered > (float) $budget->amount) {
+                return ['pending_approval', true, "would exceed the '{$budget->name}' procurement budget for this period"];
+            }
+        }
+
+        return [$incomingStatus, false, null];
     }
 
     /**
@@ -1715,6 +1979,7 @@ class SyncProcessor
             'businesses' => Business::class,
             'locations' => Location::class,
             'categories' => Category::class,
+            'units_of_measure' => UnitOfMeasure::class,
             'tax_rates' => TaxRate::class,
             'exchange_rates' => ExchangeRate::class,
             'products' => Product::class,
@@ -1742,9 +2007,10 @@ class SyncProcessor
             'recurring_invoice_schedules' => RecurringInvoiceSchedule::class,
             'product_units' => ProductUnit::class,
             'product_price_tiers' => ProductPriceTier::class,
+            'procurement_budgets' => ProcurementBudget::class,
         ];
 
-        $softDeleteIsActive = ['locations', 'categories', 'tax_rates', 'products', 'product_variants', 'suppliers', 'coupons', 'tills'];
+        $softDeleteIsActive = ['locations', 'categories', 'units_of_measure', 'tax_rates', 'products', 'product_variants', 'suppliers', 'coupons', 'tills'];
 
         if (isset($modelMap[$table])) {
             if (in_array($table, $softDeleteIsActive)) {

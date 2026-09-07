@@ -91,6 +91,7 @@ const ALL_NAV = [
     { label: 'Approvals',       href: '/office/approvals',       Icon: IconCog,            roles: ['business_owner', 'manager'] },
     { label: 'Suppliers',       href: '/office/suppliers',       Icon: IconTruck,          roles: ['business_owner', 'manager'] },
     { label: 'Purchase Orders', href: '/office/purchase-orders', Icon: IconBox,            roles: ['business_owner', 'manager'] },
+    { label: 'Procurement Budgets', href: '/office/procurement-budgets', Icon: IconLock,   roles: ['business_owner', 'manager'] },
     { label: 'Stocktakes',      href: '/office/stocktakes',      Icon: IconBox,            roles: ['business_owner', 'manager'] },
     { label: 'Customers',       href: '/office/customers',       Icon: IconUsers,          roles: ['business_owner', 'manager'] },
     { label: 'Locations',       href: '/office/locations',       Icon: IconMapPin,         roles: ['business_owner', 'manager'] },

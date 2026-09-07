@@ -94,8 +94,8 @@ export default function BackOfficeAssets({ assets }: Props) {
                 <div>
                     <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Assets</h1>
                     <p className="text-sm text-slate-500 mt-1">
-                        Fixed assets, straight-line depreciated monthly. Acquiring or disposing of one posts
-                        straight to the general ledger.
+                        Fixed assets, depreciated monthly on a diminishing (reducing) balance. Acquiring or
+                        disposing of one posts straight to the general ledger.
                     </p>
                 </div>
                 <button onClick={() => setShowNew(true)} className="btn-primary py-2">

@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\Business;
 use App\Models\Device;
 use App\Models\Tenant;
 use App\Models\User;
@@ -123,5 +124,54 @@ class SyncStockTakeTransitionTest extends TestCase
             'id' => $stockTakeId,
             'status' => 'rejected',
         ]);
+    }
+
+    public function test_flagged_for_recount_reaches_the_device_via_pull(): void
+    {
+        // STC·08 — a device's own push payload never carries
+        // flagged_for_recount (it's server-computed); pull() only ever
+        // replays a SyncRecord's originally-stored payload, so without a
+        // fresh server-authored echo record the pushing device would never
+        // learn its own item got flagged. This proves that echo actually
+        // reaches pull(), including for the SAME device that pushed.
+        $tenantId = 'tenant-sync-recount-1';
+        $token = $this->actingDeviceToken($tenantId);
+
+        Business::create([
+            'id' => $tenantId, 'name' => $tenantId, 'currency_code' => 'USD',
+            'workflow_settings' => ['stock_take_variance_threshold_percent' => 5],
+        ]);
+        $stockTakeId = (string) Str::uuid();
+        $this->pushStockTake($token, $tenantId, $stockTakeId, 'in_progress')->assertOk();
+
+        $productId = (string) Str::uuid();
+        $itemId = (string) Str::uuid();
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'stock_take_items',
+                    'uuid' => $itemId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'stock_take_id' => $stockTakeId,
+                        'product_id' => $productId,
+                        'product_name' => 'Widget',
+                        'system_qty' => 100,
+                        'counted_qty' => 50, // 50% variance, well above the 5% threshold
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ])->assertOk();
+
+        $this->assertDatabaseHas('stock_take_items', ['id' => $itemId, 'flagged_for_recount' => true]);
+
+        $pull = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->getJson('/api/v1/sync/pull?'.http_build_query(['tables' => ['stock_take_items']]));
+
+        $pull->assertOk();
+        $records = collect($pull->json('records'))->where('record_uuid', $itemId);
+        $this->assertNotEmpty($records, 'the pushing device must still receive the server-computed flag back');
+        $this->assertTrue((bool) $records->last()['payload']['flagged_for_recount']);
     }
 }

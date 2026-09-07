@@ -86,6 +86,14 @@ class StockTakesController extends BackOfficeController
                 throw new \RuntimeException("{$take->title} is not awaiting approval.");
             }
 
+            // STC·08 — a variance-threshold flag blocks approval until that
+            // item has actually been recounted (StockTakeItem::needsRecount()).
+            $pendingRecounts = $take->items->filter(fn ($item) => $item->needsRecount());
+            if ($pendingRecounts->isNotEmpty()) {
+                $names = $pendingRecounts->pluck('product_name')->implode(', ');
+                throw new \RuntimeException("Recount required before approval: {$names}.");
+            }
+
             $trackedProductIds = Product::whereIn('id', $take->items->pluck('product_id'))
                 ->where('track_stock', true)
                 ->pluck('id')

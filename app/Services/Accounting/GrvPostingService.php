@@ -31,7 +31,17 @@ class GrvPostingService
 {
     public function __construct(private readonly JournalService $journals) {}
 
-    public function recordReceipt(StockMovement $movement): void
+    /**
+     * @param  float  $rejectedQty  Units the receiving clerk physically
+     *                              turned away at delivery (damaged, wrong
+     *                              item, etc.) — never part of $movement's
+     *                              own quantity_change, since a rejected
+     *                              unit never enters inventory. Not a column
+     *                              on stock_movements; the till reports it
+     *                              only in the sync payload alongside the
+     *                              movement, purely for this GRV record.
+     */
+    public function recordReceipt(StockMovement $movement, float $rejectedQty = 0.0, ?string $rejectionReason = null): void
     {
         if ($movement->type !== 'receive' || ! $movement->reference_id) {
             return;
@@ -60,7 +70,7 @@ class GrvPostingService
         }
 
         try {
-            DB::transaction(function () use ($movement, $purchaseOrder, $receivedDate) {
+            DB::transaction(function () use ($movement, $purchaseOrder, $receivedDate, $rejectedQty, $rejectionReason) {
                 // Not firstOrCreate() — received_date is a date-cast column
                 // that (like trans_date elsewhere) gets stored with a
                 // spurious time part, so a plain "=" match against a bare
@@ -91,9 +101,10 @@ class GrvPostingService
                     'stock_movement_id' => $movement->id,
                     'product_id' => $movement->product_id,
                     'product_name' => $product?->name ?? 'Unknown product',
-                    'quantity_received' => $qty,
+                    'quantity_received' => $qty + $rejectedQty,
                     'quantity_accepted' => $qty,
-                    'quantity_rejected' => 0,
+                    'quantity_rejected' => $rejectedQty,
+                    'rejection_reason' => $rejectedQty > 0 ? $rejectionReason : null,
                     'unit_cost' => $unitCost,
                 ]);
 

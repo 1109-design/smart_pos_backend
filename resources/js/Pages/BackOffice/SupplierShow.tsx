@@ -40,9 +40,11 @@ interface Props {
     supplier: Supplier;
     statement: Statement;
     aging: Aging;
+    accountingIsLive: boolean;
+    hasOpeningBalance: boolean;
 }
 
-export default function BackOfficeSupplierShow({ supplier, statement, aging }: Props) {
+export default function BackOfficeSupplierShow({ supplier, statement, aging, accountingIsLive, hasOpeningBalance }: Props) {
     return (
         <BackOfficeLayout>
             <Head title={supplier.name} />
@@ -81,6 +83,11 @@ export default function BackOfficeSupplierShow({ supplier, statement, aging }: P
                     </div>
 
                     <RecordPaymentForm supplierId={supplier.id} />
+                    <OpeningBalanceCard
+                        supplierId={supplier.id}
+                        accountingIsLive={accountingIsLive}
+                        hasOpeningBalance={hasOpeningBalance}
+                    />
                 </div>
 
                 <div className="lg:col-span-2">
@@ -152,6 +159,89 @@ function RecordPaymentForm({ supplierId }: { supplierId: string }) {
             </div>
             <button type="submit" disabled={form.processing} className="btn-primary py-2 w-full disabled:opacity-50">
                 {form.processing ? 'Saving…' : 'Record Payment'}
+            </button>
+        </form>
+    );
+}
+
+/**
+ * A one-time entry for what was owed before this supplier's ledger started
+ * — see OpeningBalanceService. Only relevant once accounting is switched on
+ * (same precondition as every other AP posting), and only ever postable
+ * once per supplier.
+ */
+function OpeningBalanceCard({
+    supplierId,
+    accountingIsLive,
+    hasOpeningBalance,
+}: {
+    supplierId: string;
+    accountingIsLive: boolean;
+    hasOpeningBalance: boolean;
+}) {
+    const form = useForm({
+        amount: '',
+        as_of_date: new Date().toISOString().slice(0, 10),
+        notes: '',
+    });
+
+    if (!accountingIsLive) {
+        return (
+            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5 text-sm text-slate-500">
+                <p className="font-semibold text-slate-700 mb-1">Opening balance</p>
+                <p>Switch on accounting (set a go-live date in Settings) before recording an opening balance for this supplier.</p>
+            </div>
+        );
+    }
+
+    if (hasOpeningBalance) {
+        return (
+            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5 text-sm text-slate-500">
+                <p className="font-semibold text-slate-700 mb-1">Opening balance</p>
+                <p>Already recorded — see it in the statement to the right.</p>
+            </div>
+        );
+    }
+
+    const submit = (e: React.FormEvent) => {
+        e.preventDefault();
+        form.post(`/office/suppliers/${supplierId}/opening-balance`, { preserveScroll: true });
+    };
+
+    return (
+        <form onSubmit={submit} className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5 space-y-3">
+            <p className="text-sm font-semibold text-slate-800">Set opening balance</p>
+            <p className="text-xs text-slate-500">What this supplier was already owed before the books started tracking them. One-time only.</p>
+            <div>
+                <label className="text-xs font-semibold text-slate-500">Amount owed</label>
+                <input
+                    type="number" step="0.01" min="0.01" required
+                    value={form.data.amount}
+                    onChange={(e) => form.setData('amount', e.target.value)}
+                    className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+                {form.errors.amount && <p className="text-xs text-red-500 mt-1">{form.errors.amount}</p>}
+            </div>
+            <div>
+                <label className="text-xs font-semibold text-slate-500">As of date</label>
+                <input
+                    type="date" required
+                    value={form.data.as_of_date}
+                    onChange={(e) => form.setData('as_of_date', e.target.value)}
+                    className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+            </div>
+            <div>
+                <label className="text-xs font-semibold text-slate-500">Notes (optional)</label>
+                <input
+                    type="text"
+                    value={form.data.notes}
+                    onChange={(e) => form.setData('notes', e.target.value)}
+                    className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+            </div>
+            <button type="submit" disabled={form.processing} className="btn-primary py-2 w-full disabled:opacity-50">
+                {form.processing ? 'Saving…' : 'Set Opening Balance'}
             </button>
         </form>
     );

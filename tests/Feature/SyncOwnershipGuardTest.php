@@ -103,6 +103,43 @@ class SyncOwnershipGuardTest extends TestCase
         $this->assertDatabaseHas('categories', ['id' => $victimCategoryId, 'is_active' => true]);
     }
 
+    /**
+     * 2026-09-06 offline-first audit follow-up: assertOwnership() only ever
+     * compared the payload's claimed business_id against an *existing* row's
+     * owner — for a brand-new uuid there's nothing in the database yet to
+     * check against, so a device could plant a fabricated record inside any
+     * OTHER business's tenant scope simply by naming that business_id on a
+     * uuid that doesn't exist. Fixed in SyncController::push(): the payload's
+     * business_id is now unconditionally overridden to the authenticated
+     * device's own tenant_id before it ever reaches SyncProcessor, so lying
+     * about it has no effect — the record still lands, just correctly
+     * attributed to the caller's real business.
+     */
+    public function test_push_cannot_plant_a_new_record_under_another_businesss_id(): void
+    {
+        $attackerTenant = 'tenant-guard-planter';
+        $attackerToken = $this->actingDeviceToken($attackerTenant);
+        $newCategoryId = (string) Str::uuid();
+
+        $response = $this->withHeader('Authorization', 'Bearer '.$attackerToken)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'categories',
+                    'uuid' => $newCategoryId,
+                    'operation' => 'upsert',
+                    'payload' => ['business_id' => 'tenant-guard-victim-3', 'name' => 'Planted Category'],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ]);
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'accepted');
+        $response->assertJsonCount(0, 'errors');
+
+        $this->assertDatabaseHas('categories', ['id' => $newCategoryId, 'business_id' => $attackerTenant]);
+        $this->assertDatabaseMissing('categories', ['id' => $newCategoryId, 'business_id' => 'tenant-guard-victim-3']);
+    }
+
     public function test_same_tenant_upsert_and_delete_still_work(): void
     {
         $tenantId = 'tenant-guard-owner';

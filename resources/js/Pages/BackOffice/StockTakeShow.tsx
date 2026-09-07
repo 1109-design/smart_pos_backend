@@ -11,6 +11,8 @@ interface Item {
     system_qty: string;
     counted_qty: string | null;
     notes: string | null;
+    flagged_for_recount: boolean;
+    recount_completed_at: string | null;
 }
 
 interface StockTake {
@@ -41,12 +43,17 @@ function variance(item: Item): number {
     return Number(item.counted_qty ?? item.system_qty) - Number(item.system_qty);
 }
 
+function needsRecount(item: Item): boolean {
+    return item.flagged_for_recount && !item.recount_completed_at;
+}
+
 export default function BackOfficeStockTakeShow({ stock_take }: Props) {
     const [comment, setComment] = useState(stock_take.review_comment ?? '');
     const [pending, setPending] = useState(false);
 
     const canReview = stock_take.status === 'pending_approval';
     const diffCount = stock_take.items.filter((i) => variance(i) !== 0).length;
+    const pendingRecounts = stock_take.items.filter(needsRecount);
 
     const act = (action: 'approve' | 'reject' | 'reopen') => {
         setPending(true);
@@ -86,13 +93,15 @@ export default function BackOfficeStockTakeShow({ stock_take }: Props) {
                                 <th className="table-th text-right">System</th>
                                 <th className="table-th text-right">Counted</th>
                                 <th className="table-th text-right">Variance</th>
+                                <th className="table-th">Recount</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-50">
                             {stock_take.items.map((item) => {
                                 const v = variance(item);
+                                const pending = needsRecount(item);
                                 return (
-                                    <tr key={item.id} className={v !== 0 ? 'bg-amber-50/40' : undefined}>
+                                    <tr key={item.id} className={pending ? 'bg-red-50/60' : v !== 0 ? 'bg-amber-50/40' : undefined}>
                                         <td className="table-td text-slate-700">{item.product_name}</td>
                                         <td className="table-td text-right text-slate-600">{Number(item.system_qty).toFixed(2)}</td>
                                         <td className="table-td text-right text-slate-600">
@@ -101,12 +110,19 @@ export default function BackOfficeStockTakeShow({ stock_take }: Props) {
                                         <td className={`table-td text-right font-semibold ${v > 0 ? 'text-emerald-600' : v < 0 ? 'text-red-500' : 'text-slate-400'}`}>
                                             {v > 0 ? '+' : ''}{v.toFixed(2)}
                                         </td>
+                                        <td className="table-td">
+                                            {pending ? (
+                                                <span className="text-xs font-semibold text-red-600">Recount required</span>
+                                            ) : item.flagged_for_recount ? (
+                                                <span className="text-xs text-slate-400">Recounted</span>
+                                            ) : null}
+                                        </td>
                                     </tr>
                                 );
                             })}
                             {stock_take.items.length === 0 && (
                                 <tr>
-                                    <td colSpan={4} className="table-td text-center text-slate-400 py-10">No items counted yet.</td>
+                                    <td colSpan={5} className="table-td text-center text-slate-400 py-10">No items counted yet.</td>
                                 </tr>
                             )}
                         </tbody>
@@ -121,6 +137,12 @@ export default function BackOfficeStockTakeShow({ stock_take }: Props) {
                         Approving writes a stock adjustment for every item above with a variance, updating every till on
                         its next sync. Rejecting or sending it back changes nothing yet.
                     </p>
+                    {pendingRecounts.length > 0 && (
+                        <p className="text-xs font-semibold text-red-600 bg-red-50 border border-red-100 rounded-xl px-3 py-2 mb-3">
+                            {pendingRecounts.length} item{pendingRecounts.length === 1 ? '' : 's'} still need a recount
+                            before this take can be approved.
+                        </p>
+                    )}
                     <textarea
                         value={comment}
                         onChange={(e) => setComment(e.target.value)}
@@ -129,7 +151,7 @@ export default function BackOfficeStockTakeShow({ stock_take }: Props) {
                         className="w-full text-sm rounded-xl border border-slate-200 px-3 py-2 mb-3 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                     />
                     <div className="flex flex-wrap gap-2">
-                        <button onClick={() => act('approve')} disabled={pending} className="btn-primary py-2 disabled:opacity-50">
+                        <button onClick={() => act('approve')} disabled={pending || pendingRecounts.length > 0} className="btn-primary py-2 disabled:opacity-50">
                             {pending ? 'Working…' : 'Approve & Adjust Stock'}
                         </button>
                         <button

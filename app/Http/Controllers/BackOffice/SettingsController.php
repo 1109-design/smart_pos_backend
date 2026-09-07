@@ -39,6 +39,7 @@ class SettingsController extends BackOfficeController
             'workflows' => [
                 'stock_transfer_requires_approval' => $business?->workflowRequiresApproval('stock_transfer_requires_approval') ?? false,
                 'po_approval_threshold' => $business?->poApprovalThreshold(),
+                'stock_take_variance_threshold_percent' => $business?->stockTakeVarianceThresholdPercent(),
             ],
         ]);
     }
@@ -56,6 +57,7 @@ class SettingsController extends BackOfficeController
         $data = $request->validate([
             'stock_transfer_requires_approval' => ['sometimes', 'boolean'],
             'po_approval_threshold' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'stock_take_variance_threshold_percent' => ['sometimes', 'nullable', 'numeric', 'min:0', 'max:1000'],
         ]);
 
         $business = Business::find($this->tenantId());

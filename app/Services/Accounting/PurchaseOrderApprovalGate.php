@@ -30,13 +30,15 @@ class PurchaseOrderApprovalGate
 {
     public function __construct(private readonly ApprovalService $approvals) {}
 
-    public function requestApproval(string $poId): void
+    public function requestApproval(string $poId, ?string $reason = null): void
     {
         $po = PurchaseOrder::find($poId);
 
         if (! $po || ! $po->created_by_user_id) {
             return;
         }
+
+        $reason ??= "total exceeds this business's configured PO threshold";
 
         $this->approvals->request(
             $po->business_id,
@@ -48,6 +50,7 @@ class PurchaseOrderApprovalGate
                 'po_number' => $po->po_number,
                 'supplier_name' => $po->supplier_name,
                 'total_ordered' => (float) $po->total_ordered,
+                'reason' => $reason,
             ],
         );
 
@@ -60,7 +63,7 @@ class PurchaseOrderApprovalGate
             'user_id' => $po->created_by_user_id,
             'user_name' => 'System',
             'action' => 'pending_approval',
-            'note' => "Held for approval — total exceeds this business's configured PO threshold.",
+            'note' => "Held for approval — {$reason}.",
         ]);
     }
 

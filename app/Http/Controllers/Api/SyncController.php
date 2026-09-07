@@ -102,9 +102,19 @@ class SyncController extends Controller
                             'business_id' => $device?->tenant_id,
                         ], $record['payload'] ?? []);
 
-                        // If the payload explicitly passes null for business_id but the device
-                        // tenant_id is known, prefer the device's value (safety net).
-                        if (empty($enrichedPayload['business_id']) && $device?->tenant_id) {
+                        // A device is authorized for exactly one tenant — it can never have
+                        // a legitimate reason to write into another business_id, whether the
+                        // target record already exists or not. assertOwnership() only
+                        // catches a mismatch against an *existing* row's owner (this is what
+                        // stops a device from hijacking another business's record by
+                        // guessing its uuid); it has no way to know the true owner of a
+                        // brand-new row, since there's nothing in the database yet to check
+                        // against. Without this, a device could plant a fabricated row in
+                        // any OTHER business's tenant scope simply by claiming that
+                        // business_id on a uuid that doesn't exist yet. Forcing the device's
+                        // own tenant_id here — unconditionally, not just when the payload
+                        // omits one — closes that regardless of what the payload claims.
+                        if ($device?->tenant_id) {
                             $enrichedPayload['business_id'] = $device->tenant_id;
                         }
 

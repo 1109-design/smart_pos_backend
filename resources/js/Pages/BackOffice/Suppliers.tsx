@@ -90,7 +90,10 @@ export default function BackOfficeSuppliers({ suppliers, filters }: Props) {
                         Who you buy stock from. Add one here and it's ready to pick from on the till's next Purchase Order.
                     </p>
                 </div>
-                <button onClick={openCreate} className="btn-primary py-2 flex-shrink-0">+ New Supplier</button>
+                <div className="flex items-center gap-3 flex-shrink-0">
+                    <ImportOpeningBalancesButton />
+                    <button onClick={openCreate} className="btn-primary py-2">+ New Supplier</button>
+                </div>
             </div>
 
             {flash?.success && (
@@ -238,5 +241,49 @@ export default function BackOfficeSuppliers({ suppliers, filters }: Props) {
                 </form>
             </Modal>
         </BackOfficeLayout>
+    );
+}
+
+/**
+ * Onboarding path for many suppliers at once: download a template pre-filled
+ * with every active supplier, fill in "opening_balance", re-upload. One CSV
+ * upload = one manager sign-off for the whole batch — see
+ * SupplierOpeningBalancesController::import()'s doc comment.
+ */
+function ImportOpeningBalancesButton() {
+    const [uploading, setUploading] = useState(false);
+
+    const upload = (selected: File) => {
+        setUploading(true);
+        router.post(
+            '/office/suppliers/opening-balances/import',
+            { file: selected },
+            { forceFormData: true, preserveScroll: true, onFinish: () => setUploading(false) }
+        );
+    };
+
+    return (
+        <div className="flex items-center gap-2 text-xs">
+            <a
+                href="/office/suppliers/opening-balances/template"
+                className="font-semibold text-emerald-700 hover:text-emerald-900 whitespace-nowrap"
+            >
+                Download opening-balance template
+            </a>
+            <label className="font-semibold text-slate-500 hover:text-slate-700 cursor-pointer whitespace-nowrap">
+                {uploading ? 'Uploading…' : 'Import CSV'}
+                <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    className="hidden"
+                    disabled={uploading}
+                    onChange={(e) => {
+                        const selected = e.target.files?.[0];
+                        if (selected) upload(selected);
+                        e.target.value = '';
+                    }}
+                />
+            </label>
+        </div>
     );
 }

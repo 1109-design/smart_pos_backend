@@ -112,6 +112,29 @@ class GrvPostingServiceTest extends TestCase
         $this->assertSame(50.0, $this->account('2010')->balance());
     }
 
+    public function test_a_receipt_with_rejected_units_records_the_discrepancy_without_affecting_inventory(): void
+    {
+        $po = $this->makeSupplierAndPo();
+        // $movement's own quantity_change (10) is what actually entered
+        // inventory — the till reports 3 additional damaged units turned
+        // away at the door, which never touch stock or the GL, only the
+        // GRV's own discrepancy record.
+        $movement = $this->makeReceiveMovement($po->id, qty: 10, unitCost: 5);
+
+        $this->grvPosting->recordReceipt($movement, 3.0, 'Damaged in transit');
+
+        $grv = GoodsReceivedVoucher::where('purchase_order_id', $po->id)->first();
+        $item = GrvItem::where('grv_id', $grv->id)->first();
+        $this->assertSame('13.0000', $item->quantity_received);
+        $this->assertSame('10.0000', $item->quantity_accepted);
+        $this->assertSame('3.0000', $item->quantity_rejected);
+        $this->assertSame('Damaged in transit', $item->rejection_reason);
+
+        // Only the accepted 10 units (the movement's own quantity_change)
+        // were ever posted to inventory — rejected units never entered it.
+        $this->assertSame(50.0, $this->account('1200')->balance());
+    }
+
     public function test_a_walk_in_receipt_with_no_reference_id_is_never_posted(): void
     {
         $movement = $this->makeReceiveMovement(null, qty: 10, unitCost: 5);

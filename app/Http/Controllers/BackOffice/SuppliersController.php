@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers\BackOffice;
 
+use App\Models\Accounting\JournalHeader;
+use App\Models\Business;
 use App\Models\Supplier;
 use App\Models\SyncRecord;
 use App\Services\Accounting\PartyLedgerService;
@@ -45,6 +47,7 @@ class SuppliersController extends BackOfficeController
 
         $tenantId = $this->tenantId();
         $record = Supplier::where('business_id', $tenantId)->findOrFail($supplier);
+        $business = Business::find($tenantId);
 
         return Inertia::render('BackOffice/SupplierShow', [
             'supplier' => $record,
@@ -54,6 +57,12 @@ class SuppliersController extends BackOfficeController
             // (Phase 11d) exists to actually create supplier liabilities.
             'statement' => $ledger->statement($tenantId, 'supplier', $record->id),
             'aging' => $ledger->agingBuckets($tenantId, 'supplier', $record->id),
+            'accountingIsLive' => (bool) $business?->accountingIsLive(),
+            'hasOpeningBalance' => JournalHeader::where('business_id', $tenantId)
+                ->where('source_type', 'opening_balance_supplier')
+                ->where('source_id', $record->id)
+                ->where('status', '!=', 'reversed')
+                ->exists(),
         ]);
     }
 

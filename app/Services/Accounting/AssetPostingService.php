@@ -11,8 +11,8 @@ use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 /**
- * Phase 9 / Phase 11d — asset acquisition, straight-line depreciation, and
- * disposal, all posted through the same JournalService every other module
+ * Phase 9 / Phase 11d — asset acquisition, diminishing-balance depreciation,
+ * and disposal, all posted through the same JournalService every other module
  * uses. Tolerant of failure like SalePostingService: a posting problem here
  * (a closed period, a missing account) is logged and skipped rather than
  * thrown, since it must never block the BackOffice action that triggered
@@ -208,8 +208,21 @@ class AssetPostingService
         $posted = 0;
 
         for ($i = 0; $i < $missing; $i++) {
-            $periodEnd = $asset->acquisition_date->copy()->addMonthsNoOverflow($alreadyPosted + $i + 1)->endOfMonth();
+            $periodNumber = $alreadyPosted + $i + 1;
+            $periodEnd = $asset->acquisition_date->copy()->addMonthsNoOverflow($periodNumber)->endOfMonth();
             $transDate = $periodEnd->gt($cappedAsOf) ? $cappedAsOf->toDateString() : $periodEnd->toDateString();
+
+            // Pure diminishing balance never quite reaches salvage value in
+            // a finite number of periods (each charge is a fraction of
+            // whatever remains). Writing off the entire remaining
+            // depreciable amount in the asset's LAST useful-life period —
+            // rather than another rate-based fraction of it — guarantees
+            // the asset is fully depreciated by the end of its useful life,
+            // same guarantee straight-line gave for free.
+            $isFinalPeriod = $periodNumber >= $asset->useful_life_months;
+            $amount = $isFinalPeriod
+                ? round(max(0, $asset->bookValue($asset->business_id) - (float) $asset->salvage_value), 4)
+                : $asset->monthlyDepreciation($asset->business_id);
 
             try {
                 $header = $this->journals->createDraft(
@@ -222,11 +235,11 @@ class AssetPostingService
 
                 $this->journals->addLine($header, [
                     'gl_account_id' => $this->account($asset->business_id, self::DEPRECIATION_EXPENSE)->id,
-                    'debit' => $asset->monthlyDepreciation(),
+                    'debit' => $amount,
                 ]);
                 $this->journals->addLine($header, [
                     'gl_account_id' => $this->account($asset->business_id, self::ACCUMULATED_DEPRECIATION)->id,
-                    'credit' => $asset->monthlyDepreciation(),
+                    'credit' => $amount,
                     'party_type' => 'asset',
                     'party_id' => $asset->id,
                 ]);

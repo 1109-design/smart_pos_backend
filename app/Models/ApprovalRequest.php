@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Events\ApprovalRequestChanged;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -15,6 +16,27 @@ class ApprovalRequest extends Model
         'requested_by_user_id', 'status', 'approver_user_id', 'approved_at',
         'reason', 'payload_json',
     ];
+
+    protected static function booted(): void
+    {
+        $dispatch = function (ApprovalRequest $request): void {
+            if (! $request->business_id) {
+                return;
+            }
+
+            ApprovalRequestChanged::dispatch($request->business_id, $request->id);
+        };
+
+        static::created($dispatch);
+
+        static::updated(function (ApprovalRequest $request) use ($dispatch): void {
+            if (! $request->wasChanged('status')) {
+                return;
+            }
+
+            $dispatch($request);
+        });
+    }
 
     protected function casts(): array
     {

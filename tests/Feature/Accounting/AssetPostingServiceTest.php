@@ -108,9 +108,11 @@ class AssetPostingServiceTest extends TestCase
         $posted = $this->postings->postMonthlyDepreciation($this->businessId);
 
         $this->assertSame(5, $posted);
-        // 12000 / 24 = 500/month, 5 months elapsed
-        $this->assertSame(2500.0, $asset->accumulatedDepreciation($this->businessId));
-        $this->assertSame(9500.0, $asset->bookValue($this->businessId));
+        // Diminishing balance at the 200%-declining default rate (2/24 per
+        // month) applied to the shrinking book value each month, not a flat
+        // 500/month: 1000, 916.6667, 840.2778, 770.2546, 706.0667.
+        $this->assertSame(4233.2658, $asset->accumulatedDepreciation($this->businessId));
+        $this->assertSame(7766.7342, $asset->bookValue($this->businessId));
     }
 
     public function test_monthly_depreciation_never_exceeds_the_useful_life(): void
@@ -159,7 +161,7 @@ class AssetPostingServiceTest extends TestCase
         $asset = $this->makeAsset(['acquisition_date' => Carbon::now()->subMonths(5)->toDateString()]);
         $this->postings->recordAcquisition($asset);
         $this->postings->postMonthlyDepreciation($this->businessId);
-        // book value = 12000 - 2500 = 9500
+        // book value = 12000 - 4233.2658 = 7766.7342 (diminishing balance, see the catch-up test)
 
         $this->postings->recordDisposal($asset, now()->toDateString(), 10500.0);
 
@@ -167,7 +169,7 @@ class AssetPostingServiceTest extends TestCase
         $this->assertSame(0.0, $asset->accumulatedDepreciation($this->businessId));
         $variance = GlAccount::where('business_id', $this->businessId)->where('code', '6075')->first();
         $this->assertNotNull($variance);
-        $this->assertSame(-1000.0, $variance->balance()); // credit-side gain shows as negative on a debit-normal account
+        $this->assertSame(-2733.2658, $variance->balance()); // credit-side gain shows as negative on a debit-normal account
     }
 
     public function test_disposal_at_a_loss_debits_the_variance_account(): void
@@ -176,12 +178,12 @@ class AssetPostingServiceTest extends TestCase
         $asset = $this->makeAsset(['acquisition_date' => Carbon::now()->subMonths(5)->toDateString()]);
         $this->postings->recordAcquisition($asset);
         $this->postings->postMonthlyDepreciation($this->businessId);
-        // book value = 9500
+        // book value = 7766.7342 (diminishing balance, see the catch-up test)
 
         $this->postings->recordDisposal($asset, now()->toDateString(), 4000.0);
 
         $variance = GlAccount::where('business_id', $this->businessId)->where('code', '6075')->first();
-        $this->assertSame(5500.0, $variance->balance());
+        $this->assertSame(3766.7342, $variance->balance());
     }
 
     public function test_disposal_with_no_accumulated_depreciation_and_proceeds_equal_to_cost_balances_cleanly(): void

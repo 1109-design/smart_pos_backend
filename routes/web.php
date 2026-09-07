@@ -12,6 +12,7 @@ use App\Http\Controllers\BackOffice\DashboardController as BackOfficeDashboard;
 use App\Http\Controllers\BackOffice\FinancialStatementsController as BackOfficeFinancialStatements;
 use App\Http\Controllers\BackOffice\JournalEntriesController as BackOfficeJournalEntries;
 use App\Http\Controllers\BackOffice\LocationsController as BackOfficeLocations;
+use App\Http\Controllers\BackOffice\ProcurementBudgetsController as BackOfficeProcurementBudgets;
 use App\Http\Controllers\BackOffice\ProductsController as BackOfficeProducts;
 use App\Http\Controllers\BackOffice\ProjectsController as BackOfficeProjects;
 use App\Http\Controllers\BackOffice\PurchaseOrdersController as BackOfficePurchaseOrders;
@@ -26,6 +27,7 @@ use App\Http\Controllers\BackOffice\ShiftsController as BackOfficeShifts;
 use App\Http\Controllers\BackOffice\StockTakesController as BackOfficeStockTakes;
 use App\Http\Controllers\BackOffice\StoremanController as BackOfficeStoreman;
 use App\Http\Controllers\BackOffice\SupplierInvoicesController as BackOfficeSupplierInvoices;
+use App\Http\Controllers\BackOffice\SupplierOpeningBalancesController as BackOfficeSupplierOpeningBalances;
 use App\Http\Controllers\BackOffice\SupplierPaymentsController as BackOfficeSupplierPayments;
 use App\Http\Controllers\BackOffice\SuppliersController as BackOfficeSuppliers;
 use App\Http\Controllers\BackOffice\TillsController as BackOfficeTills;
@@ -194,8 +196,11 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::post('settings/workflows', [BackOfficeSettings::class, 'updateWorkflowSettings'])->name('settings.workflows');
 
         Route::get('suppliers', [BackOfficeSuppliers::class, 'index'])->name('suppliers.index');
+        Route::get('suppliers/opening-balances/template', [BackOfficeSupplierOpeningBalances::class, 'template'])->name('suppliers.opening-balances.template');
+        Route::post('suppliers/opening-balances/import', [BackOfficeSupplierOpeningBalances::class, 'import'])->name('suppliers.opening-balances.import');
         Route::get('suppliers/{supplier}', [BackOfficeSuppliers::class, 'show'])->name('suppliers.show');
         Route::post('suppliers/{supplier}/payments', [BackOfficeSupplierPayments::class, 'store'])->name('suppliers.payments.store');
+        Route::post('suppliers/{supplier}/opening-balance', [BackOfficeSupplierOpeningBalances::class, 'store'])->name('suppliers.opening-balance.store');
         Route::post('suppliers', [BackOfficeSuppliers::class, 'store'])->name('suppliers.store');
         Route::put('suppliers/{supplier}', [BackOfficeSuppliers::class, 'update'])->name('suppliers.update');
         Route::patch('suppliers/{supplier}/toggle-active', [BackOfficeSuppliers::class, 'toggleActive'])->name('suppliers.toggle-active');
@@ -203,6 +208,9 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::get('purchase-orders', [BackOfficePurchaseOrders::class, 'index'])->name('purchase-orders.index');
         Route::get('purchase-orders/{purchaseOrder}', [BackOfficePurchaseOrders::class, 'show'])->name('purchase-orders.show');
         Route::post('purchase-orders/{purchaseOrder}/cancel', [BackOfficePurchaseOrders::class, 'cancel'])->name('purchase-orders.cancel');
+        Route::get('procurement-budgets', [BackOfficeProcurementBudgets::class, 'index'])->name('procurement-budgets.index');
+        Route::post('procurement-budgets', [BackOfficeProcurementBudgets::class, 'store'])->name('procurement-budgets.store');
+        Route::delete('procurement-budgets/{budget}', [BackOfficeProcurementBudgets::class, 'destroy'])->name('procurement-budgets.destroy');
         Route::post('grvs/{grv}/invoice', [BackOfficeSupplierInvoices::class, 'store'])->name('grvs.invoice.store');
 
         Route::get('stocktakes', [BackOfficeStockTakes::class, 'index'])->name('stocktakes.index');

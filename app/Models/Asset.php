@@ -44,13 +44,43 @@ class Asset extends Model
         return max(0, (float) $this->acquisition_cost - (float) $this->salvage_value);
     }
 
-    public function monthlyDepreciation(): float
+    /**
+     * Diminishing (reducing) balance rate, applied to the asset's current
+     * net book value each period rather than a fixed straight-line amount.
+     * No per-business/per-asset rate is configurable yet, so this uses the
+     * conventional "200% declining balance" rate — double the equivalent
+     * straight-line rate implied by useful_life_months — which is the
+     * standard default reducing-balance software uses absent an explicit
+     * rate. Capped at 100% so a 1—2 month useful life can't produce a
+     * rate above 1.
+     */
+    public function monthlyDepreciationRate(): float
     {
         if ($this->useful_life_months <= 0) {
             return 0.0;
         }
 
-        return round($this->depreciableBase() / $this->useful_life_months, 4);
+        return min(1.0, 2 / $this->useful_life_months);
+    }
+
+    /**
+     * @param  string  $businessId  needed to read the asset's current net
+     *                              book value from the ledger — diminishing
+     *                              balance charges a rate against whatever
+     *                              is left, not a fixed dollar amount, so
+     *                              (unlike the old straight-line formula)
+     *                              this can no longer be computed from the
+     *                              asset's own columns alone.
+     */
+    public function monthlyDepreciation(string $businessId): float
+    {
+        if ($this->useful_life_months <= 0) {
+            return 0.0;
+        }
+
+        $remaining = max(0, $this->bookValue($businessId) - (float) $this->salvage_value);
+
+        return round($remaining * $this->monthlyDepreciationRate(), 4);
     }
 
     /**

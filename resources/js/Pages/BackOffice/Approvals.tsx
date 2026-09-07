@@ -11,6 +11,7 @@ interface ApprovalRow {
     subject_id: string;
     action: string;
     reason: string | null;
+    payload_json: { reason?: string; po_number?: string; supplier_name?: string } | null;
     status: ApprovalStatus;
     requested_by: { id: string; name: string } | null;
     approver: { id: string; name: string } | null;
@@ -98,6 +99,12 @@ export default function BackOfficeApprovals({ requests, filters }: Props) {
                                 <tr key={r.id} className="hover:bg-slate-50/60">
                                     <td className="table-td font-medium text-slate-900">
                                         {ACTION_LABELS[r.action] ?? r.action}
+                                        {r.action === 'approve_purchase_order' && r.payload_json?.po_number && (
+                                            <div className="text-xs font-normal text-slate-500">
+                                                {r.payload_json.po_number} — {r.payload_json.supplier_name}
+                                                {r.payload_json.reason && <> ({r.payload_json.reason})</>}
+                                            </div>
+                                        )}
                                     </td>
                                     <td className="table-td text-slate-600">{r.requested_by?.name ?? '—'}</td>
                                     <td className="table-td text-slate-600 whitespace-nowrap">{new Date(r.created_at).toLocaleString()}</td>

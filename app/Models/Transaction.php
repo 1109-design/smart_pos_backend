@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Events\TransactionRecorded;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -17,6 +18,25 @@ class Transaction extends Model
         'base_currency', 'status', 'sale_number', 'notes', 'void_reason',
         'fiscal_status', 'fiscal_receipt_number', 'fiscal_qr_code',
     ];
+
+    protected static function booted(): void
+    {
+        static::created(function (Transaction $transaction): void {
+            if (! $transaction->business_id) {
+                return;
+            }
+
+            TransactionRecorded::dispatch($transaction->business_id, $transaction->location_id, $transaction->id);
+        });
+
+        static::updated(function (Transaction $transaction): void {
+            if (! $transaction->wasChanged('status') || ! $transaction->business_id) {
+                return;
+            }
+
+            TransactionRecorded::dispatch($transaction->business_id, $transaction->location_id, $transaction->id);
+        });
+    }
 
     protected function casts(): array
     {

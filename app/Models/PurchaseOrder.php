@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Events\PurchaseOrderChanged;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -16,6 +17,25 @@ class PurchaseOrder extends Model
         'po_number', 'status', 'total_ordered', 'total_received', 'notes',
         'expected_date', 'additional_costs_json', 'created_by_user_id',
     ];
+
+    protected static function booted(): void
+    {
+        static::created(function (PurchaseOrder $po): void {
+            if (! $po->business_id) {
+                return;
+            }
+
+            PurchaseOrderChanged::dispatch($po->business_id, $po->receiving_location_id, $po->id);
+        });
+
+        static::updated(function (PurchaseOrder $po): void {
+            if (! $po->wasChanged(['status', 'total_received']) || ! $po->business_id) {
+                return;
+            }
+
+            PurchaseOrderChanged::dispatch($po->business_id, $po->receiving_location_id, $po->id);
+        });
+    }
 
     protected function casts(): array
     {

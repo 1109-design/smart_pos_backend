@@ -9,6 +9,12 @@ interface Summary {
     total_discounts: number;
     total_tax: number;
     net_sales: number;
+    total_cost: number;
+    gross_profit: number;
+    voids_total: number;
+    voids_count: number;
+    returns_total: number;
+    returns_count: number;
 }
 
 interface DailyRow {
@@ -38,11 +44,20 @@ interface CashierRow {
     revenue: number;
 }
 
+interface FastMoverRow {
+    name: string;
+    sku: string | null;
+    units_sold: number;
+    revenue: number;
+    velocity: number;
+}
+
 interface Props {
     summary: Summary;
     daily_breakdown: DailyRow[];
     payment_methods: PaymentMethod[];
     top_products: ProductRow[];
+    fast_movers: FastMoverRow[];
     by_cashier: CashierRow[];
     currency: string;
     filters: { from: string; to: string };
@@ -105,7 +120,7 @@ function toTrendPoints(rows: DailyRow[], granularity: Granularity): TrendPoint[]
         }));
 }
 
-export default function BackOfficeReports({ summary, daily_breakdown, payment_methods, top_products, by_cashier, currency, filters }: Props) {
+export default function BackOfficeReports({ summary, daily_breakdown, payment_methods, top_products, fast_movers, by_cashier, currency, filters }: Props) {
     const [from, setFrom] = useState(filters.from);
     const [to, setTo] = useState(filters.to);
     const [chartType, setChartType] = useState<'columns' | 'line'>('columns');
@@ -178,6 +193,8 @@ export default function BackOfficeReports({ summary, daily_breakdown, payment_me
                     { label: 'Total Discounts',  value: fmt(Number(summary.total_discounts), currency) },
                     { label: 'Tax Collected',    value: fmt(Number(summary.total_tax), currency)      },
                     { label: 'Avg Order Value',  value: fmt(avgOrder, currency)                        },
+                    { label: 'Cost of Sales',    value: fmt(Number(summary.total_cost), currency)      },
+                    { label: 'Gross Profit',     value: fmt(Number(summary.gross_profit), currency)    },
                 ].map(({ label, value }) => (
                     <div key={label} className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4">
                         <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{label}</p>
@@ -185,9 +202,19 @@ export default function BackOfficeReports({ summary, daily_breakdown, payment_me
                     </div>
                 ))}
             </div>
-            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm px-5 py-3 mb-8 inline-flex items-center gap-2">
-                <span className="text-2xl font-bold text-slate-900">{summary.total_transactions}</span>
-                <span className="text-sm text-slate-500">total transactions</span>
+            <div className="flex flex-wrap gap-4 mb-8">
+                <div className="bg-white rounded-2xl border border-slate-100 shadow-sm px-5 py-3 inline-flex items-center gap-2">
+                    <span className="text-2xl font-bold text-slate-900">{summary.total_transactions}</span>
+                    <span className="text-sm text-slate-500">total transactions</span>
+                </div>
+                <div className="bg-white rounded-2xl border border-slate-100 shadow-sm px-5 py-3 inline-flex items-center gap-2">
+                    <span className="text-2xl font-bold text-rose-600">{fmt(Number(summary.voids_total), currency)}</span>
+                    <span className="text-sm text-slate-500">voided ({summary.voids_count})</span>
+                </div>
+                <div className="bg-white rounded-2xl border border-slate-100 shadow-sm px-5 py-3 inline-flex items-center gap-2">
+                    <span className="text-2xl font-bold text-amber-600">{fmt(Number(summary.returns_total), currency)}</span>
+                    <span className="text-sm text-slate-500">refunded ({summary.returns_count})</span>
+                </div>
             </div>
 
             {/* Revenue trend */}
@@ -428,6 +455,65 @@ export default function BackOfficeReports({ summary, daily_breakdown, payment_me
                                 </tr>
                             ))}
                             {top_products.length === 0 && (
+                                <tr>
+                                    <td colSpan={6} className="px-6 py-8 text-center text-sm text-slate-400">No product sales in this period.</td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            {/* Fast movers table — ranked by units/day, not revenue */}
+            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden mt-6">
+                <div className="px-6 py-4 border-b border-slate-100">
+                    <p className="text-sm font-semibold text-slate-700">Fast Movers</p>
+                    <p className="text-xs text-slate-400 mt-0.5">Ranked by units sold per day over the selected period, not revenue.</p>
+                </div>
+                {/* Mobile: card list */}
+                <div className="md:hidden divide-y divide-slate-50">
+                    {fast_movers.map((p, i) => (
+                        <div key={p.name} className="px-4 py-3 flex items-center gap-3">
+                            <span className="w-5 text-xs font-mono text-slate-300 text-right flex-shrink-0">{i + 1}</span>
+                            <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium text-slate-800 truncate">{p.name}</p>
+                                <p className="text-xs text-slate-400">
+                                    {p.sku ?? 'No SKU'} · {p.units_sold} sold · {fmt(Number(p.revenue), currency)}
+                                </p>
+                            </div>
+                            <span className="text-sm font-semibold text-slate-900 flex-shrink-0">{p.velocity.toFixed(2)}/day</span>
+                        </div>
+                    ))}
+                    {fast_movers.length === 0 && (
+                        <p className="px-4 py-8 text-center text-sm text-slate-400">No product sales in this period.</p>
+                    )}
+                </div>
+
+                {/* Desktop: table */}
+                <div className="hidden md:block overflow-x-auto">
+                    <table className="w-full text-sm min-w-[480px]">
+                        <thead>
+                            <tr className="bg-slate-50">
+                                <th className="table-th">#</th>
+                                <th className="table-th">Product</th>
+                                <th className="table-th">SKU</th>
+                                <th className="table-th text-right">Units Sold</th>
+                                <th className="table-th text-right">Revenue</th>
+                                <th className="table-th text-right">Units/Day</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-50">
+                            {fast_movers.map((p, i) => (
+                                <tr key={p.name} className="hover:bg-slate-50/60">
+                                    <td className="table-td text-slate-400 font-mono text-xs">{i + 1}</td>
+                                    <td className="table-td font-medium text-slate-800">{p.name}</td>
+                                    <td className="table-td text-slate-400 font-mono text-xs">{p.sku ?? '—'}</td>
+                                    <td className="table-td text-right text-slate-700">{p.units_sold}</td>
+                                    <td className="table-td text-right text-slate-500">{fmt(Number(p.revenue), currency)}</td>
+                                    <td className="table-td text-right font-semibold text-slate-900">{p.velocity.toFixed(2)}/day</td>
+                                </tr>
+                            ))}
+                            {fast_movers.length === 0 && (
                                 <tr>
                                     <td colSpan={6} className="px-6 py-8 text-center text-sm text-slate-400">No product sales in this period.</td>
                                 </tr>

@@ -4,6 +4,7 @@ namespace Tests\Feature\Accounting;
 
 use App\Models\Accounting\GlAccount;
 use App\Models\Accounting\JournalHeader;
+use App\Models\ApprovalRequest;
 use App\Models\Business;
 use App\Models\Device;
 use App\Models\Tenant;
@@ -155,6 +156,19 @@ class SyncTriggersSalePostingTest extends TestCase
 
         $cash = GlAccount::where('business_id', $tenantId)->where('code', '1000')->first();
         $this->assertSame(40.0, $cash->balance());
+
+        // A void must be backed by an approved approval_requests row before
+        // the server will accept it — see SyncProcessor::hasApprovedRequest().
+        ApprovalRequest::create([
+            'business_id' => $tenantId,
+            'subject_type' => 'Transaction',
+            'subject_id' => $txId,
+            'action' => 'void_transaction',
+            'requested_by_user_id' => $userId,
+            'status' => 'approved',
+            'approver_user_id' => $userId,
+            'approved_at' => now(),
+        ]);
 
         // The till voids the sale and re-syncs the full transaction snapshot.
         $push(['table' => 'transactions', 'uuid' => $txId, 'operation' => 'upsert', 'payload' => $base + ['status' => 'voided'], 'updated_at' => now()->toIso8601String()]);

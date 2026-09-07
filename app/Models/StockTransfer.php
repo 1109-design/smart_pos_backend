@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Events\StockTransferChanged;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -17,12 +18,38 @@ class StockTransfer extends Model
         'approved_at', 'dispatched_at', 'received_at',
     ];
 
+    protected static function booted(): void
+    {
+        $dispatch = function (StockTransfer $transfer): void {
+            if (! $transfer->business_id || ! $transfer->from_location_id || ! $transfer->to_location_id) {
+                return;
+            }
+
+            StockTransferChanged::dispatch(
+                $transfer->business_id,
+                $transfer->from_location_id,
+                $transfer->to_location_id,
+                $transfer->id,
+            );
+        };
+
+        static::created($dispatch);
+
+        static::updated(function (StockTransfer $transfer) use ($dispatch): void {
+            if (! $transfer->wasChanged('status')) {
+                return;
+            }
+
+            $dispatch($transfer);
+        });
+    }
+
     protected function casts(): array
     {
         return [
-            'approved_at'   => 'datetime',
+            'approved_at' => 'datetime',
             'dispatched_at' => 'datetime',
-            'received_at'   => 'datetime',
+            'received_at' => 'datetime',
         ];
     }
 
@@ -59,5 +86,43 @@ class StockTransfer extends Model
     public function isInTransit(): bool
     {
         return $this->status === 'in_transit';
+    }
+
+    /**
+     * Statuses that end a transfer's lifecycle. Once reached, no further
+     * transition is accepted — a stale/replayed sync push (e.g. two devices
+     * racing to dispatch and cancel the same transfer offline) must not
+     * resurrect or override a finished transfer. Mirrors
+     * StockTake::TERMINAL_STATUSES/ALLOWED_TRANSITIONS exactly, applied to
+     * this model's own lifecycle (see TransferService for the source of
+     * truth these transitions are drawn from).
+     */
+    public const TERMINAL_STATUSES = ['received', 'cancelled'];
+
+    /**
+     * @var array<string, array<int, string>>
+     */
+    public const ALLOWED_TRANSITIONS = [
+        'pending' => ['approved', 'in_transit', 'cancelled'],
+        'approved' => ['in_transit', 'cancelled'],
+        'in_transit' => ['received'],
+    ];
+
+    /**
+     * Whether moving from $from to $to is a legal transfer transition.
+     * Creating a new record (no prior status) or leaving the status
+     * unchanged is always allowed.
+     */
+    public static function isValidTransition(?string $from, string $to): bool
+    {
+        if ($from === null || $from === $to) {
+            return true;
+        }
+
+        if (in_array($from, self::TERMINAL_STATUSES, true)) {
+            return false;
+        }
+
+        return in_array($to, self::ALLOWED_TRANSITIONS[$from] ?? [], true);
     }
 }

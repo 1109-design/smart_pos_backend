@@ -2,20 +2,30 @@
 
 namespace Tests\Feature;
 
+use App\Events\ApprovalRequestChanged;
+use App\Events\CustomerChanged;
 use App\Events\InvoicePaymentRecorded;
 use App\Events\ProductPriceChanged;
+use App\Events\PurchaseOrderChanged;
 use App\Events\ShiftStatusChanged;
 use App\Events\StockLevelChanged;
+use App\Events\StockTransferChanged;
 use App\Events\TillCashMovementRecorded;
+use App\Events\TransactionRecorded;
+use App\Models\ApprovalRequest;
+use App\Models\Customer;
 use App\Models\Invoice;
 use App\Models\InvoicePayment;
 use App\Models\Location;
 use App\Models\Product;
 use App\Models\ProductStock;
+use App\Models\PurchaseOrder;
 use App\Models\Shift;
+use App\Models\StockTransfer;
 use App\Models\Tenant;
 use App\Models\Till;
 use App\Models\TillCashMovement;
+use App\Models\Transaction;
 use App\Services\SyncProcessor;
 use App\Services\TransferService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -25,9 +35,11 @@ use Tests\TestCase;
 
 /**
  * Proves the realtime broadcast events fire from the right model changes
- * (and only those), matching the "priority events for this milestone" list —
- * transactions/customers/etc. deliberately stay poll-only and are not
- * covered here.
+ * (and only those). Originally scoped to a "priority events for this
+ * milestone" subset (shift/till-cash/invoice-payment/stock/price); the
+ * offline-first audit (2026-09-06) extended coverage to the remaining
+ * operational data the architecture spec calls for — transactions,
+ * customers, purchase orders, stock transfers, and approvals.
  */
 class RealtimeBroadcastEventsTest extends TestCase
 {
@@ -285,5 +297,265 @@ class RealtimeBroadcastEventsTest extends TestCase
         ]);
 
         Event::assertNotDispatched(InvoicePaymentRecorded::class);
+    }
+
+    public function test_a_new_sale_dispatches_transaction_recorded(): void
+    {
+        Event::fake([TransactionRecorded::class]);
+
+        $tenantId = 'tenant-events-transaction';
+        $this->makeTenant($tenantId);
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Shop']);
+
+        $transaction = Transaction::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'location_id' => $location->id,
+            'user_id' => (string) Str::uuid(),
+            'subtotal' => 10,
+            'tax_total' => 0,
+            'total' => 10,
+            'base_currency' => 'USD',
+            'status' => 'completed',
+            'sale_number' => '202609-EVT-1',
+        ]);
+
+        Event::assertDispatched(TransactionRecorded::class, fn ($e) => $e->businessId === $tenantId
+            && $e->locationId === $location->id
+            && $e->transactionId === $transaction->id);
+    }
+
+    public function test_voiding_a_transaction_dispatches_transaction_recorded(): void
+    {
+        $tenantId = 'tenant-events-transaction-void';
+        $this->makeTenant($tenantId);
+        $transaction = Transaction::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'user_id' => (string) Str::uuid(),
+            'subtotal' => 10,
+            'tax_total' => 0,
+            'total' => 10,
+            'base_currency' => 'USD',
+            'status' => 'completed',
+            'sale_number' => '202609-EVT-2',
+        ]);
+
+        Event::fake([TransactionRecorded::class]);
+        $transaction->update(['status' => 'voided', 'void_reason' => 'Customer changed their mind']);
+
+        Event::assertDispatched(TransactionRecorded::class, fn ($e) => $e->transactionId === $transaction->id);
+    }
+
+    public function test_a_transaction_notes_change_alone_does_not_dispatch(): void
+    {
+        $tenantId = 'tenant-events-transaction-notes';
+        $this->makeTenant($tenantId);
+        $transaction = Transaction::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'user_id' => (string) Str::uuid(),
+            'subtotal' => 10,
+            'tax_total' => 0,
+            'total' => 10,
+            'base_currency' => 'USD',
+            'status' => 'completed',
+            'sale_number' => '202609-EVT-3',
+        ]);
+
+        Event::fake([TransactionRecorded::class]);
+        $transaction->update(['notes' => 'Gift wrapped']);
+
+        Event::assertNotDispatched(TransactionRecorded::class);
+    }
+
+    public function test_customer_creation_dispatches_customer_changed(): void
+    {
+        Event::fake([CustomerChanged::class]);
+
+        $tenantId = 'tenant-events-customer';
+        $this->makeTenant($tenantId);
+
+        $customer = Customer::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Jane Doe']);
+
+        Event::assertDispatched(CustomerChanged::class, fn ($e) => $e->businessId === $tenantId && $e->customerId === $customer->id);
+    }
+
+    public function test_customer_loyalty_balance_update_dispatches_customer_changed(): void
+    {
+        $tenantId = 'tenant-events-customer-loyalty';
+        $this->makeTenant($tenantId);
+        $customer = Customer::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Jane Doe']);
+
+        Event::fake([CustomerChanged::class]);
+        $customer->update(['loyalty_points' => 50]);
+
+        Event::assertDispatched(CustomerChanged::class, fn ($e) => $e->customerId === $customer->id);
+    }
+
+    public function test_purchase_order_creation_dispatches_purchase_order_changed(): void
+    {
+        Event::fake([PurchaseOrderChanged::class]);
+
+        $tenantId = 'tenant-events-po';
+        $this->makeTenant($tenantId);
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse']);
+
+        $po = PurchaseOrder::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'receiving_location_id' => $location->id,
+            'po_number' => 'PO-202609-EVT-1',
+            'status' => 'draft',
+            'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        Event::assertDispatched(PurchaseOrderChanged::class, fn ($e) => $e->businessId === $tenantId
+            && $e->locationId === $location->id
+            && $e->purchaseOrderId === $po->id);
+    }
+
+    public function test_purchase_order_with_no_receiving_location_broadcasts_business_wide(): void
+    {
+        Event::fake([PurchaseOrderChanged::class]);
+
+        $tenantId = 'tenant-events-po-no-location';
+        $this->makeTenant($tenantId);
+
+        $po = PurchaseOrder::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'po_number' => 'PO-202609-EVT-2',
+            'status' => 'draft',
+            'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        Event::assertDispatched(PurchaseOrderChanged::class, fn ($e) => $e->locationId === null && $e->purchaseOrderId === $po->id);
+    }
+
+    public function test_purchase_order_status_change_dispatches_purchase_order_changed(): void
+    {
+        $tenantId = 'tenant-events-po-status';
+        $this->makeTenant($tenantId);
+        $po = PurchaseOrder::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'po_number' => 'PO-202609-EVT-3',
+            'status' => 'draft',
+            'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        Event::fake([PurchaseOrderChanged::class]);
+        $po->update(['status' => 'sent']);
+
+        Event::assertDispatched(PurchaseOrderChanged::class, fn ($e) => $e->purchaseOrderId === $po->id);
+    }
+
+    public function test_stock_transfer_creation_dispatches_to_both_locations(): void
+    {
+        Event::fake([StockTransferChanged::class]);
+
+        $tenantId = 'tenant-events-transfer';
+        $this->makeTenant($tenantId);
+        $warehouse = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse']);
+        $shop = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Shop']);
+
+        $transfer = StockTransfer::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'transfer_number' => 'TRF-202609-EVT-1',
+            'from_location_id' => $warehouse->id,
+            'to_location_id' => $shop->id,
+            'status' => 'pending',
+            'requested_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        Event::assertDispatched(StockTransferChanged::class, fn ($e) => $e->fromLocationId === $warehouse->id
+            && $e->toLocationId === $shop->id
+            && $e->transferId === $transfer->id);
+    }
+
+    public function test_stock_transfer_status_change_dispatches_stock_transfer_changed(): void
+    {
+        $tenantId = 'tenant-events-transfer-status';
+        $this->makeTenant($tenantId);
+        $warehouse = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse']);
+        $shop = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Shop']);
+        $transfer = StockTransfer::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'transfer_number' => 'TRF-202609-EVT-2',
+            'from_location_id' => $warehouse->id,
+            'to_location_id' => $shop->id,
+            'status' => 'pending',
+            'requested_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        Event::fake([StockTransferChanged::class]);
+        $transfer->update(['status' => 'in_transit']);
+
+        Event::assertDispatched(StockTransferChanged::class, fn ($e) => $e->transferId === $transfer->id);
+    }
+
+    public function test_a_transfer_notes_change_alone_does_not_dispatch(): void
+    {
+        $tenantId = 'tenant-events-transfer-notes';
+        $this->makeTenant($tenantId);
+        $warehouse = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse']);
+        $shop = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Shop']);
+        $transfer = StockTransfer::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'transfer_number' => 'TRF-202609-EVT-3',
+            'from_location_id' => $warehouse->id,
+            'to_location_id' => $shop->id,
+            'status' => 'pending',
+            'requested_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        Event::fake([StockTransferChanged::class]);
+        $transfer->update(['notes' => 'Fragile — handle with care']);
+
+        Event::assertNotDispatched(StockTransferChanged::class);
+    }
+
+    public function test_approval_request_creation_dispatches_approval_request_changed(): void
+    {
+        Event::fake([ApprovalRequestChanged::class]);
+
+        $tenantId = 'tenant-events-approval';
+        $this->makeTenant($tenantId);
+
+        $request = ApprovalRequest::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'subject_type' => 'Transaction',
+            'subject_id' => (string) Str::uuid(),
+            'action' => 'void_transaction',
+            'requested_by_user_id' => (string) Str::uuid(),
+            'status' => 'pending',
+        ]);
+
+        Event::assertDispatched(ApprovalRequestChanged::class, fn ($e) => $e->businessId === $tenantId && $e->approvalRequestId === $request->id);
+    }
+
+    public function test_approval_request_resolution_dispatches_approval_request_changed(): void
+    {
+        $tenantId = 'tenant-events-approval-resolve';
+        $this->makeTenant($tenantId);
+        $request = ApprovalRequest::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'subject_type' => 'Transaction',
+            'subject_id' => (string) Str::uuid(),
+            'action' => 'void_transaction',
+            'requested_by_user_id' => (string) Str::uuid(),
+            'status' => 'pending',
+        ]);
+
+        Event::fake([ApprovalRequestChanged::class]);
+        $request->update(['status' => 'approved', 'approver_user_id' => (string) Str::uuid(), 'approved_at' => now()]);
+
+        Event::assertDispatched(ApprovalRequestChanged::class, fn ($e) => $e->approvalRequestId === $request->id);
     }
 }

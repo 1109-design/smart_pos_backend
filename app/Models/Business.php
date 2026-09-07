@@ -73,4 +73,18 @@ class Business extends Model
 
         return $value !== null ? (float) $value : null;
     }
+
+    /**
+     * STC·08 — a stock-take item whose |counted - system| / system exceeds
+     * this percentage gets flagged for a mandatory recount before the take
+     * can be approved. Same opt-in shape as poApprovalThreshold(): null
+     * (never configured, the default) means the feature is off and every
+     * stock take behaves exactly as before.
+     */
+    public function stockTakeVarianceThresholdPercent(): ?float
+    {
+        $value = $this->workflow_settings['stock_take_variance_threshold_percent'] ?? null;
+
+        return $value !== null ? (float) $value : null;
+    }
 }

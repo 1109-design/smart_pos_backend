@@ -12,6 +12,7 @@ interface StockReset {
 interface Workflows {
     stock_transfer_requires_approval: boolean;
     po_approval_threshold: number | null;
+    stock_take_variance_threshold_percent: number | null;
 }
 
 interface Props {
@@ -31,6 +32,9 @@ export default function BackOfficeSettings({ stock_reset, catalogue_reset, workf
     const catalogueForm = useForm({ confirm: '' });
 
     const [poThreshold, setPoThreshold] = useState(workflows.po_approval_threshold?.toString() ?? '');
+    const [varianceThreshold, setVarianceThreshold] = useState(
+        workflows.stock_take_variance_threshold_percent?.toString() ?? ''
+    );
 
     const toggleWorkflow = (key: keyof Workflows, value: boolean) => {
         router.post(`/office/settings/workflows`, { [key]: value }, { preserveScroll: true });
@@ -41,6 +45,15 @@ export default function BackOfficeSettings({ stock_reset, catalogue_reset, workf
         router.post(
             '/office/settings/workflows',
             { po_approval_threshold: poThreshold === '' ? null : poThreshold },
+            { preserveScroll: true }
+        );
+    };
+
+    const saveVarianceThreshold = (e: React.FormEvent) => {
+        e.preventDefault();
+        router.post(
+            '/office/settings/workflows',
+            { stock_take_variance_threshold_percent: varianceThreshold === '' ? null : varianceThreshold },
             { preserveScroll: true }
         );
     };
@@ -121,6 +134,24 @@ export default function BackOfficeSettings({ stock_reset, catalogue_reset, workf
                             onChange={(e) => setPoThreshold(e.target.value)}
                             className="w-40 text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                         />
+                        <button type="submit" className="btn-primary py-2 px-4">Save</button>
+                    </form>
+                </div>
+
+                <div className="border-t border-slate-100 mt-5 pt-5">
+                    <p className="text-sm font-medium text-slate-800">Require a recount above a variance threshold</p>
+                    <p className="text-xs text-slate-500 mt-1 mb-3">
+                        A counted item whose difference from system stock exceeds this percentage must be counted again
+                        before its stock take can be approved. Leave blank to never require a recount.
+                    </p>
+                    <form onSubmit={saveVarianceThreshold} className="flex items-center gap-2">
+                        <input
+                            type="number" step="0.1" min="0" max="1000" placeholder="No threshold"
+                            value={varianceThreshold}
+                            onChange={(e) => setVarianceThreshold(e.target.value)}
+                            className="w-40 text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                        <span className="text-sm text-slate-500">%</span>
                         <button type="submit" className="btn-primary py-2 px-4">Save</button>
                     </form>
                 </div>
