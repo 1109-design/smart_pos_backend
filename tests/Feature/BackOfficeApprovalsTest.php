@@ -96,7 +96,50 @@ class BackOfficeApprovalsTest extends TestCase
         $this->assertSame('USD', $rate->to_currency);
         $this->assertSame('26.50000000', $rate->rate);
         $this->assertSame($manager->id, $rate->set_by_user_id);
+        $this->assertNull($rate->valid_until);
         $this->assertDatabaseHas('sync_records', ['table_name' => 'exchange_rates', 'record_uuid' => $rateId]);
+    }
+
+    /**
+     * FX·06 — approving a second change for the same pair must close out
+     * the row it supersedes (valid_until set), not leave every row open
+     * forever. See ApprovalService::applyApprovedAction().
+     */
+    public function test_approving_a_second_rate_change_closes_out_the_previous_one(): void
+    {
+        $tenantId = 'tenant-approvals-rate-history';
+        $manager = $this->actingBackOfficeSession($tenantId);
+
+        $firstId = (string) Str::uuid();
+        $first = app(ApprovalService::class)->request(
+            $tenantId, 'ExchangeRate', $firstId, 'change_exchange_rate', (string) Str::uuid(),
+            ['from_currency' => 'ZWG', 'to_currency' => 'USD', 'rate' => 26.5],
+        );
+        $this->post("/office/approvals/{$first->id}/approve")->assertRedirect();
+
+        $firstRate = ExchangeRate::findOrFail($firstId);
+        $this->assertNull($firstRate->valid_until, 'the only rate for this pair so far should still be open');
+
+        $secondId = (string) Str::uuid();
+        $second = app(ApprovalService::class)->request(
+            $tenantId, 'ExchangeRate', $secondId, 'change_exchange_rate', (string) Str::uuid(),
+            ['from_currency' => 'ZWG', 'to_currency' => 'USD', 'rate' => 27.0],
+        );
+        $this->post("/office/approvals/{$second->id}/approve")->assertRedirect();
+
+        $firstRate->refresh();
+        $secondRate = ExchangeRate::findOrFail($secondId);
+
+        $this->assertNotNull($firstRate->valid_until, 'superseded rate should now be closed');
+        $this->assertSame($manager->id, $firstRate->set_by_user_id, 'closing the row must not disturb who originally set it');
+        $this->assertSame('26.50000000', $firstRate->rate, 'closing the row must not disturb its rate');
+        $this->assertNull($secondRate->valid_until, 'the new current rate stays open');
+        $this->assertSame('27.00000000', $secondRate->rate);
+
+        // Both the close and the new row must be visible to a pulling
+        // device, not just applied server-side.
+        $this->assertDatabaseHas('sync_records', ['table_name' => 'exchange_rates', 'record_uuid' => $firstId]);
+        $this->assertDatabaseHas('sync_records', ['table_name' => 'exchange_rates', 'record_uuid' => $secondId]);
     }
 
     public function test_rejecting_a_queued_exchange_rate_change_does_not_write_a_rate(): void

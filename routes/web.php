@@ -9,6 +9,7 @@ use App\Http\Controllers\BackOffice\CashVaultController as BackOfficeCashVault;
 use App\Http\Controllers\BackOffice\CategoriesController as BackOfficeCategories;
 use App\Http\Controllers\BackOffice\CustomersController as BackOfficeCustomers;
 use App\Http\Controllers\BackOffice\DashboardController as BackOfficeDashboard;
+use App\Http\Controllers\BackOffice\ExchangeRatesController as BackOfficeExchangeRates;
 use App\Http\Controllers\BackOffice\FinancialStatementsController as BackOfficeFinancialStatements;
 use App\Http\Controllers\BackOffice\JournalEntriesController as BackOfficeJournalEntries;
 use App\Http\Controllers\BackOffice\LocationsController as BackOfficeLocations;
@@ -122,6 +123,9 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::get('reports/trial-balance', [BackOfficeFinancialStatements::class, 'trialBalance'])->name('reports.trial-balance');
         Route::get('reports/income-statement', [BackOfficeFinancialStatements::class, 'incomeStatement'])->name('reports.income-statement');
         Route::get('reports/balance-sheet', [BackOfficeFinancialStatements::class, 'balanceSheet'])->name('reports.balance-sheet');
+
+        Route::get('exchange-rates', [BackOfficeExchangeRates::class, 'index'])->name('exchange-rates.index');
+        Route::get('exchange-rates/{fromCurrency}', [BackOfficeExchangeRates::class, 'show'])->name('exchange-rates.show');
         Route::get('journal-entries', [BackOfficeJournalEntries::class, 'index'])->name('journal-entries.index');
         Route::post('journal-entries', [BackOfficeJournalEntries::class, 'store'])->name('journal-entries.store');
         Route::post('journal-entries/{journalEntry}/reverse', [BackOfficeJournalEntries::class, 'reverse'])->name('journal-entries.reverse');

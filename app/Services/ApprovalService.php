@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\ApprovalRequest;
+use App\Models\ExchangeRate;
 use App\Models\SyncRecord;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use Illuminate\Support\Str;
@@ -109,6 +110,49 @@ class ApprovalService
         }
 
         $payload = $request->payload_json ?? [];
+        $now = now();
+
+        // FX·06 — close out whatever row was "current" for this pair before
+        // writing the new one, so exchange_rates keeps a real audit history
+        // (valid_from/valid_until ranges) instead of every row but the
+        // latest sitting with valid_until forever null. Full field set is
+        // re-sent (not just valid_until) because SyncProcessor's upsert case
+        // is a full updateOrCreate() replace — omitting a column would reset
+        // it to that case's default (see exchange_rates case comment).
+        $previous = ExchangeRate::query()
+            ->where('business_id', $request->business_id)
+            ->where('from_currency', $payload['from_currency'] ?? null)
+            ->where('to_currency', $payload['to_currency'] ?? null)
+            ->whereNull('valid_until')
+            ->where('id', '!=', $request->subject_id)
+            ->latest('valid_from')
+            ->first();
+
+        if ($previous) {
+            $closedPayload = [
+                'business_id' => $previous->business_id,
+                'from_currency' => $previous->from_currency,
+                'to_currency' => $previous->to_currency,
+                'rate' => (float) $previous->rate,
+                'source' => $previous->source,
+                'set_by_user_id' => $previous->set_by_user_id,
+                'locked' => $previous->locked,
+                'valid_from' => $previous->valid_from?->toIso8601String(),
+                'valid_until' => $now->toIso8601String(),
+            ];
+
+            $this->processor->process('exchange_rates', $previous->id, 'upsert', $closedPayload);
+
+            SyncRecord::create([
+                'business_id' => $previous->business_id,
+                'table_name' => 'exchange_rates',
+                'record_uuid' => $previous->id,
+                'operation' => 'upsert',
+                'payload' => $closedPayload,
+                'source_updated_at' => $now,
+                'synced_at' => $now,
+            ]);
+        }
 
         $this->processor->process('exchange_rates', $request->subject_id, 'upsert', [
             'business_id' => $request->business_id,
@@ -118,7 +162,7 @@ class ApprovalService
             'source' => 'manual',
             'set_by_user_id' => $approverUserId,
             'locked' => $payload['locked'] ?? false,
-            'valid_from' => now()->toIso8601String(),
+            'valid_from' => $now->toIso8601String(),
             'valid_until' => null,
         ]);
 
@@ -135,9 +179,11 @@ class ApprovalService
                 'source' => 'manual',
                 'set_by_user_id' => $approverUserId,
                 'locked' => $payload['locked'] ?? false,
+                'valid_from' => $now->toIso8601String(),
+                'valid_until' => null,
             ],
-            'source_updated_at' => now(),
-            'synced_at' => now(),
+            'source_updated_at' => $now,
+            'synced_at' => $now,
         ]);
     }
 

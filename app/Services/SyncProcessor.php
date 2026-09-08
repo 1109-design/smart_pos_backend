@@ -600,9 +600,13 @@ class SyncProcessor
                 // own uuid as the approval's subject_id (rates_tab_screen.dart,
                 // approval_resolution.dart), so a direct subject_id match is
                 // sufficient here; no approval_request_id payload field
-                // needed. Existing rows are immutable history in practice
-                // (a new rate is always a new uuid), so this only ever
-                // gates first-insert of a given rate id.
+                // needed. A rate change is always a brand-new uuid, so this
+                // still only ever gates first-insert of a given rate id — the
+                // one legitimate update to an existing row is
+                // ApprovalService::applyApprovedAction() closing out the
+                // previously-current row's valid_until (FX·06 audit history),
+                // which is server-authored ($trusted stays true there) and
+                // so never hits this untrusted-payload branch at all.
                 if (! $trusted && ! ExchangeRate::where('id', $uuid)->exists()
                     && ! $this->hasApprovedRequest($payload['business_id'] ?? null, 'ExchangeRate', $uuid, ['change_exchange_rate'], $payload)) {
                     throw new \RuntimeException('exchange_rates: a rate change requires an approved approval request.');
