@@ -1638,14 +1638,23 @@ class SyncProcessor
             $pinHash = Hash::make($pinHash);
         }
 
+        // 'role' isn't a users column — the actual role assignment happens
+        // below via syncRoles(), against spatie's own role tables. And
+        // 'biometric_enabled' isn't a column either: no migration ever
+        // added it, and nothing reads it back anywhere in the app — it's
+        // dead write-only data. Both used to ride along in this array
+        // anyway; User::updateOrCreate() -> fill() silently drops whatever
+        // isn't in $fillable under normal mass-assignment guarding, so it
+        // never surfaced — until a call path that guarding doesn't apply
+        // to (Laravel's SeedCommand runs entirely inside
+        // Model::unguarded()) let both through straight to the INSERT and
+        // failed on "Unknown column 'role'".
         $userData = [
             'business_id' => $payload['business_id'] ?? null,
             'name' => $payload['name'] ?? '',
             'email' => $payload['email'] ?? $uuid.'@pos.local',
             'pin_hash' => $pinHash,
-            'role' => $payload['role'] ?? 'cashier',
             'is_active' => $payload['is_active'] ?? true,
-            'biometric_enabled' => $payload['biometric_enabled'] ?? false,
         ];
 
         // Passwords are never synced from devices. New users get an unusable
