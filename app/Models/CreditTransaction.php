@@ -9,9 +9,8 @@ class CreditTransaction extends Model
 {
     use HasUuids;
 
-
     protected $fillable = [
-        'id', 'customer_id', 'transaction_id', 'amount', 'type', 'method', 'reference',
+        'id', 'customer_id', 'transaction_id', 'amount', 'type', 'method', 'reference', 'receipt_number',
     ];
 
     protected function casts(): array

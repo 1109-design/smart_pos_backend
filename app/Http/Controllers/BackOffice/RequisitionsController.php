@@ -31,15 +31,24 @@ class RequisitionsController extends BackOfficeController
         private readonly BackOfficeAuthorizer $authorizer,
     ) {}
 
-    public function index(LocationService $locations): Response
+    public function index(Request $request, LocationService $locations): Response
     {
         $this->authorize(BackOfficePermission::MANAGE_REQUISITIONS);
 
         $tenantId = $this->tenantId();
         $locations->ensureDefaultLocation($tenantId);
 
+        $status = $request->string('status')->toString() ?: 'all';
+        $locationId = $request->string('location')->toString() ?: 'all';
+        $purpose = $request->string('purpose')->toString() ?: 'all';
+        $search = trim($request->string('search')->toString());
+
         $requisitions = Requisition::with(['location:id,name', 'requestedBy:id,name', 'approvedBy:id,name', 'issuedBy:id,name', 'items'])
             ->where('business_id', $tenantId)
+            ->when($status !== 'all', fn ($q) => $q->where('status', $status))
+            ->when($locationId !== 'all', fn ($q) => $q->where('location_id', $locationId))
+            ->when($purpose !== 'all', fn ($q) => $q->where('purpose', $purpose))
+            ->when($search !== '', fn ($q) => $q->where('requisition_number', 'like', "%{$search}%"))
             ->latest()
             ->paginate(20)
             ->withQueryString();
@@ -58,6 +67,7 @@ class RequisitionsController extends BackOfficeController
             // itself.
             'projects' => Project::where('business_id', $tenantId)->orderBy('name')->get(['id', 'name', 'status']),
             'can_issue' => $this->authorizer->can($tenantId, session('backoffice.role'), BackOfficePermission::MANAGE_STOREMAN),
+            'filters' => ['status' => $status, 'location' => $locationId, 'purpose' => $purpose, 'search' => $search],
         ]);
     }
 

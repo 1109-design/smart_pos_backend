@@ -10,6 +10,7 @@ use App\Models\Requisition;
 use App\Models\RequisitionItem;
 use App\Models\Tenant;
 use App\Models\User;
+use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Tests\TestCase;
@@ -25,7 +26,10 @@ class BackOfficeProjectsTest extends TestCase
 
     private function actingBackOfficeSession(string $tenantId, string $role = 'business_owner'): User
     {
-        $this->withoutMiddleware(AuthenticateBackOfficeUser::class);
+        $this->withoutMiddleware([
+            AuthenticateBackOfficeUser::class,
+            ValidateCsrfToken::class,
+        ]);
 
         Tenant::firstOrCreate(['id' => $tenantId], ['business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com', 'pairing_code' => substr(md5($tenantId), 0, 6)]);
         Business::firstOrCreate(['id' => $tenantId], ['name' => $tenantId, 'currency_code' => 'USD']);

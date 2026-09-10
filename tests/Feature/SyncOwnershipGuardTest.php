@@ -7,6 +7,8 @@ use App\Models\BundleItem;
 use App\Models\Category;
 use App\Models\Device;
 use App\Models\Product;
+use App\Models\Project;
+use App\Models\ProjectMilestone;
 use App\Models\Tenant;
 use App\Models\Transaction;
 use App\Models\User;
@@ -257,6 +259,40 @@ class SyncOwnershipGuardTest extends TestCase
             'bundle_id' => $attackerBundleId,
             'product_id' => (string) Str::uuid(),
             'quantity' => 99,
+        ]);
+    }
+
+    /**
+     * milestone_tasks is scoped two hops deep (task -> milestone -> project's
+     * business_id) via resolveParentOwner()'s join case — proves that lookup
+     * actually resolves the real owner rather than silently passing.
+     */
+    public function test_milestone_task_cannot_be_hijacked_into_another_businesss_milestone(): void
+    {
+        $victimTenant = 'tenant-guard-milestone-victim';
+        Tenant::create(['id' => $victimTenant, 'business_name' => $victimTenant, 'owner_email' => $victimTenant.'@example.com']);
+        $attackerTenant = 'tenant-guard-milestone-attacker';
+        Tenant::create(['id' => $attackerTenant, 'business_name' => $attackerTenant, 'owner_email' => $attackerTenant.'@example.com']);
+
+        $victimProjectId = (string) Str::uuid();
+        Project::create(['id' => $victimProjectId, 'business_id' => $victimTenant, 'name' => 'Victim Project', 'created_by_user_id' => (string) Str::uuid()]);
+        $victimMilestoneId = (string) Str::uuid();
+        ProjectMilestone::create(['id' => $victimMilestoneId, 'project_id' => $victimProjectId, 'title' => 'Victim Milestone']);
+        $existingTaskId = (string) Str::uuid();
+
+        $attackerProjectId = (string) Str::uuid();
+        Project::create(['id' => $attackerProjectId, 'business_id' => $attackerTenant, 'name' => 'Attacker Project', 'created_by_user_id' => (string) Str::uuid()]);
+        $attackerMilestoneId = (string) Str::uuid();
+        ProjectMilestone::create(['id' => $attackerMilestoneId, 'project_id' => $attackerProjectId, 'title' => 'Attacker Milestone']);
+
+        $this->expectException(\RuntimeException::class);
+
+        // Attacker tries to attach a brand-new task to the VICTIM's
+        // milestone while claiming it as their own business.
+        app(SyncProcessor::class)->process('milestone_tasks', $existingTaskId, 'upsert', [
+            'business_id' => $attackerTenant,
+            'milestone_id' => $victimMilestoneId,
+            'title' => 'Planted Task',
         ]);
     }
 }

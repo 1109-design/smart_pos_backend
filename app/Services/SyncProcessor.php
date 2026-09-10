@@ -23,6 +23,7 @@ use App\Models\InvoiceItem;
 use App\Models\InvoicePayment;
 use App\Models\Location;
 use App\Models\LoyaltyTransaction;
+use App\Models\MilestoneTask;
 use App\Models\Payment;
 use App\Models\PoAuditLog;
 use App\Models\ProcurementBudget;
@@ -35,6 +36,7 @@ use App\Models\ProductUnit;
 use App\Models\ProductVariant;
 use App\Models\ProductVariantStock;
 use App\Models\Project;
+use App\Models\ProjectMilestone;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
 use App\Models\Quotation;
@@ -153,6 +155,8 @@ class SyncProcessor
         'credit_note_items' => [CreditNoteItem::class, 'credit_note_id'],
         'product_units' => [ProductUnit::class, 'product_id'],
         'product_price_tiers' => [ProductPriceTier::class, 'product_id'],
+        'project_milestones' => [ProjectMilestone::class, 'project_id'],
+        'milestone_tasks' => [MilestoneTask::class, 'milestone_id'],
     ];
 
     // Deliberately unguarded, and why:
@@ -276,6 +280,11 @@ class SyncProcessor
             'quotation_items' => Quotation::where('id', $parentId)->value('business_id'),
             'invoice_items', 'invoice_payments' => Invoice::where('id', $parentId)->value('business_id'),
             'credit_note_items' => CreditNote::where('id', $parentId)->value('business_id'),
+            'project_milestones' => Project::where('id', $parentId)->value('business_id'),
+            'milestone_tasks' => Project::query()
+                ->join('project_milestones', 'project_milestones.project_id', '=', 'projects.id')
+                ->where('project_milestones.id', $parentId)
+                ->value('projects.business_id'),
             default => null,
         };
     }
@@ -469,6 +478,29 @@ class SyncProcessor
                 );
                 break;
 
+            case 'project_milestones':
+                ProjectMilestone::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'project_id' => $payload['project_id'] ?? null,
+                        'title' => $payload['title'] ?? '',
+                        'target_date' => $payload['target_date'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'milestone_tasks':
+                MilestoneTask::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'milestone_id' => $payload['milestone_id'] ?? null,
+                        'title' => $payload['title'] ?? '',
+                        'is_done' => $payload['is_done'] ?? false,
+                        'done_at' => $payload['done_at'] ?? null,
+                    ]
+                );
+                break;
+
             case 'procurement_budgets':
                 ProcurementBudget::updateOrCreate(
                     ['id' => $uuid],
@@ -657,6 +689,7 @@ class SyncProcessor
                         'image_path' => $payload['image_path'] ?? null,
                         'expiry_date' => $payload['expiry_date'] ?? null,
                         'is_active' => $payload['is_active'] ?? true,
+                        'is_taxable' => $payload['is_taxable'] ?? true,
                     ]
                 );
                 // First time this product is created with an opening quantity: give it
@@ -1029,6 +1062,7 @@ class SyncProcessor
                         'type' => $payload['type'] ?? 'purchase',
                         'method' => $payload['method'] ?? null,
                         'reference' => $payload['reference'] ?? null,
+                        'receipt_number' => $payload['receipt_number'] ?? null,
                     ]
                 );
                 // Recompute customer credit_balance from the full ledger.
@@ -1979,6 +2013,17 @@ class SyncProcessor
             return;
         }
 
+        // Model::where(...)->delete() below is a bulk query-builder delete —
+        // it never fires ProjectMilestone::booted()'s cascade, so a deleted
+        // milestone's tasks would otherwise linger as orphans. Delete them
+        // explicitly before falling into the generic path.
+        if ($table === 'project_milestones') {
+            MilestoneTask::where('milestone_id', $uuid)->delete();
+            ProjectMilestone::where('id', $uuid)->delete();
+
+            return;
+        }
+
         $modelMap = [
             'businesses' => Business::class,
             'locations' => Location::class,
@@ -2012,6 +2057,7 @@ class SyncProcessor
             'product_units' => ProductUnit::class,
             'product_price_tiers' => ProductPriceTier::class,
             'procurement_budgets' => ProcurementBudget::class,
+            'milestone_tasks' => MilestoneTask::class,
         ];
 
         $softDeleteIsActive = ['locations', 'categories', 'units_of_measure', 'tax_rates', 'products', 'product_variants', 'suppliers', 'coupons', 'tills'];

@@ -39,6 +39,11 @@ class Project extends Model
         return $this->hasMany(Expense::class, 'project_id');
     }
 
+    public function milestones(): HasMany
+    {
+        return $this->hasMany(ProjectMilestone::class);
+    }
+
     public function isActive(): bool
     {
         return $this->status === 'active';
