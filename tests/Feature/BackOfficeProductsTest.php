@@ -224,6 +224,26 @@ class BackOfficeProductsTest extends TestCase
         $this->assertNotNull(Product::find($productId)->expiry_date);
     }
 
+    public function test_toggle_active_preserves_is_taxable(): void
+    {
+        $tenantId = 'tenant-office-prod-toggle-taxable';
+        $this->actingBackOfficeSession($tenantId);
+
+        $productId = (string) Str::uuid();
+        Product::create([
+            'id' => $productId,
+            'business_id' => $tenantId,
+            'name' => 'Exempt Item',
+            'item_type' => 'product',
+            'price' => 1,
+            'is_taxable' => false,
+        ]);
+
+        $this->patch("/office/products/{$productId}/toggle-active")->assertRedirect();
+
+        $this->assertDatabaseHas('products', ['id' => $productId, 'is_taxable' => false, 'is_active' => false]);
+    }
+
     /**
      * The edit form only ever sends the fields it exposes — min_price,
      * discount_percent, deposit_amount and expiry_date aren't among them.
@@ -270,6 +290,38 @@ class BackOfficeProductsTest extends TestCase
         $syncRecord = SyncRecord::where('record_uuid', $productId)->latest('id')->first();
         $this->assertEquals(1.0, $syncRecord->payload['min_price']);
         $this->assertEquals(5, $syncRecord->payload['discount_percent']);
+    }
+
+    /**
+     * The edit form has no "taxable" toggle — set only via the CSV import's
+     * "taxable" column (see the import tests above). Regression guard for
+     * the same class of bug as the one above: without carrying the existing
+     * value forward, saving any edit to a tax-exempt item through the form
+     * would silently flip it back to taxable via the full-row sync overwrite.
+     */
+    public function test_update_preserves_is_taxable_the_edit_form_does_not_send(): void
+    {
+        $tenantId = 'tenant-office-prod-preserve-taxable';
+        $this->actingBackOfficeSession($tenantId);
+
+        $productId = (string) Str::uuid();
+        Product::create([
+            'id' => $productId,
+            'business_id' => $tenantId,
+            'name' => 'Exempt Bread',
+            'item_type' => 'product',
+            'price' => 1,
+            'is_taxable' => false,
+        ]);
+
+        $response = $this->put("/office/products/{$productId}", [
+            'name' => 'Exempt Bread',
+            'item_type' => 'product',
+            'price' => 1.25,
+        ]);
+
+        $response->assertRedirect();
+        $this->assertDatabaseHas('products', ['id' => $productId, 'is_taxable' => false]);
     }
 
     public function test_container_product_can_be_created_with_a_deposit_and_linked_from_a_beverage(): void
@@ -586,6 +638,25 @@ class BackOfficeProductsTest extends TestCase
         $this->assertSame('Brand New Soda', $newProduct->name);
         $this->assertSame(20.0, (float) $newProduct->stock_quantity);
         $this->assertDatabaseHas('sync_records', ['table_name' => 'products', 'record_uuid' => $newProduct->id]);
+    }
+
+    public function test_import_sets_taxable_flag_from_csv_and_defaults_to_true(): void
+    {
+        $tenantId = 'tenant-office-prod-taxable';
+        $this->actingBackOfficeSession($tenantId);
+
+        $csv = "name,item_type,price,taxable\n"
+            ."Exempt Bread,product,1.00,no\n"
+            ."Taxable Soda,product,2.00,yes\n"
+            ."Untouched Snack,product,3.00,\n";
+
+        $file = UploadedFile::fake()->createWithContent('import.csv', $csv);
+
+        $this->post('/office/products/import', ['file' => $file])->assertRedirect();
+
+        $this->assertDatabaseHas('products', ['name' => 'Exempt Bread', 'is_taxable' => false]);
+        $this->assertDatabaseHas('products', ['name' => 'Taxable Soda', 'is_taxable' => true]);
+        $this->assertDatabaseHas('products', ['name' => 'Untouched Snack', 'is_taxable' => true]);
     }
 
     public function test_import_reports_row_errors_without_dropping_the_whole_batch(): void
@@ -1164,7 +1235,7 @@ class BackOfficeProductsTest extends TestCase
         $response->assertOk();
         $response->assertHeader('content-type', 'text/csv; charset=UTF-8');
         $this->assertStringStartsWith(
-            'name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,stock_quantity,low_stock_threshold',
+            'name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,taxable,stock_quantity,low_stock_threshold',
             $response->streamedContent()
         );
     }
@@ -1181,7 +1252,7 @@ class BackOfficeProductsTest extends TestCase
 
         $response->assertOk();
         $this->assertStringStartsWith(
-            'name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,"stock: Warehouse 1","stock: Warehouse 2",low_stock_threshold',
+            'name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,taxable,"stock: Warehouse 1","stock: Warehouse 2",low_stock_threshold',
             $response->streamedContent()
         );
     }
@@ -1277,10 +1348,10 @@ class BackOfficeProductsTest extends TestCase
         $content = $response->streamedContent();
 
         $this->assertStringStartsWith(
-            'name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,stock_quantity,low_stock_threshold',
+            'name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,taxable,stock_quantity,low_stock_threshold',
             $content
         );
-        $this->assertStringContainsString('"Export Me",product,2.5000,1.0000,EXP1,,,piece,yes,17.0000,5.0000', $content);
+        $this->assertStringContainsString('"Export Me",product,2.5000,1.0000,EXP1,,,piece,yes,yes,17.0000,5.0000', $content);
         // Archived items and containers aren't part of the live catalogue this workflow reconciles.
         $this->assertStringNotContainsString('Archived Item', $content);
         $this->assertStringNotContainsString('A Container', $content);
@@ -1317,10 +1388,10 @@ class BackOfficeProductsTest extends TestCase
         $response->assertOk();
         $content = $response->streamedContent();
         $this->assertStringStartsWith(
-            'name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,"stock: Warehouse 1","stock: Warehouse 2",low_stock_threshold',
+            'name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,taxable,"stock: Warehouse 1","stock: Warehouse 2",low_stock_threshold',
             $content
         );
-        $this->assertStringContainsString('"Split Stock Item",product,3.0000,0.0000,SPLITEXP,,,piece,yes,12,0,5.0000', $content);
+        $this->assertStringContainsString('"Split Stock Item",product,3.0000,0.0000,SPLITEXP,,,piece,yes,yes,12,0,5.0000', $content);
     }
 
     public function test_full_catalogue_import_reports_active_products_missing_from_the_file_without_changing_them(): void

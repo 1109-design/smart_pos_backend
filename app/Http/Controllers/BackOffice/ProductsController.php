@@ -31,7 +31,7 @@ class ProductsController extends BackOfficeController
 {
     /** Column order for the downloadable import template, before the stock column(s) — see template(). */
     private const IMPORT_BASE_COLUMNS = [
-        'name', 'item_type', 'price', 'cost_price', 'sku', 'barcode', 'category', 'unit', 'track_stock',
+        'name', 'item_type', 'price', 'cost_price', 'sku', 'barcode', 'category', 'unit', 'track_stock', 'taxable',
     ];
 
     private const IMPORT_ROW_LIMIT = 2000;
@@ -227,8 +227,8 @@ class ProductsController extends BackOfficeController
 
         $rows = [
             $columns,
-            array_merge(['Coca Cola 500ml', 'product', '1.50', '0.90', 'COKE500', '6001234567890', 'Beverages', 'piece', 'yes'], $productStockExample, ['10']),
-            array_merge(['Phone Screen Repair', 'service', '25.00', '', '', '', 'Repairs', '', 'no'], $serviceStockExample, ['']),
+            array_merge(['Coca Cola 500ml', 'product', '1.50', '0.90', 'COKE500', '6001234567890', 'Beverages', 'piece', 'yes', 'yes'], $productStockExample, ['10']),
+            array_merge(['Phone Screen Repair', 'service', '25.00', '', '', '', 'Repairs', '', 'no', 'yes'], $serviceStockExample, ['']),
         ];
 
         return response()->streamDownload(function () use ($rows) {
@@ -264,7 +264,7 @@ class ProductsController extends BackOfficeController
             ->where('is_active', true)
             ->whereIn('item_type', ['product', 'service'])
             ->orderBy('name')
-            ->get(['id', 'name', 'item_type', 'price', 'cost_price', 'sku', 'barcode', 'category_id', 'unit', 'track_stock', 'stock_quantity', 'low_stock_threshold']);
+            ->get(['id', 'name', 'item_type', 'price', 'cost_price', 'sku', 'barcode', 'category_id', 'unit', 'track_stock', 'is_taxable', 'stock_quantity', 'low_stock_threshold']);
 
         $categoryNamesById = Category::where('business_id', $tenantId)->pluck('name', 'id');
 
@@ -289,6 +289,7 @@ class ProductsController extends BackOfficeController
                     $product->category_id ? ($categoryNamesById->get($product->category_id) ?? '') : '',
                     $isService ? '' : $product->unit,
                     $isService ? '' : ($product->track_stock ? 'yes' : 'no'),
+                    $product->is_taxable ? 'yes' : 'no',
                 ];
 
                 if ($multiLocation) {
@@ -406,6 +407,7 @@ class ProductsController extends BackOfficeController
                 'sku' => ['nullable', 'string', 'max:100'],
                 'barcode' => ['nullable', 'string', 'max:100'],
                 'unit' => ['nullable', 'string', 'max:30'],
+                'taxable' => ['nullable', 'string'],
                 'stock_quantity' => ['nullable', 'numeric', 'min:0'],
                 'low_stock_threshold' => ['nullable', 'numeric', 'min:0'],
             ];
@@ -450,6 +452,7 @@ class ProductsController extends BackOfficeController
                 'cost_price' => $valid['cost_price'] ?? 0,
                 'unit' => $isService ? 'service' : (($data['unit'] ?? '') !== '' ? $data['unit'] : 'piece'),
                 'track_stock' => $isService ? false : $this->parseBoolean($data['track_stock'] ?? '', true),
+                'is_taxable' => $this->parseBoolean($data['taxable'] ?? '', true),
                 'low_stock_threshold' => $valid['low_stock_threshold'] ?? 5,
             ];
 
@@ -814,6 +817,7 @@ class ProductsController extends BackOfficeController
             'image_path' => $product->image_path,
             'expiry_date' => $product->expiry_date?->toIso8601String(),
             'is_active' => $isActive,
+            'is_taxable' => (bool) $product->is_taxable,
         ];
 
         $processor->process('products', $product->id, 'upsert', $payload);
@@ -1067,6 +1071,7 @@ class ProductsController extends BackOfficeController
             'image_path' => $product->image_path,
             'expiry_date' => $product->expiry_date?->toIso8601String(),
             'is_active' => (bool) $product->is_active,
+            'is_taxable' => (bool) $product->is_taxable,
         ];
         $this->applyThroughSyncPipeline($processor, $product->id, $payload);
 
@@ -1206,6 +1211,7 @@ class ProductsController extends BackOfficeController
             'expiry_date' => ['nullable', 'date'],
             'location_id' => ['nullable', 'string', Rule::exists('locations', 'id')->where('business_id', $this->tenantId())],
             'is_active' => ['boolean'],
+            'is_taxable' => ['boolean'],
             // Returnable packaging: containers (by id) this product carries
             // when sold, and how many of each per unit. Only meaningful for
             // item_type=product — see applyContainerLinks().
@@ -1254,6 +1260,13 @@ class ProductsController extends BackOfficeController
         $expiryDate = $request->has('expiry_date')
             ? ($validated['expiry_date'] ?? null)
             : $existing?->expiry_date?->toIso8601String();
+        // Not every product is taxable — the current form has no toggle for
+        // it (set via the CSV import's "taxable" column instead), so an
+        // update must carry the existing value forward rather than silently
+        // resetting a tax-exempt item back to taxable on every save.
+        $isTaxable = $request->has('is_taxable')
+            ? ($validated['is_taxable'] ?? true)
+            : ($existing?->is_taxable ?? true);
 
         return [
             'category_id' => $validated['category_id'] ?? null,
@@ -1284,6 +1297,7 @@ class ProductsController extends BackOfficeController
             // untouched and never sends this field.
             'location_id' => $isService ? null : ($validated['location_id'] ?? null),
             'is_active' => $validated['is_active'] ?? true,
+            'is_taxable' => $isTaxable,
             // Stripped off in store()/update() before the product payload is
             // built — not a Product column, handled by applyContainerLinks().
             'container_links' => $isContainer ? [] : ($validated['container_links'] ?? []),

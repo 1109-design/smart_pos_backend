@@ -16,7 +16,7 @@ class Product extends Model
         'price', 'min_price', 'discount_percent', 'cost_price', 'deposit_amount', 'unit',
         'track_stock', 'stock_quantity', 'low_stock_threshold',
         'sheet_width', 'sheet_height',
-        'image_path', 'expiry_date', 'is_active', 'merged_into_product_id',
+        'image_path', 'expiry_date', 'is_active', 'is_taxable', 'merged_into_product_id',
     ];
 
     protected static function booted(): void
@@ -44,6 +44,7 @@ class Product extends Model
             'sheet_height' => 'decimal:4',
             'track_stock' => 'boolean',
             'is_active' => 'boolean',
+            'is_taxable' => 'boolean',
             'expiry_date' => 'datetime',
         ];
     }

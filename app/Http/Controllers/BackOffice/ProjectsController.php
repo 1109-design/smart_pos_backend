@@ -3,11 +3,14 @@
 namespace App\Http\Controllers\BackOffice;
 
 use App\Models\Expense;
+use App\Models\MilestoneTask;
 use App\Models\Project;
+use App\Models\ProjectMilestone;
 use App\Models\Requisition;
 use App\Services\BackOfficeAuthorizer;
 use App\Services\ProjectService;
 use App\Support\BackOfficePermission;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -73,7 +76,7 @@ class ProjectsController extends BackOfficeController
             'name' => $data['name'],
             'reference' => $data['reference'] ?? null,
             'notes' => $data['notes'] ?? null,
-            'budget' => $data['budget'] ?? null,
+            'budget' => isset($data['budget']) && $data['budget'] !== '' && $data['budget'] !== null ? (float) $data['budget'] : null,
             'created_by_user_id' => $this->userId(),
         ]);
 
@@ -114,6 +117,8 @@ class ProjectsController extends BackOfficeController
 
         $lines = $requisitionLines->concat($expenseLines)->sortBy('date')->values();
 
+        $milestones = $project->milestones()->with('tasks')->oldest()->get();
+
         return Inertia::render('BackOffice/ProjectShow', [
             'project' => [
                 'id' => $project->id,
@@ -125,7 +130,34 @@ class ProjectsController extends BackOfficeController
             ],
             'lines' => $lines,
             'total_cost' => round((float) $lines->sum('amount'), 4),
+            'milestones' => $milestones->map(fn (ProjectMilestone $m) => [
+                'id' => $m->id,
+                'title' => $m->title,
+                'target_date' => $m->target_date?->toDateString(),
+                'percent_complete' => $m->percentComplete(),
+                'is_overdue' => $m->isOverdue(),
+                'tasks' => $m->tasks->map(fn (MilestoneTask $t) => [
+                    'id' => $t->id,
+                    'title' => $t->title,
+                    'is_done' => $t->is_done,
+                ]),
+            ]),
+            // Weighted by total task count across every milestone — matches
+            // the till's projectProgressProvider so both surfaces agree.
+            'overall_progress' => $this->overallProgress($milestones),
         ]);
+    }
+
+    private function overallProgress(Collection $milestones): int
+    {
+        $totalTasks = $milestones->sum(fn (ProjectMilestone $m) => $m->tasks->count());
+        if ($totalTasks === 0) {
+            return 0;
+        }
+
+        $doneTasks = $milestones->sum(fn (ProjectMilestone $m) => $m->tasks->where('is_done', true)->count());
+
+        return (int) round($doneTasks / $totalTasks * 100);
     }
 
     public function close(string $project): RedirectResponse

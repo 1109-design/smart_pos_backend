@@ -52,12 +52,20 @@ interface Paginated<T> {
     links: { url: string | null; label: string; active: boolean }[];
 }
 
+interface RequisitionFilters {
+    status: string;
+    location: string;
+    purpose: string;
+    search: string;
+}
+
 interface Props {
     requisitions: Paginated<RequisitionRow>;
     locations: LocationOption[];
     catalog: CatalogItem[];
     projects: ProjectOption[];
     can_issue: boolean;
+    filters: RequisitionFilters;
 }
 
 const STATUS_STYLE: Record<RequisitionStatus, { label: string; variant: 'amber' | 'blue' | 'green' | 'red' | 'gray' }> = {
@@ -73,7 +81,7 @@ interface FormItem {
     quantity_requested: string;
 }
 
-export default function BackOfficeRequisitions({ requisitions, locations, catalog, projects, can_issue }: Props) {
+export default function BackOfficeRequisitions({ requisitions, locations, catalog, projects, can_issue, filters }: Props) {
     const { flash, errors } = usePage().props as unknown as {
         flash: { success: string | null };
         errors: Record<string, string>;
@@ -89,7 +97,25 @@ export default function BackOfficeRequisitions({ requisitions, locations, catalo
     const [issuing, setIssuing] = useState<RequisitionRow | null>(null);
     const [issueQty, setIssueQty] = useState<Record<string, string>>({});
 
+    const [searchDraft, setSearchDraft] = useState(filters.search);
+
     const catalogById = Object.fromEntries(catalog.map((c) => [c.id, c]));
+
+    const applyFilter = (next: Partial<RequisitionFilters>) => {
+        router.get('/office/requisitions', { ...filters, ...next }, { preserveState: true, preserveScroll: true });
+    };
+
+    const submitSearch = (e: React.FormEvent) => {
+        e.preventDefault();
+        applyFilter({ search: searchDraft });
+    };
+
+    const activeFilterCount = [filters.status, filters.location, filters.purpose].filter((v) => v !== 'all').length + (filters.search ? 1 : 0);
+
+    const clearFilters = () => {
+        setSearchDraft('');
+        router.get('/office/requisitions', {}, { preserveState: true, preserveScroll: true });
+    };
 
     const resetForm = () => {
         setLocationId(locations[0]?.id ?? '');
@@ -141,7 +167,7 @@ export default function BackOfficeRequisitions({ requisitions, locations, catalo
         <BackOfficeLayout>
             <Head title="Requisitions" />
 
-            <div className="mb-6 flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
                 <div>
                     <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Requisitions</h1>
                     <p className="text-sm text-slate-500 mt-1">
@@ -149,7 +175,7 @@ export default function BackOfficeRequisitions({ requisitions, locations, catalo
                         approved request.
                     </p>
                 </div>
-                <button onClick={() => setShowNew(true)} className="btn-primary py-2">
+                <button onClick={() => setShowNew(true)} className="btn-primary py-2 flex-shrink-0">
                     + New Requisition
                 </button>
             </div>
@@ -165,75 +191,114 @@ export default function BackOfficeRequisitions({ requisitions, locations, catalo
                 </div>
             )}
 
+            <div className="flex flex-wrap items-center gap-3 mb-4">
+                <form onSubmit={submitSearch} className="flex-shrink-0">
+                    <input
+                        type="text"
+                        value={searchDraft}
+                        onChange={(e) => setSearchDraft(e.target.value)}
+                        placeholder="Search requisition #…"
+                        className="text-sm rounded-xl border border-slate-200 px-3 py-2 w-48 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                </form>
+                <select
+                    value={filters.status}
+                    onChange={(e) => applyFilter({ status: e.target.value })}
+                    className="text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                >
+                    <option value="all">All statuses</option>
+                    {Object.entries(STATUS_STYLE).map(([value, s]) => (
+                        <option key={value} value={value}>{s.label}</option>
+                    ))}
+                </select>
+                <select
+                    value={filters.location}
+                    onChange={(e) => applyFilter({ location: e.target.value })}
+                    className="text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                >
+                    <option value="all">All locations</option>
+                    {locations.map((l) => (
+                        <option key={l.id} value={l.id}>{l.name}</option>
+                    ))}
+                </select>
+                <select
+                    value={filters.purpose}
+                    onChange={(e) => applyFilter({ purpose: e.target.value })}
+                    className="text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                >
+                    <option value="all">General & project</option>
+                    <option value="general">General use</option>
+                    <option value="project">Project</option>
+                </select>
+                {activeFilterCount > 0 && (
+                    <button onClick={clearFilters} className="text-xs font-semibold text-slate-400 hover:text-slate-600">
+                        Clear filters
+                    </button>
+                )}
+            </div>
+
             <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-                <div className="overflow-x-auto">
+                {/* Mobile: card list */}
+                <div className="md:hidden divide-y divide-slate-50">
+                    {requisitions.data.map((r) => (
+                        <div key={r.id} className="p-4">
+                            <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                    <p className="text-sm font-semibold text-slate-900 truncate">{r.requisition_number}</p>
+                                    <p className="text-xs text-slate-400 mt-0.5">{r.location?.name ?? '—'}</p>
+                                </div>
+                                <StatusBadge label={STATUS_STYLE[r.status].label} variant={STATUS_STYLE[r.status].variant} />
+                            </div>
+                            <p className="text-xs text-slate-500 mt-2">
+                                {r.purpose === 'project'
+                                    ? `Project: ${projects.find((p) => p.id === r.project_id)?.name ?? 'Unknown'}`
+                                    : 'General use'}
+                                {' · '}
+                                {r.requested_by?.name ?? '—'}
+                            </p>
+                            <RequisitionActions requisition={r} canIssue={can_issue} onIssue={openIssue} />
+                        </div>
+                    ))}
+                    {requisitions.data.length === 0 && (
+                        <p className="px-4 py-10 text-center text-sm text-slate-400">No requisitions match these filters.</p>
+                    )}
+                </div>
+
+                {/* Desktop: table */}
+                <div className="hidden md:block overflow-x-auto">
                     <table className="w-full text-sm min-w-[760px]">
                         <thead>
-                            <tr className="bg-slate-50 text-left text-xs font-semibold text-slate-400 uppercase tracking-wide">
-                                <th className="px-5 py-3">Requisition</th>
-                                <th className="px-5 py-3">Location</th>
-                                <th className="px-5 py-3">Purpose</th>
-                                <th className="px-5 py-3">Status</th>
-                                <th className="px-5 py-3">Requested by</th>
-                                <th className="px-5 py-3 text-right">Actions</th>
+                            <tr className="bg-slate-50">
+                                <th className="table-th">Requisition</th>
+                                <th className="table-th">Location</th>
+                                <th className="table-th">Purpose</th>
+                                <th className="table-th">Status</th>
+                                <th className="table-th">Requested by</th>
+                                <th className="table-th text-right">Actions</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-50">
                             {requisitions.data.map((r) => (
                                 <tr key={r.id} className="hover:bg-slate-50/60">
-                                    <td className="px-5 py-3 font-medium text-slate-900">{r.requisition_number}</td>
-                                    <td className="px-5 py-3 text-slate-600">{r.location?.name ?? '—'}</td>
-                                    <td className="px-5 py-3 text-slate-600">
+                                    <td className="table-td font-medium text-slate-900">{r.requisition_number}</td>
+                                    <td className="table-td text-slate-600">{r.location?.name ?? '—'}</td>
+                                    <td className="table-td text-slate-600">
                                         {r.purpose === 'project'
                                             ? `Project: ${projects.find((p) => p.id === r.project_id)?.name ?? 'Unknown'}`
                                             : 'General use'}
                                     </td>
-                                    <td className="px-5 py-3">
+                                    <td className="table-td">
                                         <StatusBadge label={STATUS_STYLE[r.status].label} variant={STATUS_STYLE[r.status].variant} />
                                     </td>
-                                    <td className="px-5 py-3 text-slate-600">{r.requested_by?.name ?? '—'}</td>
-                                    <td className="px-5 py-3 text-right space-x-3 whitespace-nowrap">
-                                        {r.status === 'pending' && (
-                                            <>
-                                                <button
-                                                    onClick={() => router.post(`/office/requisitions/${r.id}/approve`, {}, { preserveScroll: true })}
-                                                    className="text-xs font-semibold text-emerald-600 hover:text-emerald-800"
-                                                >
-                                                    Approve
-                                                </button>
-                                                <button
-                                                    onClick={() => router.post(`/office/requisitions/${r.id}/reject`, {}, { preserveScroll: true })}
-                                                    className="text-xs font-semibold text-red-600 hover:text-red-800"
-                                                >
-                                                    Reject
-                                                </button>
-                                            </>
-                                        )}
-                                        {r.status === 'approved' && can_issue && (
-                                            <button
-                                                onClick={() => openIssue(r)}
-                                                className="text-xs font-semibold text-emerald-600 hover:text-emerald-800"
-                                            >
-                                                Issue
-                                            </button>
-                                        )}
-                                        {(r.status === 'pending' || r.status === 'approved') && (
-                                            <button
-                                                onClick={() => router.post(`/office/requisitions/${r.id}/cancel`, {}, { preserveScroll: true })}
-                                                className="text-xs font-semibold text-slate-500 hover:text-slate-700"
-                                            >
-                                                Cancel
-                                            </button>
-                                        )}
-                                        {!['pending', 'approved'].includes(r.status) && (
-                                            <span className="text-xs text-slate-300">—</span>
-                                        )}
+                                    <td className="table-td text-slate-600">{r.requested_by?.name ?? '—'}</td>
+                                    <td className="table-td text-right">
+                                        <RequisitionActions requisition={r} canIssue={can_issue} onIssue={openIssue} inline />
                                     </td>
                                 </tr>
                             ))}
                             {requisitions.data.length === 0 && (
                                 <tr>
-                                    <td colSpan={6} className="px-5 py-10 text-center text-slate-400">No requisitions yet.</td>
+                                    <td colSpan={6} className="table-td text-center text-slate-400 py-10">No requisitions match these filters.</td>
                                 </tr>
                             )}
                         </tbody>
@@ -247,7 +312,7 @@ export default function BackOfficeRequisitions({ requisitions, locations, catalo
                                 <a
                                     key={i}
                                     href={link.url}
-                                    onClick={(e) => { e.preventDefault(); router.get(link.url!, {}, { preserveState: true }); }}
+                                    onClick={(e) => { e.preventDefault(); router.get(link.url!, { ...filters }, { preserveState: true }); }}
                                     className={`text-sm px-3 py-1.5 rounded-lg ${link.active ? 'bg-emerald-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
                                     dangerouslySetInnerHTML={{ __html: link.label }}
                                 />
@@ -394,4 +459,61 @@ export default function BackOfficeRequisitions({ requisitions, locations, catalo
             </Modal>
         </BackOfficeLayout>
     );
+}
+
+function RequisitionActions({
+    requisition,
+    canIssue,
+    onIssue,
+    inline = false,
+}: {
+    requisition: RequisitionRow;
+    canIssue: boolean;
+    onIssue: (r: RequisitionRow) => void;
+    inline?: boolean;
+}) {
+    const buttons: React.ReactNode[] = [];
+
+    if (requisition.status === 'pending') {
+        buttons.push(
+            <button
+                key="approve"
+                onClick={() => router.post(`/office/requisitions/${requisition.id}/approve`, {}, { preserveScroll: true })}
+                className="text-xs font-semibold text-emerald-600 hover:text-emerald-800"
+            >
+                Approve
+            </button>,
+            <button
+                key="reject"
+                onClick={() => router.post(`/office/requisitions/${requisition.id}/reject`, {}, { preserveScroll: true })}
+                className="text-xs font-semibold text-red-600 hover:text-red-800"
+            >
+                Reject
+            </button>
+        );
+    } else if (requisition.status === 'approved' && canIssue) {
+        buttons.push(
+            <button key="issue" onClick={() => onIssue(requisition)} className="text-xs font-semibold text-emerald-600 hover:text-emerald-800">
+                Issue
+            </button>
+        );
+    }
+
+    if (requisition.status === 'pending' || requisition.status === 'approved') {
+        buttons.push(
+            <button
+                key="cancel"
+                onClick={() => router.post(`/office/requisitions/${requisition.id}/cancel`, {}, { preserveScroll: true })}
+                className="text-xs font-semibold text-slate-500 hover:text-slate-700"
+            >
+                Cancel
+            </button>
+        );
+    }
+
+    if (buttons.length === 0) {
+        return inline ? <span className="text-xs text-slate-300">—</span> : null;
+    }
+
+    return <div className={inline ? 'flex items-center justify-end gap-3' : 'flex items-center gap-3 mt-3'}>{buttons}</div>;
 }
