@@ -17,6 +17,7 @@ class Business extends Model
         'email',
         'tax_number',
         'tin',
+        'bank_accounts_json',
         'currency_code',
         'logo_path',
         'metadata',

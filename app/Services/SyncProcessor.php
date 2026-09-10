@@ -591,6 +591,13 @@ class SyncProcessor
                         'email' => $preserve('email'),
                         'tax_number' => $payload['vat_number'] ?? $payload['tax_number'] ?? $existingBusiness?->tax_number,
                         'tin' => $preserve('tin'),
+                        // Passed through verbatim, opaque to the backend —
+                        // only Flutter's BankAccount.decodeList() gives this
+                        // string meaning. Already JSON-encoded by the device
+                        // (businessSyncPayload()), so no array cast on the
+                        // model — one would double-encode an already-string
+                        // value on every write.
+                        'bank_accounts_json' => $preserve('bank_accounts_json'),
                         'currency_code' => $payload['base_currency_code'] ?? $existingBusiness?->currency_code ?? 'USD',
                         'logo_path' => $preserve('logo_path'),
                         'metadata' => $preserve('metadata'),
