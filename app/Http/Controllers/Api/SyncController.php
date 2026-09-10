@@ -33,6 +33,10 @@ class SyncController extends Controller
         ]);
 
         $device = $this->deviceResolver->fromRequest($request);
+        // The user the device's own bearer token authenticates as — needed
+        // to authorize a 'users' role change (see SyncProcessor::syncUser())
+        // against who is actually pushing it, not just what it claims.
+        $actingUser = $request->user();
         $accepted = [];
         $conflicts = [];
         $errors = [];
@@ -91,7 +95,7 @@ class SyncController extends Controller
             $acceptedInGroup = [];
 
             try {
-                DB::transaction(function () use ($recordsToProcess, $device, $processor, &$acceptedInGroup) {
+                DB::transaction(function () use ($recordsToProcess, $device, $actingUser, $processor, &$acceptedInGroup) {
                     foreach ($recordsToProcess as $item) {
                         $record = $item['record'];
                         $incomingUpdatedAt = $item['incomingUpdatedAt'];
@@ -123,7 +127,8 @@ class SyncController extends Controller
                             $record['uuid'],
                             $record['operation'],
                             $enrichedPayload,
-                            trusted: false
+                            trusted: false,
+                            actingUser: $actingUser,
                         );
 
                         SyncRecord::create([
@@ -310,7 +315,9 @@ class SyncController extends Controller
             ]);
         }
 
-        DB::transaction(function () use ($data, $conflict, $device, $processor, $resolvedBy) {
+        $actingUser = $request->user();
+
+        DB::transaction(function () use ($data, $conflict, $device, $actingUser, $processor, $resolvedBy) {
             $action = $data['action'];
 
             if ($action === 'retry_local') {
@@ -324,7 +331,7 @@ class SyncController extends Controller
                     $enrichedPayload['business_id'] = $device->tenant_id;
                 }
 
-                $processor->process($conflict->table_name, $conflict->record_uuid, 'upsert', $enrichedPayload, trusted: false);
+                $processor->process($conflict->table_name, $conflict->record_uuid, 'upsert', $enrichedPayload, trusted: false, actingUser: $actingUser);
 
                 SyncRecord::create([
                     'business_id' => $device?->tenant_id,
@@ -349,7 +356,7 @@ class SyncController extends Controller
                     $enrichedPayload['business_id'] = $device->tenant_id;
                 }
 
-                $processor->process($conflict->table_name, $conflict->record_uuid, 'upsert', $enrichedPayload, trusted: false);
+                $processor->process($conflict->table_name, $conflict->record_uuid, 'upsert', $enrichedPayload, trusted: false, actingUser: $actingUser);
 
                 SyncRecord::create([
                     'business_id' => $device?->tenant_id,

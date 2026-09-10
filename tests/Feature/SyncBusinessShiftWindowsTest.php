@@ -94,4 +94,54 @@ class SyncBusinessShiftWindowsTest extends TestCase
             'night_shift_start' => null,
         ]);
     }
+
+    /**
+     * The exact "full-row-upsert reset footgun" this class's own comment
+     * describes as having already happened twice on the Flutter side
+     * (fiscalisation_enabled/tin, then day_shift_start/night_shift_start) —
+     * but that fix only ever lived client-side in businessSyncPayload().
+     * Reproduced live against a running dev server: a device pushing
+     * nothing but a phone number change silently reset
+     * fiscalisation_enabled to false and tin to null for a real fiscalised
+     * business, because nothing on the server preserved fields the payload
+     * simply omitted. Fixed with a server-side preserve-if-absent gate in
+     * the 'businesses' case, independent of what any given client sends.
+     */
+    public function test_a_partial_push_does_not_reset_fiscalisation_or_tin(): void
+    {
+        $tenantId = 'tenant-shift-windows-3';
+        $token = $this->actingDeviceToken($tenantId);
+
+        Business::create([
+            'id' => $tenantId,
+            'name' => 'Fiscalised Shop',
+            'fiscalisation_enabled' => true,
+            'tin' => '1234567890',
+        ]);
+
+        // A device pushes an update touching only the phone number —
+        // exactly what a "cashier updates the business phone" flow (or any
+        // other partial-field save) would send.
+        $response = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'businesses',
+                    'uuid' => $tenantId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'name' => 'Fiscalised Shop',
+                        'phone' => '+263779999999',
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ]);
+
+        $response->assertOk();
+        $this->assertDatabaseHas('businesses', [
+            'id' => $tenantId,
+            'phone' => '+263779999999',
+            'fiscalisation_enabled' => true,
+            'tin' => '1234567890',
+        ]);
+    }
 }

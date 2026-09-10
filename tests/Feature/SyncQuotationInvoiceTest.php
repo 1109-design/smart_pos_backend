@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\Customer;
 use App\Models\Device;
 use App\Models\Invoice;
+use App\Models\InvoicePayment;
 use App\Models\Quotation;
 use App\Models\RecurringInvoiceSchedule;
 use App\Models\Tenant;
@@ -267,5 +268,96 @@ class SyncQuotationInvoiceTest extends TestCase
         $response->assertOk();
         $response->assertJsonCount(0, 'accepted');
         $response->assertJsonCount(1, 'errors');
+    }
+
+    /**
+     * Master spec section 49: security must be enforced beyond the UI.
+     * amount_paid/status were accepted straight from any device's payload
+     * — reproduced live against a running dev server: a plain cashier's
+     * device marked a real $13,507.40 invoice "paid" in one push, with no
+     * new invoice_payments row and no money ever collected, silently
+     * erasing the real receivable from every report that reads
+     * amount_paid/status. Fixed the same way products.stock_quantity and
+     * customers.credit_balance are already protected: recompute
+     * amount_paid from the actual invoice_payments ledger after every
+     * 'invoices' AND 'invoice_payments' upsert, and correct a
+     * payment-derived status (paid/partial) to match — never touching a
+     * lifecycle status (draft/sent/cancelled) that isn't about payment.
+     */
+    public function test_amount_paid_and_status_cannot_be_set_directly_without_a_real_payment(): void
+    {
+        $tenantId = 'tenant-inv-amount-paid-fraud';
+        $token = $this->actingDeviceToken($tenantId);
+
+        $customerId = (string) Str::uuid();
+        $creatorId = (string) Str::uuid();
+        $invoice = Invoice::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId,
+            'customer_id' => $customerId, 'invoice_number' => 'INV-FRAUD-001',
+            'status' => 'partial', 'issue_date' => now(), 'total' => 1000,
+            'amount_paid' => 300, 'created_by_user_id' => $creatorId,
+        ]);
+        InvoicePayment::create([
+            'id' => (string) Str::uuid(), 'invoice_id' => $invoice->id,
+            'method' => 'cash', 'amount' => 300, 'currency_code' => 'USD',
+            'base_equivalent' => 300, 'paid_at' => now(),
+            'recorded_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        $response = $this->push($token, 'invoices', $invoice->id, [
+            'business_id' => $tenantId,
+            'customer_id' => $customerId,
+            'invoice_number' => 'INV-FRAUD-001',
+            'status' => 'paid',
+            'issue_date' => now()->toIso8601String(),
+            'total' => 1000,
+            'amount_paid' => 1000,
+            'created_by_user_id' => $creatorId,
+        ]);
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'accepted');
+
+        $invoice->refresh();
+        $this->assertSame(300.0, (float) $invoice->amount_paid);
+        $this->assertSame('partial', $invoice->status);
+    }
+
+    public function test_amount_paid_reflects_a_genuine_new_payment_immediately(): void
+    {
+        $tenantId = 'tenant-inv-amount-paid-legit';
+        $token = $this->actingDeviceToken($tenantId);
+
+        $invoice = Invoice::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId,
+            'customer_id' => (string) Str::uuid(), 'invoice_number' => 'INV-LEGIT-001',
+            'status' => 'partial', 'issue_date' => now(), 'total' => 1000,
+            'amount_paid' => 300, 'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        // A previous payment already accounts for the 300 above.
+        InvoicePayment::create([
+            'id' => (string) Str::uuid(), 'invoice_id' => $invoice->id,
+            'method' => 'cash', 'amount' => 300, 'currency_code' => 'USD',
+            'base_equivalent' => 300, 'paid_at' => now(),
+            'recorded_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        $response = $this->push($token, 'invoice_payments', (string) Str::uuid(), [
+            'business_id' => $tenantId,
+            'invoice_id' => $invoice->id,
+            'method' => 'cash',
+            'amount' => 700,
+            'currency_code' => 'USD',
+            'base_equivalent' => 700,
+            'recorded_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'accepted');
+
+        $invoice->refresh();
+        $this->assertSame(1000.0, (float) $invoice->amount_paid);
+        $this->assertSame('paid', $invoice->status);
     }
 }

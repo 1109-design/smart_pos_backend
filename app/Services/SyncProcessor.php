@@ -71,6 +71,7 @@ use App\Services\Accounting\SalaryPostingService;
 use App\Services\Accounting\SalePostingService;
 use App\Services\Accounting\StockTakePostingService;
 use App\Services\Zimra\ZimraSalesService;
+use App\Support\BackOfficePermission;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -174,7 +175,7 @@ class SyncProcessor
      *                         is server-authored (BackOffice controllers, artisan
      *                         commands), so the default is true.
      */
-    public function process(string $table, string $uuid, string $operation, array $payload, bool $trusted = true): void
+    public function process(string $table, string $uuid, string $operation, array $payload, bool $trusted = true, ?User $actingUser = null): void
     {
         $this->assertOwnership($table, $uuid, $payload);
 
@@ -184,7 +185,7 @@ class SyncProcessor
             return;
         }
 
-        $this->handleUpsert($table, $uuid, $payload, $trusted);
+        $this->handleUpsert($table, $uuid, $payload, $trusted, $actingUser);
     }
 
     /**
@@ -314,7 +315,7 @@ class SyncProcessor
         }
     }
 
-    protected function handleUpsert(string $table, string $uuid, array $payload, bool $trusted = true): void
+    protected function handleUpsert(string $table, string $uuid, array $payload, bool $trusted = true, ?User $actingUser = null): void
     {
         switch ($table) {
             case 'locations':
@@ -560,27 +561,48 @@ class SyncProcessor
                 break;
 
             case 'businesses':
+                // Devices are expected to always send businessSyncPayload()'s
+                // full field snapshot — its own doc comment says this exact
+                // "missing key means reset to null/default" footgun has
+                // already silently wiped fiscalisation_enabled/tin (and
+                // separately day_shift_start/night_shift_start) in
+                // production, twice, before that helper existed. But that
+                // fix only ever lived on the Flutter side; this endpoint is
+                // the generic device-sync entry point, and nothing stops a
+                // different/older/malformed client from doing the exact
+                // same thing again — confirmed live: a push containing
+                // nothing but a phone number change silently reset
+                // fiscalisation_enabled to false and tin to null for a real
+                // fiscalised business. Preserve whatever the payload omits
+                // instead of defaulting it, so an incomplete payload from
+                // ANY client can no longer regress ZIMRA fiscal compliance
+                // or the shift-window settings.
+                $existingBusiness = Business::find($uuid);
+                $preserve = fn (string $key, $default = null) => array_key_exists($key, $payload)
+                    ? $payload[$key]
+                    : ($existingBusiness?->{$key} ?? $default);
+
                 Business::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'name' => $payload['name'] ?? '',
-                        'address' => $payload['address'] ?? null,
-                        'phone' => $payload['phone'] ?? null,
-                        'email' => $payload['email'] ?? null,
-                        'tax_number' => $payload['vat_number'] ?? $payload['tax_number'] ?? null,
-                        'tin' => $payload['tin'] ?? null,
-                        'currency_code' => $payload['base_currency_code'] ?? 'USD',
-                        'logo_path' => $payload['logo_path'] ?? null,
-                        'metadata' => $payload['metadata'] ?? null,
-                        'fiscalisation_enabled' => $payload['fiscalisation_enabled'] ?? false,
-                        'day_shift_start' => $payload['day_shift_start'] ?? null,
-                        'night_shift_start' => $payload['night_shift_start'] ?? null,
+                        'name' => $preserve('name', ''),
+                        'address' => $preserve('address'),
+                        'phone' => $preserve('phone'),
+                        'email' => $preserve('email'),
+                        'tax_number' => $payload['vat_number'] ?? $payload['tax_number'] ?? $existingBusiness?->tax_number,
+                        'tin' => $preserve('tin'),
+                        'currency_code' => $payload['base_currency_code'] ?? $existingBusiness?->currency_code ?? 'USD',
+                        'logo_path' => $preserve('logo_path'),
+                        'metadata' => $preserve('metadata'),
+                        'fiscalisation_enabled' => $preserve('fiscalisation_enabled', false),
+                        'day_shift_start' => $preserve('day_shift_start'),
+                        'night_shift_start' => $preserve('night_shift_start'),
                     ]
                 );
                 break;
 
             case 'users':
-                $this->syncUser($uuid, $payload);
+                $this->syncUser($uuid, $payload, $trusted, $actingUser);
                 break;
 
             case 'categories':
@@ -984,6 +1006,29 @@ class SyncProcessor
                 break;
 
             case 'stock_movements':
+                // STK·03 — "a requisition alone must never remove stock,"
+                // and issuing one is gated on approval. Unlike void/refund/
+                // exchange-rate changes, a requisition's approval lives on
+                // its own `status` column rather than the generic
+                // `approval_requests` table (see Requisition::isApproved()),
+                // so this can't reuse hasApprovedRequest() — but the
+                // principle is identical: an untrusted device claiming a
+                // 'requisition_issue' stock movement must point at a
+                // requisition that's actually been approved, not just
+                // trust whatever the Flutter UI's own button-visibility
+                // gate would normally have enforced. Without this, a
+                // device that talks to the API directly (bypassing the
+                // app) could deduct real stock against a requisition
+                // that was never approved.
+                if (! $trusted && ($payload['type'] ?? null) === 'requisition_issue') {
+                    $requisitionId = $payload['reference_id'] ?? null;
+                    $requisition = $requisitionId ? Requisition::find($requisitionId) : null;
+
+                    if (! $requisition || ! $requisition->isApproved()) {
+                        throw new \RuntimeException('stock_movements: requisition_issue requires an approved requisition.');
+                    }
+                }
+
                 $movement = StockMovement::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -1360,6 +1405,25 @@ class SyncProcessor
                     );
                 }
 
+                // STC·08 — StockTakesController::approve() and the till's own
+                // stock_take_report_screen.dart::_approve() both block while
+                // any item needsRecount(), but neither of those is the only
+                // door into this status column: an untrusted device pushing
+                // straight to /api/v1/sync/push skips both and previously
+                // hit no check at all here. Same category as the
+                // requisition_issue gate above — a workflow gate that's only
+                // enforced by callers, not by the sync entry point itself.
+                if (! $trusted && $incomingStatus === 'approved') {
+                    $stillNeedsRecount = StockTakeItem::where('stock_take_id', $uuid)
+                        ->where('flagged_for_recount', true)
+                        ->whereNull('recount_completed_at')
+                        ->exists();
+
+                    if ($stillNeedsRecount) {
+                        throw new \RuntimeException('stock_takes: cannot approve while items still need a recount.');
+                    }
+                }
+
                 StockTake::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -1434,6 +1498,22 @@ class SyncProcessor
                 break;
 
             case 'role_permissions':
+                // Same privilege-escalation class as the 'users' role gate
+                // above, arguably worse: this doesn't just promote one
+                // user, it redefines what an ENTIRE role can do — every
+                // cashier at the business, not just one account. Had no
+                // check at all: reproduced live, a real cashier's own
+                // device granted the 'cashier' role manageUsers/
+                // voidTransaction/issueRefund/editCurrencyRates/etc — once
+                // synced to every till, every cashier account would have
+                // gained all of it. BackOffice's own RolesController is
+                // even stricter than the 'users' gate here — only the
+                // business owner may manage roles at all (see
+                // authorizeOwner() there) — mirrored exactly.
+                if (! $trusted && ! ($actingUser?->hasRole('business_owner') ?? false)) {
+                    throw new \RuntimeException('role_permissions: only the business owner can manage roles.');
+                }
+
                 RolePermission::updateOrCreate(
                     [
                         'business_id' => $payload['business_id'] ?? null,
@@ -1488,6 +1568,20 @@ class SyncProcessor
                 break;
 
             case 'salary_payments':
+                // Same class of gap as 'users'/'role_permissions' above,
+                // financial rather than permission-based: the Flutter UI
+                // clearly means this to be restricted (employees_screen.dart/
+                // employee_profile_screen.dart both gate the payroll button
+                // behind Permission.processPayroll — owner/manager by
+                // default), but nothing enforced that at the sync entry
+                // point. Reproduced live: a plain cashier's device pushed a
+                // fabricated $50,000 salary_payments record for a real
+                // employee and it was accepted outright, with a real Dr
+                // Wages / Cr Cash journal one push away from posting.
+                if (! $trusted && ! ($actingUser?->hasRole(['business_owner', 'manager']) ?? false)) {
+                    throw new \RuntimeException('salary_payments: recording a payment requires owner or manager access.');
+                }
+
                 $salaryPayment = SalaryPayment::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -1575,6 +1669,7 @@ class SyncProcessor
                         'created_by_user_id' => $payload['created_by_user_id'] ?? null,
                     ]
                 );
+                $this->recomputeInvoiceAmountPaid($uuid);
                 break;
 
             case 'invoice_items':
@@ -1608,6 +1703,9 @@ class SyncProcessor
                         'paid_at' => $payload['paid_at'] ?? now(),
                     ]
                 );
+                if (! empty($payload['invoice_id'])) {
+                    $this->recomputeInvoiceAmountPaid($payload['invoice_id']);
+                }
                 break;
 
             case 'credit_notes':
@@ -1661,8 +1759,14 @@ class SyncProcessor
         }
     }
 
-    protected function syncUser(string $uuid, array $payload): void
+    protected function syncUser(string $uuid, array $payload, bool $trusted = true, ?User $actingUser = null): void
     {
+        // Captured before updateOrCreate() below overwrites the row — this
+        // is the ONLY place left that can still tell "is this a genuine
+        // role CHANGE" from "the device just resent its already-correct
+        // role," which matters for the check further down.
+        $currentRole = User::find($uuid)?->getRoleNames()->first();
+
         // Defense in depth: the device is expected to hash PINs itself
         // before they ever reach a sync payload, but an older app build (or
         // any future write path) sending one in plain text must not land in
@@ -1703,7 +1807,31 @@ class SyncProcessor
         $user = User::updateOrCreate(['id' => $uuid], $userData);
 
         if (method_exists($user, 'syncRoles') && isset($payload['role'])) {
-            $user->syncRoles([$payload['role']]);
+            $incomingRole = $payload['role'];
+
+            // Critical privilege-escalation guard: BackOfficeController's
+            // UsersController already gates every role assignment behind
+            // authorizeManager() (MANAGE_USERS) before it ever reaches
+            // process() — but this method is also the generic device sync
+            // path, which had NO check at all. Without this, any
+            // authenticated device (a cashier's own till included) could
+            // push a 'users' upsert for its own id with
+            // payload['role']='business_owner' and instantly grant itself
+            // full owner access — reproduced live against a running server
+            // before this fix existed. $trusted (server-authored writes:
+            // seeders, BackOffice's own already-authorized call) bypasses
+            // this the same way it bypasses the other approval gates in
+            // this class; a device pushing back its own unchanged role is
+            // also let through so routine syncs never spuriously fail.
+            if (! $trusted && $incomingRole !== $currentRole) {
+                $actingRole = $actingUser?->getRoleNames()->first();
+
+                if (! app(BackOfficeAuthorizer::class)->can($userData['business_id'], $actingRole, BackOfficePermission::MANAGE_USERS)) {
+                    throw new \RuntimeException('users: role changes require manage_users permission.');
+                }
+            }
+
+            $user->syncRoles([$incomingRole]);
         }
     }
 
@@ -2014,6 +2142,40 @@ class SyncProcessor
             'loyalty_points' => max(0, $loyaltyPoints),
             'credit_balance' => max(0, $creditBalance),
         ]);
+    }
+
+    /**
+     * Recompute an invoice's amount_paid from its actual invoice_payments
+     * ledger, the same "never trust a payload's claim about a
+     * ledger-derived total" principle as recomputeCustomerBalances()/
+     * recomputeProductStock() above. Without this, 'invoices' upserts
+     * accepted amount_paid straight from any device's payload — reproduced
+     * live: a plain cashier's device marked a real $13,507.40 invoice
+     * "paid" in a single push, with no new invoice_payments row and no
+     * money ever collected, silently erasing $7,294 of real receivable
+     * from every report that reads amount_paid/status. Called after both
+     * an 'invoices' upsert and an 'invoice_payments' upsert, so a genuine
+     * new payment is reflected immediately either way.
+     */
+    protected function recomputeInvoiceAmountPaid(string $invoiceId): void
+    {
+        $amountPaid = max(0, InvoicePayment::where('invoice_id', $invoiceId)->sum('base_equivalent'));
+        $invoice = Invoice::find($invoiceId);
+        if (! $invoice) {
+            return;
+        }
+
+        $update = ['amount_paid' => $amountPaid];
+
+        // Keep status consistent with the now-corrected amount, but only
+        // when status is itself payment-derived — never override a
+        // lifecycle state (draft/sent/cancelled) that has nothing to do
+        // with how much has been paid.
+        if (in_array($invoice->status, ['paid', 'partial'], true)) {
+            $update['status'] = $amountPaid >= (float) $invoice->total ? 'paid' : 'partial';
+        }
+
+        $invoice->update($update);
     }
 
     protected function handleDelete(string $table, string $uuid): void
