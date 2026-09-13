@@ -56,4 +56,41 @@ class PurchaseOrder extends Model
     {
         return $this->hasMany(PurchaseOrderItem::class);
     }
+
+    /**
+     * A PO is genuinely multi-device — created/sent on one till, received
+     * via GRV on another (often a warehouse till) — same shape as
+     * StockTransfer. SyncProcessor::gatePurchaseOrderStatus() already locks
+     * 'pending_approval' against being overwritten, but for every other
+     * status it applied the incoming payload unconditionally: a device that
+     * sent a PO and went offline could resync its own stale 'sent' snapshot
+     * after another device already received (or cancelled) it, silently
+     * regressing the status. 'pending_approval' is deliberately left out of
+     * ALLOWED_TRANSITIONS here since gatePurchaseOrderStatus() already
+     * short-circuits that case before this is ever consulted — see its doc
+     * comment on why resolution bypasses both entirely.
+     */
+    public const TERMINAL_STATUSES = ['received', 'cancelled'];
+
+    /**
+     * @var array<string, array<int, string>>
+     */
+    public const ALLOWED_TRANSITIONS = [
+        'draft' => ['sent', 'pending_approval', 'cancelled'],
+        'sent' => ['partial', 'received', 'cancelled'],
+        'partial' => ['partial', 'received'],
+    ];
+
+    public static function isValidTransition(?string $from, string $to): bool
+    {
+        if ($from === null || $from === $to) {
+            return true;
+        }
+
+        if (in_array($from, self::TERMINAL_STATUSES, true)) {
+            return false;
+        }
+
+        return in_array($to, self::ALLOWED_TRANSITIONS[$from] ?? [], true);
+    }
 }

@@ -59,4 +59,34 @@ class Requisition extends Model
     {
         return $this->status === 'approved';
     }
+
+    /**
+     * A requisition is raised on one device and approved/issued from
+     * another (manager PC, warehouse till) — same multi-device shape as
+     * PurchaseOrder/StockTransfer. See RequisitionDetailScreen's doc
+     * comment for the exact three actions (approve/reject/issue) plus
+     * cancel, available from 'pending' and/or 'approved'.
+     */
+    public const TERMINAL_STATUSES = ['issued', 'rejected', 'cancelled'];
+
+    /**
+     * @var array<string, array<int, string>>
+     */
+    public const ALLOWED_TRANSITIONS = [
+        'pending' => ['approved', 'rejected', 'cancelled'],
+        'approved' => ['issued', 'cancelled'],
+    ];
+
+    public static function isValidTransition(?string $from, string $to): bool
+    {
+        if ($from === null || $from === $to) {
+            return true;
+        }
+
+        if (in_array($from, self::TERMINAL_STATUSES, true)) {
+            return false;
+        }
+
+        return in_array($to, self::ALLOWED_TRANSITIONS[$from] ?? [], true);
+    }
 }

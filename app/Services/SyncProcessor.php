@@ -532,6 +532,15 @@ class SyncProcessor
                 break;
 
             case 'requisitions':
+                $currentRequisitionStatus = Requisition::where('id', $uuid)->value('status');
+                $incomingRequisitionStatus = $payload['status'] ?? 'pending';
+
+                if (! Requisition::isValidTransition($currentRequisitionStatus, $incomingRequisitionStatus)) {
+                    throw new \RuntimeException(
+                        "Invalid requisition transition: '{$currentRequisitionStatus}' -> '{$incomingRequisitionStatus}'"
+                    );
+                }
+
                 Requisition::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -541,7 +550,7 @@ class SyncProcessor
                         'purpose' => $payload['purpose'] ?? 'general',
                         'project_id' => $payload['project_id'] ?? null,
                         'notes' => $payload['notes'] ?? null,
-                        'status' => $payload['status'] ?? 'pending',
+                        'status' => $incomingRequisitionStatus,
                         'requested_by_user_id' => $payload['requested_by_user_id'] ?? null,
                         'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
                         'approved_at' => $payload['approved_at'] ?? null,
@@ -2476,6 +2485,12 @@ class SyncProcessor
 
         if ($existing?->status === 'pending_approval') {
             return ['pending_approval', false, null];
+        }
+
+        if (! PurchaseOrder::isValidTransition($existing?->status, $incomingStatus)) {
+            throw new \RuntimeException(
+                "Invalid purchase order transition: '{$existing?->status}' -> '{$incomingStatus}'"
+            );
         }
 
         $isFirstSubmission = $incomingStatus === 'sent' && ($existing === null || $existing->status === 'draft');
