@@ -2086,14 +2086,43 @@ class SyncProcessor
                 break;
 
             case 'account_role_mappings':
+                // Critical fraud guard, same shape as the 'users' role-
+                // escalation fix above: this row decides which real GL
+                // account every future sale/payment/posting for an entire
+                // category lands in (see AccountRoleMappingService's doc
+                // comment). The till only ever shows its edit screen to
+                // UserRole.owner (settings_screen.dart) — but that's a
+                // client-side gate a modified app or a raw API call bypasses
+                // entirely, and this generic device sync path had no
+                // server-side check at all. Without this, any authenticated
+                // device could silently redirect where a whole revenue/
+                // expense category posts — a live internal-fraud vector, not
+                // just a cosmetic bug. A device resending its own already-
+                // current mapping unchanged is still let through so routine
+                // syncs never spuriously fail.
+                $mappingBusinessId = $payload['business_id'] ?? null;
+                $mappingRole = $payload['role'] ?? null;
+                $currentMappingGlAccountId = AccountRoleMapping::where('business_id', $mappingBusinessId)
+                    ->where('role', $mappingRole)
+                    ->value('gl_account_id');
+                $incomingMappingGlAccountId = $payload['gl_account_id'] ?? null;
+
+                if (! $trusted && $incomingMappingGlAccountId !== $currentMappingGlAccountId) {
+                    $actingRole = $actingUser?->getRoleNames()->first();
+
+                    if ($actingRole !== 'business_owner') {
+                        throw new \RuntimeException('account_role_mappings: changing GL account routing requires the business owner role.');
+                    }
+                }
+
                 AccountRoleMapping::updateOrCreate(
                     [
-                        'business_id' => $payload['business_id'] ?? null,
-                        'role' => $payload['role'] ?? null,
+                        'business_id' => $mappingBusinessId,
+                        'role' => $mappingRole,
                     ],
                     [
                         'id' => $uuid,
-                        'gl_account_id' => $payload['gl_account_id'] ?? null,
+                        'gl_account_id' => $incomingMappingGlAccountId,
                     ]
                 );
                 break;
