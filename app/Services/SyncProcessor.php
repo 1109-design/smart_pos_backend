@@ -2045,6 +2045,27 @@ class SyncProcessor
                 break;
 
             case 'bank_accounts':
+                // Same fraud-guard shape as account_role_mappings just below
+                // (and gated on the same field for the same reason: this is
+                // the lever that decides which real GL account a bank
+                // account's activity posts to). The till only shows the
+                // bank accounts screen to Permission.manageCashVault
+                // (owner/manager by default) — a client-side gate a raw API
+                // call bypasses entirely. Scoped to gl_account_id changes on
+                // an *existing* account, mirroring account_role_mappings —
+                // creating a brand-new account or editing its name/branch/
+                // currency isn't itself a money-redirect vector.
+                $existingBankAccountGlId = BankAccount::where('id', $uuid)->value('gl_account_id');
+                $incomingBankAccountGlId = $payload['gl_account_id'] ?? null;
+
+                if (! $trusted && $existingBankAccountGlId !== null && $incomingBankAccountGlId !== $existingBankAccountGlId) {
+                    $actingRole = $actingUser?->getRoleNames()->first();
+
+                    if (! in_array($actingRole, ['business_owner', 'manager'], true)) {
+                        throw new \RuntimeException('bank_accounts: changing which GL account a bank account posts to requires the owner or manager role.');
+                    }
+                }
+
                 BankAccount::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -2053,7 +2074,7 @@ class SyncProcessor
                         'account_number' => $payload['account_number'] ?? null,
                         'branch' => $payload['branch'] ?? null,
                         'currency_code' => $payload['currency_code'] ?? 'USD',
-                        'gl_account_id' => $payload['gl_account_id'] ?? null,
+                        'gl_account_id' => $incomingBankAccountGlId,
                         'is_active' => $payload['is_active'] ?? true,
                     ]
                 );
