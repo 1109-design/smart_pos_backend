@@ -492,13 +492,44 @@ class SyncProcessor
                 break;
 
             case 'approval_requests':
-                $currentApprovalStatus = ApprovalRequest::where('id', $uuid)->value('status');
+                $existingApprovalRequest = ApprovalRequest::find($uuid);
+                $currentApprovalStatus = $existingApprovalRequest?->status;
                 $incomingApprovalStatus = $payload['status'] ?? 'pending';
 
                 if (! ApprovalRequest::isValidTransition($currentApprovalStatus, $incomingApprovalStatus)) {
                     throw new \RuntimeException(
                         "Invalid approval request transition: '{$currentApprovalStatus}' -> '{$incomingApprovalStatus}'"
                     );
+                }
+
+                // Same enforcement as ApprovalService::resolve() (separation
+                // of duties + rule-based required-role), applied here too —
+                // a device can resolve an approval_requests row through this
+                // generic sync-push path directly (the till's own PIN-
+                // approved/queued flows both write here), completely
+                // bypassing ApprovalService::resolve(), which only the
+                // BackOffice web controller ever calls. Without this, the
+                // guard added there closes the BackOffice route but leaves
+                // this one wide open — the same class of bypass every other
+                // escalation gate in this file exists to close. $actingUser
+                // (the device's own authenticated identity), never a
+                // payload-claimed approver_user_id, decides who's deciding.
+                if (! $trusted && $currentApprovalStatus === 'pending' && in_array($incomingApprovalStatus, ['approved', 'rejected'], true)) {
+                    $requiredRole = $existingApprovalRequest->rule_set_id
+                        ? app(ApprovalRuleEngine::class)->findApplicableRule(
+                            ApprovalRuleSet::find($existingApprovalRequest->rule_set_id),
+                            ['amount' => (float) ($existingApprovalRequest->estimated_value ?? 0)],
+                            $existingApprovalRequest->current_level ?? 1,
+                        )?->required_role
+                        : null;
+
+                    if (! $actingUser || ! app(ApprovalRuleEngine::class)->canApprove($existingApprovalRequest->business_id, $actingUser->id, $existingApprovalRequest, $requiredRole)) {
+                        throw new \RuntimeException(
+                            $requiredRole
+                                ? "approval_requests: deciding this request requires {$requiredRole} authority or higher."
+                                : 'approval_requests: you cannot approve or reject your own request.'
+                        );
+                    }
                 }
 
                 ApprovalRequest::updateOrCreate(

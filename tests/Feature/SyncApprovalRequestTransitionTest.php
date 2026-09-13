@@ -21,6 +21,13 @@ use Tests\TestCase;
  * out the previously-current rate and opens a new one on every call), so a
  * second resolution would corrupt the FX rate history. Mirrors
  * SyncPurchaseOrderTransitionTest / SyncRequisitionTransitionTest.
+ *
+ * requested_by_user_id below is a different, unrelated UUID from the
+ * device's own user (88888888...) — separation-of-duties now blocks a
+ * device from approving its own request (see
+ * SyncApprovalRequestAuthorityBypassTest), which this file isn't testing;
+ * it needs a distinct requester purely so the transition-guard scenarios
+ * below aren't incidentally blocked by that separate concern.
  */
 class SyncApprovalRequestTransitionTest extends TestCase
 {
@@ -62,7 +69,7 @@ class SyncApprovalRequestTransitionTest extends TestCase
                         'subject_type' => 'Discount',
                         'subject_id' => (string) Str::uuid(),
                         'action' => 'apply_discount',
-                        'requested_by_user_id' => '88888888-8888-4888-8888-888888888888',
+                        'requested_by_user_id' => '77777777-7777-4777-8777-777777777777',
                         'status' => $status,
                         'updated_at' => now()->toIso8601String(),
                     ],
