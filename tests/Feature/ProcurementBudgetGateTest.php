@@ -114,6 +114,11 @@ class ProcurementBudgetGateTest extends TestCase
         $tenantId = 'tenant-budget-3';
         $this->withoutMiddleware(AuthenticateBackOfficeUser::class);
         Tenant::firstOrCreate(['id' => $tenantId], ['business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com', 'pairing_code' => substr(md5($tenantId), 0, 6)]);
+        $requester = User::factory()->create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'email' => $tenantId.'-requester@example.com', 'is_active' => true]);
+        // Separate from $requester — ApprovalRuleEngine::canApprove() now
+        // enforces separation of duties (the requester can't also be the
+        // approver of their own request), so the PO creator and the
+        // BackOffice user resolving it must be two different people.
         $owner = User::factory()->create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'email' => $tenantId.'-owner2@example.com', 'is_active' => true]);
 
         $token = $this->actingDeviceToken($tenantId.'-device');
@@ -122,11 +127,11 @@ class ProcurementBudgetGateTest extends TestCase
         ProcurementBudget::create([
             'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Sept 2026',
             'period_start' => now()->startOfMonth(), 'period_end' => now()->endOfMonth(),
-            'amount' => 100, 'created_by_user_id' => $owner->id,
+            'amount' => 100, 'created_by_user_id' => $requester->id,
         ]);
 
         $poId = (string) Str::uuid();
-        $this->pushPo($token, $tenantId, $poId, 'PO-1', 200, $owner->id)->assertOk();
+        $this->pushPo($token, $tenantId, $poId, 'PO-1', 200, $requester->id)->assertOk();
         $this->assertSame('pending_approval', PurchaseOrder::findOrFail($poId)->status);
 
         session(['backoffice' => [

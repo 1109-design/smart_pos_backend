@@ -19,7 +19,10 @@ use Illuminate\Support\Str;
  */
 class ApprovalService
 {
-    public function __construct(private readonly SyncProcessor $processor) {}
+    public function __construct(
+        private readonly SyncProcessor $processor,
+        private readonly ApprovalRuleEngine $ruleEngine,
+    ) {}
 
     /**
      * @param  array<string, mixed>  $payload  Context needed to review/apply the action later.
@@ -60,6 +63,20 @@ class ApprovalService
 
         if (! in_array($decision, ['approved', 'rejected'], true)) {
             throw new \RuntimeException("Invalid decision: {$decision}");
+        }
+
+        // Separation of duties — the requester can't also be the approver
+        // of their own request. ApprovalsController::approve()/reject() only
+        // ever checked the coarse MANAGE_APPROVALS permission ("can this
+        // person decide approvals at all"), never whether *this* person is
+        // an eligible decider for *this specific* request — so any manager
+        // with that permission could resolve a request they themselves
+        // raised. $requiredRole is left null here (legacy behaviour, same
+        // as canApprove()'s own fallback) since request() doesn't yet
+        // attach a rule_set_id to route by role/level — that's the next
+        // integration step, not this one.
+        if (! $this->ruleEngine->canApprove($request->business_id, $approverUserId, $request)) {
+            throw new \RuntimeException('You cannot approve or reject your own request.');
         }
 
         $this->syncUpsert($request->id, [
