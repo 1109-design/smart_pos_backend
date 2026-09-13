@@ -2154,6 +2154,19 @@ class SyncProcessor
                 // the device already posted its own GL journal locally (or
                 // will once cut over), this just mirrors the row and lets
                 // the server catch it if the client hasn't posted yet.
+                //
+                // Same class of gap 'salary_payments' above was already
+                // fixed for (reproduced live there as a fabricated $50,000
+                // payroll payment from a plain cashier device) — this
+                // sibling table had no equivalent guard. A fabricated
+                // supplier_payments row is the accounts-payable version of
+                // the same fraud: it reduces what the business shows as
+                // owing to a real supplier, with a real Dr Accounts Payable
+                // / Cr Cash-or-Bank journal one push away from posting.
+                if (! $trusted && ! ($actingUser?->hasRole(['business_owner', 'manager']) ?? false)) {
+                    throw new \RuntimeException('supplier_payments: recording a payment requires owner or manager access.');
+                }
+
                 $supplierPayment = SupplierPayment::updateOrCreate(
                     ['id' => $uuid],
                     [
