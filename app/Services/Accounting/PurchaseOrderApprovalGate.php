@@ -52,6 +52,12 @@ class PurchaseOrderApprovalGate
                 'total_ordered' => (float) $po->total_ordered,
                 'reason' => $reason,
             ],
+            // Routes this request through DefaultApprovalRulesSeeder's
+            // 'purchase_order' rule set (business_owner-configurable via
+            // ApprovalRuleSet/ApprovalRule) for SLA + required-role
+            // enforcement — see ApprovalService::resolveRuleFieldsForLevel().
+            process: 'purchase_order',
+            context: ['amount' => (float) $po->total_ordered],
         );
 
         // po_audit_logs.user_id is a required uuid with no "system actor" —

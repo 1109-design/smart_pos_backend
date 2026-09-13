@@ -520,6 +520,8 @@ class SyncProcessor
                         'payload_json' => is_string($payload['payload_json'] ?? null)
                             ? json_decode($payload['payload_json'], true)
                             : ($payload['payload_json'] ?? null),
+                        // ── Enterprise approval engine fields (schema v62) ─────
+                        'rule_set_id' => $payload['rule_set_id'] ?? null,
                     ]
                 );
                 break;
