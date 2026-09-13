@@ -111,4 +111,35 @@ class Asset extends Model
     {
         return round((float) $this->acquisition_cost - $this->accumulatedDepreciation($businessId), 4);
     }
+
+    /**
+     * An asset's disposal (like a bank reconciliation's completion) can be
+     * recorded from any device — see the 'assets' case in SyncProcessor.
+     * Without this guard, a device that disposed an asset and went offline
+     * before pulling that back could resync its own stale 'active' snapshot
+     * afterwards, silently resurrecting a disposed asset — which the monthly
+     * depreciation sweep would then pick back up and keep depreciating.
+     * Mirrors StockTransfer::isValidTransition() exactly.
+     */
+    public const TERMINAL_STATUSES = ['disposed'];
+
+    /**
+     * @var array<string, array<int, string>>
+     */
+    public const ALLOWED_TRANSITIONS = [
+        'active' => ['disposed'],
+    ];
+
+    public static function isValidTransition(?string $from, string $to): bool
+    {
+        if ($from === null || $from === $to) {
+            return true;
+        }
+
+        if (in_array($from, self::TERMINAL_STATUSES, true)) {
+            return false;
+        }
+
+        return in_array($to, self::ALLOWED_TRANSITIONS[$from] ?? [], true);
+    }
 }

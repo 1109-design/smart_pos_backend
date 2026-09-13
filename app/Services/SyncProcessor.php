@@ -75,6 +75,7 @@ use App\Models\TransactionItem;
 use App\Models\TransactionTax;
 use App\Models\UnitOfMeasure;
 use App\Models\User;
+use App\Services\Accounting\AssetPostingService;
 use App\Services\Accounting\CreditPaymentPostingService;
 use App\Services\Accounting\GrvPostingService;
 use App\Services\Accounting\InvoicePaymentPostingService;
@@ -2041,6 +2042,15 @@ class SyncProcessor
                 break;
 
             case 'bank_reconciliations':
+                $currentReconciliationStatus = BankReconciliation::where('id', $uuid)->value('status');
+                $incomingReconciliationStatus = $payload['status'] ?? 'in_progress';
+
+                if (! BankReconciliation::isValidTransition($currentReconciliationStatus, $incomingReconciliationStatus)) {
+                    throw new \RuntimeException(
+                        "Invalid bank reconciliation transition: '{$currentReconciliationStatus}' -> '{$incomingReconciliationStatus}'"
+                    );
+                }
+
                 BankReconciliation::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -2048,7 +2058,7 @@ class SyncProcessor
                         'bank_account_id' => $payload['bank_account_id'] ?? null,
                         'statement_date' => $payload['statement_date'] ?? now()->toDateString(),
                         'statement_balance' => $payload['statement_balance'] ?? 0,
-                        'status' => $payload['status'] ?? 'in_progress',
+                        'status' => $incomingReconciliationStatus,
                         'started_by_user_id' => $payload['started_by_user_id'] ?? null,
                         'started_at' => $payload['started_at'] ?? now(),
                         'completed_by_user_id' => $payload['completed_by_user_id'] ?? null,
@@ -2095,7 +2105,19 @@ class SyncProcessor
 
             case 'assets':
                 // Append-only-ish — see IMMUTABLE; disposal flips `status`
-                // via the same full-row upsert, never a delete.
+                // via the same full-row upsert, never a delete — guarded by
+                // Asset::isValidTransition() below so a device replaying its
+                // own stale 'active' snapshot can't resurrect a disposed
+                // asset (see that method's doc comment).
+                $currentAssetStatus = Asset::where('id', $uuid)->value('status');
+                $incomingAssetStatus = $payload['status'] ?? 'active';
+
+                if (! Asset::isValidTransition($currentAssetStatus, $incomingAssetStatus)) {
+                    throw new \RuntimeException(
+                        "Invalid asset status transition: '{$currentAssetStatus}' -> '{$incomingAssetStatus}'"
+                    );
+                }
+
                 $asset = Asset::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -2111,7 +2133,7 @@ class SyncProcessor
                         'funding_method' => $payload['funding_method'] ?? 'cash',
                         'bank_account_id' => $payload['bank_account_id'] ?? null,
                         'disposal_bank_account_id' => $payload['disposal_bank_account_id'] ?? null,
-                        'status' => $payload['status'] ?? 'active',
+                        'status' => $incomingAssetStatus,
                         'disposed_at' => $payload['disposed_at'] ?? null,
                         'disposal_proceeds' => $payload['disposal_proceeds'] ?? null,
                         'created_by_user_id' => $payload['created_by_user_id'] ?? null,
