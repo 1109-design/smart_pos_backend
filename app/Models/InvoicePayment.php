@@ -13,12 +13,14 @@ class InvoicePayment extends Model
 
     protected $fillable = [
         'id', 'invoice_id', 'method', 'amount', 'currency_code',
-        'base_equivalent', 'recorded_by_user_id', 'paid_at',
+        'exchange_rate_used', 'base_equivalent', 'recorded_by_user_id', 'paid_at',
+        'bank_account_id',
     ];
 
     protected function casts(): array
     {
         return [
+            'exchange_rate_used' => 'decimal:8',
             'paid_at' => 'datetime',
         ];
     }

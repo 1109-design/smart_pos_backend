@@ -2,7 +2,17 @@
 
 namespace App\Services;
 
+use App\Models\Accounting\AccountingPeriod;
+use App\Models\Accounting\AccountSubCategory;
+use App\Models\Accounting\GeneralLedgerEntry;
+use App\Models\Accounting\GlAccount;
+use App\Models\Accounting\JournalHeader;
+use App\Models\Accounting\JournalLine;
+use App\Models\AccountRoleMapping;
 use App\Models\ApprovalRequest;
+use App\Models\Asset;
+use App\Models\BankAccount;
+use App\Models\BankReconciliation;
 use App\Models\Bundle;
 use App\Models\BundleItem;
 use App\Models\Business;
@@ -55,6 +65,7 @@ use App\Models\StockTakeItem;
 use App\Models\StockTransfer;
 use App\Models\StockTransferItem;
 use App\Models\Supplier;
+use App\Models\SupplierPayment;
 use App\Models\SyncRecord;
 use App\Models\TaxRate;
 use App\Models\Till;
@@ -64,12 +75,15 @@ use App\Models\TransactionItem;
 use App\Models\TransactionTax;
 use App\Models\UnitOfMeasure;
 use App\Models\User;
+use App\Services\Accounting\CreditPaymentPostingService;
 use App\Services\Accounting\GrvPostingService;
+use App\Services\Accounting\InvoicePaymentPostingService;
 use App\Services\Accounting\OpeningBalanceService;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use App\Services\Accounting\SalaryPostingService;
 use App\Services\Accounting\SalePostingService;
 use App\Services\Accounting\StockTakePostingService;
+use App\Services\Accounting\SupplierPaymentService;
 use App\Services\Zimra\ZimraSalesService;
 use App\Support\BackOfficePermission;
 use Illuminate\Support\Carbon;
@@ -86,6 +100,19 @@ class SyncProcessor
         'transaction_items', 'transaction_taxes', 'payments', 'po_audit_logs',
         'container_deposit_ledger', 'change_owed_ledger', 'till_cash_movements',
         'invoice_payments', 'credit_note_items', 'sheet_cuts',
+        // Client-posted (or server-posted, pre-cutover) journals — see
+        // JournalLine/GeneralLedgerEntry's own model-level immutability
+        // guards. A correction is a reversal, never a delete.
+        'journal_headers', 'journal_lines', 'general_ledger',
+        // A reconciliation session is closed by flipping its status to
+        // cancelled/completed, never deleted — see BankReconciliationService.
+        'bank_reconciliations',
+        // Append-only, same reasoning as invoice_payments — a correction is
+        // a new offsetting entry, never a delete.
+        'supplier_payments',
+        // An asset is disposed (status: disposed), never deleted — see
+        // AssetPostingService::recordDisposal().
+        'assets',
     ];
 
     // Tables with their own business_id column, guarded in assertOwnership().
@@ -128,6 +155,22 @@ class SyncProcessor
         'recurring_invoice_schedules' => RecurringInvoiceSchedule::class,
         'procurement_budgets' => ProcurementBudget::class,
         'units_of_measure' => UnitOfMeasure::class,
+        'journal_headers' => JournalHeader::class,
+        'general_ledger' => GeneralLedgerEntry::class,
+        'bank_accounts' => BankAccount::class,
+        'bank_reconciliations' => BankReconciliation::class,
+        'account_role_mappings' => AccountRoleMapping::class,
+        'supplier_payments' => SupplierPayment::class,
+        'assets' => Asset::class,
+        // Chart of accounts is normally seeded and managed server-side only
+        // (see sync_service.dart's `_pullOnlyTables` doc comment) — these two
+        // become bidirectional for exactly one narrow case: a bank account
+        // created offline mints its own GlAccount (under a "Bank Accounts"
+        // AccountSubCategory) locally first and pushes both up. See
+        // BankAccountService (Flutter) and BankAccountService::create()
+        // (here) for the two mirrored provisioning paths.
+        'account_sub_categories' => AccountSubCategory::class,
+        'gl_accounts' => GlAccount::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -158,6 +201,7 @@ class SyncProcessor
         'product_price_tiers' => [ProductPriceTier::class, 'product_id'],
         'project_milestones' => [ProjectMilestone::class, 'project_id'],
         'milestone_tasks' => [MilestoneTask::class, 'milestone_id'],
+        'journal_lines' => [JournalLine::class, 'journal_header_id'],
     ];
 
     // Deliberately unguarded, and why:
@@ -286,6 +330,7 @@ class SyncProcessor
                 ->join('project_milestones', 'project_milestones.project_id', '=', 'projects.id')
                 ->where('project_milestones.id', $parentId)
                 ->value('projects.business_id'),
+            'journal_lines' => JournalHeader::where('id', $parentId)->value('business_id'),
             default => null,
         };
     }
@@ -312,6 +357,62 @@ class SyncProcessor
         $taxRateOwner = $taxRateId ? TaxRate::where('id', $taxRateId)->value('business_id') : null;
         if ($taxRateOwner === null || (string) $taxRateOwner !== (string) $businessId) {
             throw new \RuntimeException('product_tax_rates: referenced tax rate does not belong to this business.');
+        }
+    }
+
+    /**
+     * A journal_line's own tenant scoping (CHILD_SCOPED_MODELS, keyed via
+     * journal_header_id) only proves the HEADER belongs to the caller — it
+     * says nothing about the gl_account_id the line itself references. Without
+     * this, a compromised or buggy device could post a debit/credit against
+     * another business's GL account by id, corrupting that business's
+     * balance. Unlike the soft accounting-quality checks below, this is a
+     * tenant-isolation invariant a legitimate client can never violate, so
+     * it throws — matching assertOwnership()'s existing severity for the
+     * same kind of cross-tenant violation.
+     */
+    protected function assertAccountOwnedByJournalBusiness(?string $journalHeaderId, ?string $glAccountId, string $table): void
+    {
+        if (! $journalHeaderId || ! $glAccountId) {
+            return;
+        }
+
+        $headerBusinessId = JournalHeader::where('id', $journalHeaderId)->value('business_id');
+        $accountBusinessId = GlAccount::where('id', $glAccountId)->value('business_id');
+
+        if ($headerBusinessId !== null && $accountBusinessId !== null && (string) $headerBusinessId !== (string) $accountBusinessId) {
+            throw new \RuntimeException("{$table}: referenced gl_account does not belong to this business.");
+        }
+    }
+
+    /**
+     * Soft, log-only re-validation of a client-posted journal — balance and
+     * period-closed. Deliberately never throws: these are accounting-quality
+     * signals for manual follow-up, not tenant-isolation invariants, and a
+     * false positive (e.g. a decimal rounding edge case) must never turn a
+     * whole push group's worth of sibling records into a stuck, endlessly
+     * retried sync error (see SyncController::push()'s per-group rollback).
+     * Client-side JournalService is expected to already guarantee both of
+     * these before it ever writes 'posted' locally — this just catches drift
+     * or a client bug rather than trusting the payload blindly.
+     */
+    protected function checkClientJournalIntegrity(?JournalHeader $header): void
+    {
+        if (! $header) {
+            return;
+        }
+
+        try {
+            $totals = $header->lines()->selectRaw('COALESCE(SUM(debit), 0) as d, COALESCE(SUM(credit), 0) as c')->first();
+            if (abs((float) $totals->d - (float) $totals->c) >= 0.005) {
+                Log::warning("Accounting: client-posted journal {$header->id} ({$header->journal_number}) does not balance — debit {$totals->d} vs credit {$totals->c}. Needs manual review.");
+            }
+
+            if (AccountingPeriod::isClosedFor($header->business_id, $header->trans_date->toDateString())) {
+                Log::warning("Accounting: client-posted journal {$header->id} ({$header->journal_number}) is dated inside a closed accounting period ({$header->trans_date->toDateString()}). Needs manual review.");
+            }
+        } catch (\Throwable $e) {
+            Log::warning("Accounting: failed to re-validate client-posted journal {$header->id}: {$e->getMessage()}");
         }
     }
 
@@ -1003,6 +1104,7 @@ class SyncProcessor
                         'change_given' => $payload['change_given'] ?? 0,
                         'reference' => $payload['reference'] ?? null,
                         'rounding_adjustment' => $payload['rounding_adjustment'] ?? 0,
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
                     ]
                 );
 
@@ -1105,7 +1207,7 @@ class SyncProcessor
                 break;
 
             case 'credit_transactions':
-                CreditTransaction::updateOrCreate(
+                $creditTransaction = CreditTransaction::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'customer_id' => $payload['customer_id'] ?? null,
@@ -1115,12 +1217,17 @@ class SyncProcessor
                         'method' => $payload['method'] ?? null,
                         'reference' => $payload['reference'] ?? null,
                         'receipt_number' => $payload['receipt_number'] ?? null,
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
                     ]
                 );
                 // Recompute customer credit_balance from the full ledger.
                 if (! empty($payload['customer_id'])) {
                     $this->recomputeCustomerBalances($payload['customer_id']);
                 }
+                // The missing half of credit-sale accounting — see
+                // CreditPaymentPostingService's doc comment. Only 'repayment'
+                // rows post anything; the service itself no-ops otherwise.
+                app(CreditPaymentPostingService::class)->postIfReady($creditTransaction);
                 // A one-time opening balance also needs to land in the
                 // formal books (if this business has any) — see
                 // OpeningBalanceService's doc comment. The till-side ledger
@@ -1604,6 +1711,7 @@ class SyncProcessor
                         'notes' => $payload['notes'] ?? null,
                         'paid_by_user_id' => $payload['paid_by_user_id'] ?? null,
                         'paid_at' => $payload['paid_at'] ?? now(),
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
                     ]
                 );
 
@@ -1698,21 +1806,26 @@ class SyncProcessor
 
             case 'invoice_payments':
                 // Append-only ledger — see IMMUTABLE (delete is ignored).
-                InvoicePayment::updateOrCreate(
+                $invoicePayment = InvoicePayment::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'invoice_id' => $payload['invoice_id'] ?? null,
                         'method' => $payload['method'] ?? 'cash',
                         'amount' => $payload['amount'] ?? 0,
                         'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'exchange_rate_used' => $payload['exchange_rate_used'] ?? 1,
                         'base_equivalent' => $payload['base_equivalent'] ?? 0,
                         'recorded_by_user_id' => $payload['recorded_by_user_id'] ?? null,
                         'paid_at' => $payload['paid_at'] ?? now(),
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
                     ]
                 );
                 if (! empty($payload['invoice_id'])) {
                     $this->recomputeInvoiceAmountPaid($payload['invoice_id']);
                 }
+                // The missing half of invoice accounting — see
+                // InvoicePaymentPostingService's doc comment.
+                app(InvoicePaymentPostingService::class)->postIfReady($invoicePayment);
                 break;
 
             case 'credit_notes':
@@ -1762,6 +1875,249 @@ class SyncProcessor
                         'created_by_user_id' => $payload['created_by_user_id'] ?? null,
                     ]
                 );
+                break;
+
+                // Client-posted journals — a plain mirror. The client (Flutter,
+                // once cut over via client_gl_posting_enabled_at) has already
+                // computed and "posted" this journal locally; Laravel never
+                // recomputes or re-validates it here, only stores what arrives.
+                // See JournalService/SalePostingService for the server-side
+                // equivalent used before a business is cut over.
+            case 'journal_headers':
+                $businessId = $payload['business_id'] ?? null;
+                $sourceType = $payload['source_type'] ?? null;
+                $sourceId = $payload['source_id'] ?? null;
+
+                // Soft guard against the exact double-post this feature's
+                // cutover flag is designed to prevent — a second header for
+                // a source that already has one is almost certainly a race
+                // or a bug, not a legitimate second journal. Logged, not
+                // rejected: a false positive here must never turn into a
+                // permanently stuck sync record for a device.
+                if ($businessId && $sourceType && $sourceId) {
+                    $duplicate = JournalHeader::where('business_id', $businessId)
+                        ->where('source_type', $sourceType)
+                        ->where('source_id', $sourceId)
+                        ->where('id', '!=', $uuid)
+                        ->exists();
+
+                    if ($duplicate) {
+                        Log::warning("Accounting: client pushed journal_header {$uuid} for {$sourceType}:{$sourceId}, but another journal already exists for that source — possible double-post, needs manual review.");
+                    }
+                }
+
+                JournalHeader::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $businessId,
+                        'journal_number' => $payload['journal_number'] ?? null,
+                        'trans_date' => $payload['trans_date'] ?? now()->toDateString(),
+                        'description' => $payload['description'] ?? null,
+                        'source_type' => $sourceType,
+                        'source_id' => $sourceId,
+                        'status' => $payload['status'] ?? 'posted',
+                        'posted_at' => $payload['posted_at'] ?? null,
+                        'posted_by_user_id' => $payload['posted_by_user_id'] ?? null,
+                        'reversed_by_journal_id' => $payload['reversed_by_journal_id'] ?? null,
+                        'reversed_at' => $payload['reversed_at'] ?? null,
+                        'reversed_by_user_id' => $payload['reversed_by_user_id'] ?? null,
+                        'reversal_of_journal_id' => $payload['reversal_of_journal_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'journal_lines':
+                $this->assertAccountOwnedByJournalBusiness($payload['journal_header_id'] ?? null, $payload['gl_account_id'] ?? null, 'journal_lines');
+
+                JournalLine::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'journal_header_id' => $payload['journal_header_id'] ?? null,
+                        'gl_account_id' => $payload['gl_account_id'] ?? null,
+                        'debit' => $payload['debit'] ?? 0,
+                        'credit' => $payload['credit'] ?? 0,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'exchange_rate' => $payload['exchange_rate'] ?? 1,
+                        'foreign_debit' => $payload['foreign_debit'] ?? 0,
+                        'foreign_credit' => $payload['foreign_credit'] ?? 0,
+                        'party_type' => $payload['party_type'] ?? null,
+                        'party_id' => $payload['party_id'] ?? null,
+                        'description' => $payload['description'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'general_ledger':
+                $glBusinessId = $payload['business_id'] ?? null;
+                $glAccountId = $payload['gl_account_id'] ?? null;
+
+                if ($glBusinessId && $glAccountId) {
+                    $accountOwner = GlAccount::where('id', $glAccountId)->value('business_id');
+                    if ($accountOwner !== null && (string) $accountOwner !== (string) $glBusinessId) {
+                        throw new \RuntimeException('general_ledger: referenced gl_account does not belong to this business.');
+                    }
+                }
+
+                GeneralLedgerEntry::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $glBusinessId,
+                        'trans_date' => $payload['trans_date'] ?? now()->toDateString(),
+                        'journal_header_id' => $payload['journal_header_id'] ?? null,
+                        'gl_account_id' => $glAccountId,
+                        'debit' => $payload['debit'] ?? 0,
+                        'credit' => $payload['credit'] ?? 0,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'exchange_rate' => $payload['exchange_rate'] ?? 1,
+                        'foreign_debit' => $payload['foreign_debit'] ?? 0,
+                        'foreign_credit' => $payload['foreign_credit'] ?? 0,
+                        'party_type' => $payload['party_type'] ?? null,
+                        'party_id' => $payload['party_id'] ?? null,
+                        'description' => $payload['description'] ?? null,
+                        'status' => $payload['status'] ?? 'active',
+                        'reconciled_at' => $payload['reconciled_at'] ?? null,
+                        'bank_reconciliation_id' => $payload['bank_reconciliation_id'] ?? null,
+                    ]
+                );
+
+                // general_ledger rows are the last thing the client writes
+                // when posting a journal, so by the time one arrives the
+                // header and all of its lines should already exist —
+                // the natural point to re-check integrity.
+                if ($payload['journal_header_id'] ?? null) {
+                    $this->checkClientJournalIntegrity(JournalHeader::find($payload['journal_header_id']));
+                }
+                break;
+
+            case 'account_sub_categories':
+                // Idempotent by id — a client only ever pushes one of these
+                // to bootstrap its own "Bank Accounts" subcategory the first
+                // time a bank account is created on that device; matches
+                // ChartOfAccountsSeeder::ensureSubCategory()'s own shape.
+                AccountSubCategory::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'account_category_id' => $payload['account_category_id'] ?? null,
+                        'name' => $payload['name'] ?? '',
+                        'reporting_order' => $payload['reporting_order'] ?? 99,
+                    ]
+                );
+                break;
+
+            case 'gl_accounts':
+                // Idempotent by id — see the 'account_sub_categories' case
+                // just above for why this ordinarily server-only table
+                // accepts a client push at all.
+                GlAccount::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'code' => $payload['code'] ?? '',
+                        'name' => $payload['name'] ?? '',
+                        'account_category_id' => $payload['account_category_id'] ?? null,
+                        'account_sub_category_id' => $payload['account_sub_category_id'] ?? null,
+                        'allow_direct_posting' => $payload['allow_direct_posting'] ?? true,
+                        'control_type' => $payload['control_type'] ?? null,
+                        'must_be_positive' => $payload['must_be_positive'] ?? false,
+                        'status' => $payload['status'] ?? 'active',
+                    ]
+                );
+                break;
+
+            case 'bank_accounts':
+                BankAccount::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'name' => $payload['name'] ?? '',
+                        'account_number' => $payload['account_number'] ?? null,
+                        'branch' => $payload['branch'] ?? null,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'gl_account_id' => $payload['gl_account_id'] ?? null,
+                        'is_active' => $payload['is_active'] ?? true,
+                    ]
+                );
+                break;
+
+            case 'bank_reconciliations':
+                BankReconciliation::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
+                        'statement_date' => $payload['statement_date'] ?? now()->toDateString(),
+                        'statement_balance' => $payload['statement_balance'] ?? 0,
+                        'status' => $payload['status'] ?? 'in_progress',
+                        'started_by_user_id' => $payload['started_by_user_id'] ?? null,
+                        'started_at' => $payload['started_at'] ?? now(),
+                        'completed_by_user_id' => $payload['completed_by_user_id'] ?? null,
+                        'completed_at' => $payload['completed_at'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'account_role_mappings':
+                AccountRoleMapping::updateOrCreate(
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'role' => $payload['role'] ?? null,
+                    ],
+                    [
+                        'id' => $uuid,
+                        'gl_account_id' => $payload['gl_account_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'supplier_payments':
+                // Append-only ledger — see IMMUTABLE (delete is ignored).
+                // The Flutter-first counterpart of 'invoice_payments' above:
+                // the device already posted its own GL journal locally (or
+                // will once cut over), this just mirrors the row and lets
+                // the server catch it if the client hasn't posted yet.
+                $supplierPayment = SupplierPayment::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'supplier_id' => $payload['supplier_id'] ?? null,
+                        'amount' => $payload['amount'] ?? 0,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'payment_date' => $payload['payment_date'] ?? now()->toDateString(),
+                        'method' => $payload['method'] ?? 'cash',
+                        'reference' => $payload['reference'] ?? null,
+                        'recorded_by_user_id' => $payload['recorded_by_user_id'] ?? null,
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
+                    ]
+                );
+                app(SupplierPaymentService::class)->postIfReady($supplierPayment);
+                break;
+
+            case 'assets':
+                // Append-only-ish — see IMMUTABLE; disposal flips `status`
+                // via the same full-row upsert, never a delete.
+                $asset = Asset::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'asset_number' => $payload['asset_number'] ?? null,
+                        'name' => $payload['name'] ?? '',
+                        'category' => $payload['category'] ?? null,
+                        'notes' => $payload['notes'] ?? null,
+                        'acquisition_date' => $payload['acquisition_date'] ?? now()->toDateString(),
+                        'acquisition_cost' => $payload['acquisition_cost'] ?? 0,
+                        'salvage_value' => $payload['salvage_value'] ?? 0,
+                        'useful_life_months' => $payload['useful_life_months'] ?? 0,
+                        'funding_method' => $payload['funding_method'] ?? 'cash',
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
+                        'disposal_bank_account_id' => $payload['disposal_bank_account_id'] ?? null,
+                        'status' => $payload['status'] ?? 'active',
+                        'disposed_at' => $payload['disposed_at'] ?? null,
+                        'disposal_proceeds' => $payload['disposal_proceeds'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    ]
+                );
+                app(AssetPostingService::class)->postIfReady($asset);
                 break;
         }
     }

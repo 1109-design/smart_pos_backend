@@ -4,9 +4,13 @@ namespace Tests\Feature\Accounting;
 
 use App\Models\Accounting\GeneralLedgerEntry;
 use App\Models\Accounting\GlAccount;
+use App\Models\Accounting\JournalHeader;
 use App\Models\Business;
 use App\Models\Supplier;
+use App\Models\SupplierPayment;
 use App\Models\Tenant;
+use App\Services\Accounting\AccountRoleMappingService;
+use App\Services\Accounting\BankAccountService;
 use App\Services\Accounting\ChartOfAccountsSeeder;
 use App\Services\Accounting\JournalService;
 use App\Services\Accounting\PartyLedgerService;
@@ -121,5 +125,75 @@ class SupplierPaymentServiceTest extends TestCase
         $this->expectExceptionMessage('negative');
 
         $this->payments->recordPayment($this->businessId, $this->supplierId, 5000.0, '2026-06-10');
+    }
+
+    public function test_a_payment_tagged_with_a_bank_account_posts_against_that_accounts_own_gl_line(): void
+    {
+        $bankAccount = app(BankAccountService::class)->create($this->businessId, 'CBZ Main Account');
+        $namedBankGl = GlAccount::find($bankAccount->gl_account_id);
+        $journals = app(JournalService::class);
+        $header = $journals->createDraft($this->businessId, '2026-06-01', 'capital', (string) Str::uuid());
+        $journals->addLine($header, ['gl_account_id' => $namedBankGl->id, 'debit' => 200]);
+        $journals->addLine($header, ['gl_account_id' => $this->account('3000')->id, 'credit' => 200]);
+        $journals->post($header);
+
+        $this->payments->recordPayment($this->businessId, $this->supplierId, 80.0, '2026-06-10', 'bank', null, 'user-1', $bankAccount->id);
+
+        $this->assertSame(0.0, $this->account('1010')->balance());
+        $this->assertSame(120.0, $namedBankGl->fresh()->balance());
+    }
+
+    public function test_postifready_posts_a_flutter_originated_payment_and_is_idempotent(): void
+    {
+        $payment = SupplierPayment::create([
+            'business_id' => $this->businessId,
+            'supplier_id' => $this->supplierId,
+            'amount' => 80.0,
+            'payment_date' => '2026-06-10',
+            'method' => 'cash',
+        ]);
+
+        $this->payments->postIfReady($payment);
+        $this->payments->postIfReady($payment);
+
+        $this->assertSame(1, JournalHeader::where('source_type', 'supplier_payment')->where('source_id', $payment->id)->count());
+        $this->assertSame(120.0, $this->account('2000')->balance());
+    }
+
+    public function test_once_client_gl_posting_is_enabled_postifready_defers_unless_via_sweep(): void
+    {
+        Business::where('id', $this->businessId)->update(['client_gl_posting_enabled_at' => '2026-08-01']);
+        $payment = SupplierPayment::create([
+            'business_id' => $this->businessId,
+            'supplier_id' => $this->supplierId,
+            'amount' => 80.0,
+            'payment_date' => '2026-08-15',
+            'method' => 'cash',
+        ]);
+
+        $this->payments->postIfReady($payment);
+        $this->assertSame(0, JournalHeader::where('source_type', 'supplier_payment')->count());
+
+        $this->payments->postIfReady($payment, viaSweep: true);
+        $this->assertSame(1, JournalHeader::where('source_type', 'supplier_payment')->count());
+    }
+
+    public function test_accounts_payable_is_resolved_via_the_configurable_role_mapping(): void
+    {
+        $customPayable = app(ChartOfAccountsSeeder::class)->ensureAccount(
+            $this->businessId, 'Liabilities', 'Current Liabilities', ['code' => '2050', 'name' => 'Custom Payable'],
+        );
+        app(AccountRoleMappingService::class)->setMapping(
+            $this->businessId, 'accounts_payable', $customPayable->id,
+        );
+
+        $this->payments->recordPayment($this->businessId, $this->supplierId, 80.0, '2026-06-10');
+
+        // The payment (a debit to a credit-normal liability account) landed
+        // in the reassigned custom account instead of the default 2000 —
+        // negative here just means this account has no prior payable raised
+        // against it, which is exactly what proves the redirection worked.
+        $this->assertSame(-80.0, $customPayable->fresh()->balance());
+        $this->assertSame(200.0, $this->account('2000')->balance()); // untouched
     }
 }

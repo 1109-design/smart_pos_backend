@@ -19,9 +19,20 @@ use Illuminate\Console\Command;
  * at their transactions on or after that date — the same gate
  * SalePostingService itself enforces, so this can never backfill a
  * business's pre-cutover history even if run against old data.
+ *
+ * Once a business is ALSO cut over to client_gl_posting_enabled_at,
+ * postIfReady() itself defers to the client and won't post — that's
+ * correct for a normal transaction whose own journal just hasn't synced up
+ * yet, but leaves an old-app-version till's sales permanently unposted
+ * (it never learned to post its own journal at all). GRACE_PERIOD_HOURS
+ * gives a genuinely-in-flight client-side sync time to land before this
+ * sweep steps in as a straggler safety net, via postIfReady()'s
+ * $viaSweep flag which bypasses the "defer to client" check.
  */
 class PostPendingSales extends Command
 {
+    private const GRACE_PERIOD_HOURS = 1;
+
     protected $signature = 'accounting:post-pending-sales';
 
     protected $description = 'Retry accounting posting for sales left unposted after their first sync';
@@ -44,7 +55,11 @@ class PostPendingSales extends Command
                 ->get();
 
             foreach ($pending as $transaction) {
-                $posting->postIfReady($transaction);
+                $transDate = $transaction->created_at->toDateString();
+                $viaSweep = $business->postsFromClientFor($transDate)
+                    && $transaction->created_at->lte(now()->subHours(self::GRACE_PERIOD_HOURS));
+
+                $posting->postIfReady($transaction, $viaSweep);
                 $attempted++;
             }
         }

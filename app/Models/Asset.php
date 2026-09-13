@@ -16,6 +16,7 @@ class Asset extends Model
         'id', 'business_id', 'asset_number', 'name', 'category', 'notes',
         'acquisition_date', 'acquisition_cost', 'salvage_value', 'useful_life_months',
         'funding_method', 'status', 'disposed_at', 'disposal_proceeds', 'created_by_user_id',
+        'bank_account_id', 'disposal_bank_account_id',
     ];
 
     protected function casts(): array

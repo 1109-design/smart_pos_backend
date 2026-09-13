@@ -65,6 +65,7 @@ class AssetsController extends BackOfficeController
             'salvage_value' => ['nullable', 'numeric', 'min:0', 'lt:acquisition_cost'],
             'useful_life_months' => ['required', 'integer', 'min:1'],
             'funding_method' => ['required', 'in:cash,bank'],
+            'bank_account_id' => ['nullable', 'uuid'],
         ]);
 
         $asset = Asset::create([
@@ -78,6 +79,7 @@ class AssetsController extends BackOfficeController
             'salvage_value' => $data['salvage_value'] ?? 0,
             'useful_life_months' => $data['useful_life_months'],
             'funding_method' => $data['funding_method'],
+            'bank_account_id' => $data['bank_account_id'] ?? null,
             'status' => 'active',
             'created_by_user_id' => $this->userId(),
         ]);
@@ -98,8 +100,10 @@ class AssetsController extends BackOfficeController
         $data = $request->validate([
             'disposed_at' => ['required', 'date'],
             'disposal_proceeds' => ['required', 'numeric', 'min:0'],
+            'disposal_bank_account_id' => ['nullable', 'uuid'],
         ]);
 
+        $asset->update(['disposal_bank_account_id' => $data['disposal_bank_account_id'] ?? null]);
         $this->postings->recordDisposal($asset, $data['disposed_at'], (float) $data['disposal_proceeds']);
 
         $asset->update([

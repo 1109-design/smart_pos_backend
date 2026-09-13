@@ -31,6 +31,7 @@ class SetAccountingGoLiveDate extends Command
         }
 
         $business->update(['accounting_go_live_date' => $this->argument('date')]);
+        $business->publishAccountingSettingsSyncRecord();
 
         $this->info("Accounting posting is now live for {$business->id} from {$this->argument('date')} onward.");
 

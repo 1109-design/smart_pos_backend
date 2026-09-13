@@ -10,9 +10,15 @@ interface ActivityRow {
     running_balance: number;
 }
 
+interface BankAccountOption {
+    id: string;
+    name: string;
+}
+
 interface Props {
     balance: number;
     activity: ActivityRow[];
+    bankAccounts: BankAccountOption[];
 }
 
 const fmt = (n: number) => n.toFixed(2);
@@ -20,7 +26,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 
 type Tab = 'drop' | 'deposit' | 'count';
 
-export default function BackOfficeCashVault({ balance, activity }: Props) {
+export default function BackOfficeCashVault({ balance, activity, bankAccounts }: Props) {
     const [tab, setTab] = useState<Tab>('drop');
     const { flash } = usePage().props as unknown as { flash: { success: string | null } };
 
@@ -64,7 +70,14 @@ export default function BackOfficeCashVault({ balance, activity }: Props) {
                         </div>
                         <div className="p-5">
                             {tab === 'drop' && <MoveForm action="/office/cash-vault/drop" cta="Record Drop" helper="Cash physically moved from a till drawer into the safe." />}
-                            {tab === 'deposit' && <MoveForm action="/office/cash-vault/deposit" cta="Record Deposit" helper="The safe was emptied and banked." />}
+                            {tab === 'deposit' && (
+                                <MoveForm
+                                    action="/office/cash-vault/deposit"
+                                    cta="Record Deposit"
+                                    helper="The safe was emptied and banked."
+                                    bankAccounts={bankAccounts}
+                                />
+                            )}
                             {tab === 'count' && <CountForm currentBalance={balance} />}
                         </div>
                     </div>
@@ -121,12 +134,22 @@ export default function BackOfficeCashVault({ balance, activity }: Props) {
     );
 }
 
-function MoveForm({ action, cta, helper }: { action: string; cta: string; helper: string }) {
-    const form = useForm({ amount: '', date: today(), note: '' });
+function MoveForm({
+    action,
+    cta,
+    helper,
+    bankAccounts,
+}: {
+    action: string;
+    cta: string;
+    helper: string;
+    bankAccounts?: BankAccountOption[];
+}) {
+    const form = useForm({ amount: '', date: today(), note: '', bank_account_id: '' });
 
     const submit = (e: React.FormEvent) => {
         e.preventDefault();
-        form.post(action, { preserveScroll: true, onSuccess: () => form.reset('amount', 'note') });
+        form.post(action, { preserveScroll: true, onSuccess: () => form.reset('amount', 'note', 'bank_account_id') });
     };
 
     return (
@@ -151,6 +174,23 @@ function MoveForm({ action, cta, helper }: { action: string; cta: string; helper
                     className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
             </div>
+            {bankAccounts && bankAccounts.length > 0 && (
+                <div>
+                    <label className="text-xs font-semibold text-slate-500">Bank Account (optional)</label>
+                    <select
+                        value={form.data.bank_account_id}
+                        onChange={(e) => form.setData('bank_account_id', e.target.value)}
+                        className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    >
+                        <option value="">Not specified</option>
+                        {bankAccounts.map((a) => (
+                            <option key={a.id} value={a.id}>
+                                {a.name}
+                            </option>
+                        ))}
+                    </select>
+                </div>
+            )}
             <div>
                 <label className="text-xs font-semibold text-slate-500">Note (optional)</label>
                 <input

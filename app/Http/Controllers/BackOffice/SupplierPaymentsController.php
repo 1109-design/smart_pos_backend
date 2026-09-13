@@ -34,6 +34,7 @@ class SupplierPaymentsController extends BackOfficeController
             'payment_date' => ['required', 'date'],
             'method' => ['required', 'in:cash,bank'],
             'reference' => ['nullable', 'string', 'max:255'],
+            'bank_account_id' => ['nullable', 'uuid'],
         ]);
 
         try {
@@ -45,6 +46,7 @@ class SupplierPaymentsController extends BackOfficeController
                 $data['method'],
                 $data['reference'] ?? null,
                 $this->userId(),
+                $data['bank_account_id'] ?? null,
             );
         } catch (RuntimeException $e) {
             return back()->withErrors(['amount' => $e->getMessage()]);

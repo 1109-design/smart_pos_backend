@@ -69,6 +69,12 @@ class GrvPostingService
             return;
         }
 
+        // Once cut over, the till posts its own GRV journal locally —
+        // see SalePostingService::postIfReady()'s identical guard.
+        if ($business->postsFromClientFor($receivedDate)) {
+            return;
+        }
+
         try {
             DB::transaction(function () use ($movement, $purchaseOrder, $receivedDate, $rejectedQty, $rejectionReason) {
                 // Not firstOrCreate() — received_date is a date-cast column

@@ -5,6 +5,7 @@ namespace App\Services\Accounting;
 use App\Models\Accounting\AccountCategory;
 use App\Models\Accounting\AccountSubCategory;
 use App\Models\Accounting\GlAccount;
+use App\Models\SyncRecord;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -33,12 +34,7 @@ class ChartOfAccountsSeeder
                 $category = $this->ensureCategory($businessId, $categoryDef);
 
                 foreach ($categoryDef['sub_categories'] as $subOrder => $subDef) {
-                    $subCategory = AccountSubCategory::create([
-                        'business_id' => $businessId,
-                        'account_category_id' => $category->id,
-                        'name' => $subDef['name'],
-                        'reporting_order' => $subOrder,
-                    ]);
+                    $subCategory = $this->ensureSubCategory($businessId, $category->id, $subDef['name'], $subOrder);
 
                     foreach ($subDef['accounts'] as $accountDef) {
                         $this->createAccount($businessId, $category->id, $subCategory->id, $accountDef);
@@ -69,10 +65,7 @@ class ChartOfAccountsSeeder
         return DB::transaction(function () use ($businessId, $categoryName, $subCategoryName, $categoryDef, $accountDef) {
             $category = $this->ensureCategory($businessId, $categoryDef ?? ['name' => $categoryName, 'code' => 9000, 'is_debit_normal' => true, 'statement_type' => 'income_statement']);
 
-            $subCategory = AccountSubCategory::firstOrCreate(
-                ['business_id' => $businessId, 'account_category_id' => $category->id, 'name' => $subCategoryName],
-                ['reporting_order' => 99]
-            );
+            $subCategory = $this->ensureSubCategory($businessId, $category->id, $subCategoryName, 99);
 
             return $this->createAccount($businessId, $category->id, $subCategory->id, $accountDef);
         });
@@ -80,7 +73,7 @@ class ChartOfAccountsSeeder
 
     private function ensureCategory(string $businessId, array $categoryDef): AccountCategory
     {
-        return AccountCategory::firstOrCreate(
+        $category = AccountCategory::firstOrCreate(
             ['business_id' => $businessId, 'name' => $categoryDef['name']],
             [
                 'code' => $categoryDef['code'],
@@ -90,11 +83,46 @@ class ChartOfAccountsSeeder
                 'is_system' => true,
             ]
         );
+
+        if ($category->wasRecentlyCreated) {
+            $this->publish('account_categories', $businessId, $category->id, [
+                'id' => $category->id,
+                'business_id' => $businessId,
+                'name' => $category->name,
+                'code' => $category->code,
+                'is_debit_normal' => $category->is_debit_normal,
+                'statement_type' => $category->statement_type,
+                'reporting_order' => $category->reporting_order,
+                'is_system' => $category->is_system,
+            ]);
+        }
+
+        return $category;
+    }
+
+    private function ensureSubCategory(string $businessId, string $categoryId, string $name, int $reportingOrder): AccountSubCategory
+    {
+        $subCategory = AccountSubCategory::firstOrCreate(
+            ['business_id' => $businessId, 'account_category_id' => $categoryId, 'name' => $name],
+            ['reporting_order' => $reportingOrder]
+        );
+
+        if ($subCategory->wasRecentlyCreated) {
+            $this->publish('account_sub_categories', $businessId, $subCategory->id, [
+                'id' => $subCategory->id,
+                'business_id' => $businessId,
+                'account_category_id' => $subCategory->account_category_id,
+                'name' => $subCategory->name,
+                'reporting_order' => $subCategory->reporting_order,
+            ]);
+        }
+
+        return $subCategory;
     }
 
     private function createAccount(string $businessId, string $categoryId, string $subCategoryId, array $accountDef): GlAccount
     {
-        return GlAccount::create([
+        $account = GlAccount::create([
             'business_id' => $businessId,
             'code' => $accountDef['code'],
             'name' => $accountDef['name'],
@@ -102,6 +130,37 @@ class ChartOfAccountsSeeder
             'account_sub_category_id' => $subCategoryId,
             'control_type' => $accountDef['control_type'] ?? null,
             'must_be_positive' => $accountDef['must_be_positive'] ?? false,
+        ]);
+
+        $this->publish('gl_accounts', $businessId, $account->id, [
+            'id' => $account->id,
+            'business_id' => $businessId,
+            'code' => $account->code,
+            'name' => $account->name,
+            'account_category_id' => $account->account_category_id,
+            'account_sub_category_id' => $account->account_sub_category_id,
+            'allow_direct_posting' => $account->allow_direct_posting,
+            'control_type' => $account->control_type,
+            'must_be_positive' => $account->must_be_positive,
+            'status' => $account->status,
+        ]);
+
+        return $account;
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    private function publish(string $table, string $businessId, string $uuid, array $payload): void
+    {
+        SyncRecord::create([
+            'business_id' => $businessId,
+            'table_name' => $table,
+            'record_uuid' => $uuid,
+            'operation' => 'upsert',
+            'payload' => $payload,
+            'source_updated_at' => now(),
+            'synced_at' => now(),
         ]);
     }
 

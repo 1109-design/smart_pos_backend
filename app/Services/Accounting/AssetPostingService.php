@@ -5,10 +5,12 @@ namespace App\Services\Accounting;
 use App\Models\Accounting\GlAccount;
 use App\Models\Accounting\JournalHeader;
 use App\Models\Asset;
+use App\Models\BankAccount;
 use App\Models\Business;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
+use Throwable;
 
 /**
  * Phase 9 / Phase 11d — asset acquisition, diminishing-balance depreciation,
@@ -26,18 +28,60 @@ use RuntimeException;
  */
 class AssetPostingService
 {
-    private const FIXED_ASSETS = '1500';
-
+    // Still hardcoded, deliberately: the monthly depreciation sweep below
+    // (postMonthlyDepreciation()/catchUpAsset()) stays server-side-only and
+    // unconfigurable this phase — see this class's own note on
+    // AccountRoleMappingService's 'accumulated_depreciation' omission.
     private const ACCUMULATED_DEPRECIATION = '1510';
 
     private const DEPRECIATION_EXPENSE = '6070';
 
-    private const DISPOSAL_VARIANCE = ['code' => '6075', 'name' => 'Gain/Loss on Disposal of Assets'];
+    // How long a period sits eligible-but-unposted before this sweep treats
+    // it as a straggler and posts it anyway — see catchUpAsset()'s own doc
+    // comment on why this can't just be a $viaSweep parameter the way every
+    // other posting service's sweep command uses.
+    private const GRACE_PERIOD_HOURS = 24;
 
     public function __construct(
         private readonly JournalService $journals,
-        private readonly ChartOfAccountsSeeder $chartSeeder,
+        private readonly AccountRoleMappingService $mappings,
     ) {}
+
+    /**
+     * Entry point for a Flutter-originated asset row landing via sync —
+     * decides acquisition vs. disposal from the row's own `status`, mirroring
+     * SalePostingService::postIfReady()'s status-branching. Idempotent and
+     * cutover-gated like every other sync-triggered posting service; a
+     * direct BackOffice action keeps calling recordAcquisition()/
+     * recordDisposal() below directly instead (a person is waiting there).
+     *
+     * @param  bool  $viaSweep  True only from the pending-asset-transactions
+     *                          sweep's grace-period fallback — see
+     *                          SalePostingService::postIfReady()'s identical
+     *                          parameter.
+     */
+    public function postIfReady(Asset $asset, bool $viaSweep = false): void
+    {
+        if (! $this->isLive($asset->business_id)) {
+            return;
+        }
+
+        $business = Business::find($asset->business_id);
+        $transDate = $asset->acquisition_date->toDateString();
+        if (! $viaSweep && $business->postsFromClientFor($transDate)) {
+            return;
+        }
+
+        if (! JournalHeader::where('source_type', 'asset_acquisition')->where('source_id', $asset->id)->exists()) {
+            $this->recordAcquisition($asset);
+        }
+
+        if ($asset->status === 'disposed'
+            && $asset->disposed_at
+            && ! JournalHeader::where('source_type', 'asset_disposal')->where('source_id', $asset->id)->exists()) {
+            $this->recordDisposal($asset, $asset->disposed_at->toDateString(), (float) ($asset->disposal_proceeds ?? 0));
+        }
+    }
 
     public function recordAcquisition(Asset $asset): void
     {
@@ -46,7 +90,8 @@ class AssetPostingService
         }
 
         try {
-            $fundingCode = $asset->funding_method === 'bank' ? '1010' : '1000';
+            $fixedAssets = $this->mappings->resolve($asset->business_id, 'fixed_assets');
+            $funding = $this->resolveFundingAccount($asset->business_id, $asset->funding_method, $asset->bank_account_id);
 
             $header = $this->journals->createDraft(
                 $asset->business_id,
@@ -57,18 +102,18 @@ class AssetPostingService
             );
 
             $this->journals->addLine($header, [
-                'gl_account_id' => $this->account($asset->business_id, self::FIXED_ASSETS)->id,
+                'gl_account_id' => $fixedAssets->id,
                 'debit' => (float) $asset->acquisition_cost,
                 'party_type' => 'asset',
                 'party_id' => $asset->id,
             ]);
             $this->journals->addLine($header, [
-                'gl_account_id' => $this->account($asset->business_id, $fundingCode)->id,
+                'gl_account_id' => $funding->id,
                 'credit' => (float) $asset->acquisition_cost,
             ]);
 
             $this->journals->post($header);
-        } catch (RuntimeException $e) {
+        } catch (Throwable $e) {
             Log::warning("AssetPostingService::recordAcquisition failed for asset {$asset->id}: {$e->getMessage()}");
         }
     }
@@ -143,27 +188,22 @@ class AssetPostingService
             }
 
             if ($proceeds > 0.005) {
-                $fundingCode = $asset->funding_method === 'bank' ? '1010' : '1000';
+                $funding = $this->resolveFundingAccount($asset->business_id, $asset->funding_method, $asset->disposal_bank_account_id);
                 $this->journals->addLine($header, [
-                    'gl_account_id' => $this->account($asset->business_id, $fundingCode)->id,
+                    'gl_account_id' => $funding->id,
                     'debit' => $proceeds,
                 ]);
             }
 
             $this->journals->addLine($header, [
-                'gl_account_id' => $this->account($asset->business_id, self::FIXED_ASSETS)->id,
+                'gl_account_id' => $this->mappings->resolve($asset->business_id, 'fixed_assets')->id,
                 'credit' => $originalCost,
                 'party_type' => 'asset',
                 'party_id' => $asset->id,
             ]);
 
             if (abs($gainOrLoss) > 0.005) {
-                $variance = $this->chartSeeder->ensureAccount(
-                    $asset->business_id,
-                    'Expenses',
-                    'Other Expenses',
-                    self::DISPOSAL_VARIANCE,
-                );
+                $variance = $this->mappings->resolve($asset->business_id, 'disposal_gain_loss');
 
                 // A loss (gainOrLoss negative) debits the expense account;
                 // a gain (positive) credits it.
@@ -175,11 +215,51 @@ class AssetPostingService
             }
 
             $this->journals->post($header);
-        } catch (RuntimeException $e) {
+        } catch (Throwable $e) {
             Log::warning("AssetPostingService::recordDisposal failed for asset {$asset->id}: {$e->getMessage()}");
         }
     }
 
+    private function resolveFundingAccount(string $businessId, string $fundingMethod, ?string $bankAccountId): GlAccount
+    {
+        $role = $fundingMethod === 'bank' ? 'default_bank' : 'default_cash';
+        $account = $this->mappings->resolve($businessId, $role);
+
+        return $role === 'default_bank' ? $this->resolveBankAccount($bankAccountId, $account) : $account;
+    }
+
+    /**
+     * See SalePostingService::resolveBankAccount() — identical fallback
+     * behavior.
+     */
+    private function resolveBankAccount(?string $bankAccountId, GlAccount $default): GlAccount
+    {
+        if (! $bankAccountId) {
+            return $default;
+        }
+
+        $bankAccount = BankAccount::find($bankAccountId);
+        $glAccount = $bankAccount ? GlAccount::find($bankAccount->gl_account_id) : null;
+
+        return $glAccount ?? $default;
+    }
+
+    /**
+     * Unlike every other posting service's sweep, this can't take a single
+     * $viaSweep flag from its caller — postMonthlyDepreciation() is called
+     * once per business, but eligibility must be decided per PERIOD, since
+     * diminishing-balance depreciation is sequential (period N's amount
+     * depends on every prior period's effect on book value, so periods
+     * can't be posted out of order or with gaps). So the check lives here,
+     * computed per period as the loop reaches it: once a period becomes
+     * eligible for client-side posting (Flutter's DepreciationPostingService
+     * — see its own doc comment on the symmetric client-side half of this),
+     * this sweep stops rather than racing it — UNLESS that period has sat
+     * eligible-but-unposted for longer than the grace period, in which case
+     * it's treated as a straggler (an offline device that never got a
+     * chance to post it) and this sweep claims it after all, exactly like
+     * every other posting service's grace-period fallback.
+     */
     private function catchUpAsset(Asset $asset, Carbon $asOf): int
     {
         $cappedAsOf = $asOf->lt(now()) ? $asOf : now();
@@ -205,12 +285,23 @@ class AssetPostingService
             return 0;
         }
 
+        $business = Business::find($asset->business_id);
         $posted = 0;
 
         for ($i = 0; $i < $missing; $i++) {
             $periodNumber = $alreadyPosted + $i + 1;
             $periodEnd = $asset->acquisition_date->copy()->addMonthsNoOverflow($periodNumber)->endOfMonth();
             $transDate = $periodEnd->gt($cappedAsOf) ? $cappedAsOf->toDateString() : $periodEnd->toDateString();
+
+            $clientEligible = $business && $business->postsFromClientFor($transDate);
+            $pastGracePeriod = Carbon::parse($transDate)->lte(now()->subHours(self::GRACE_PERIOD_HOURS));
+            if ($clientEligible && ! $pastGracePeriod) {
+                // This period — and, since eligibility only moves forward
+                // in time, every remaining period in this run — is Flutter's
+                // to post, and hasn't even been outstanding long enough to
+                // call it a straggler yet. Stop here rather than race it.
+                break;
+            }
 
             // Pure diminishing balance never quite reaches salvage value in
             // a finite number of periods (each charge is a fraction of
