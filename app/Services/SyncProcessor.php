@@ -492,6 +492,15 @@ class SyncProcessor
                 break;
 
             case 'approval_requests':
+                $currentApprovalStatus = ApprovalRequest::where('id', $uuid)->value('status');
+                $incomingApprovalStatus = $payload['status'] ?? 'pending';
+
+                if (! ApprovalRequest::isValidTransition($currentApprovalStatus, $incomingApprovalStatus)) {
+                    throw new \RuntimeException(
+                        "Invalid approval request transition: '{$currentApprovalStatus}' -> '{$incomingApprovalStatus}'"
+                    );
+                }
+
                 ApprovalRequest::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -500,7 +509,7 @@ class SyncProcessor
                         'subject_id' => $payload['subject_id'] ?? null,
                         'action' => $payload['action'] ?? '',
                         'requested_by_user_id' => $payload['requested_by_user_id'] ?? null,
-                        'status' => $payload['status'] ?? 'pending',
+                        'status' => $incomingApprovalStatus,
                         'approver_user_id' => $payload['approver_user_id'] ?? null,
                         'approved_at' => $payload['approved_at'] ?? null,
                         'reason' => $payload['reason'] ?? null,

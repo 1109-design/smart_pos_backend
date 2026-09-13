@@ -60,4 +60,38 @@ class ApprovalRequest extends Model
     {
         return $this->status === 'pending';
     }
+
+    /**
+     * Raised on one device, resolved from another (BackOffice, or a
+     * manager's own device) — same multi-device shape as
+     * PurchaseOrder/Requisition. Without this guard, a device that raised
+     * a request and went offline could resync its own stale 'pending'
+     * creation payload after it was already resolved elsewhere, silently
+     * regressing the status back to 'pending' — which would then let
+     * ApprovalService::resolve() run applyApprovedAction() a second time.
+     * That's not idempotent for every action (e.g. change_exchange_rate
+     * closes out the previously-current rate and opens a new one on every
+     * call), so a second resolution would corrupt the FX rate history.
+     */
+    public const TERMINAL_STATUSES = ['approved', 'rejected'];
+
+    /**
+     * @var array<string, array<int, string>>
+     */
+    public const ALLOWED_TRANSITIONS = [
+        'pending' => ['approved', 'rejected'],
+    ];
+
+    public static function isValidTransition(?string $from, string $to): bool
+    {
+        if ($from === null || $from === $to) {
+            return true;
+        }
+
+        if (in_array($from, self::TERMINAL_STATUSES, true)) {
+            return false;
+        }
+
+        return in_array($to, self::ALLOWED_TRANSITIONS[$from] ?? [], true);
+    }
 }
