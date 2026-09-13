@@ -1907,6 +1907,35 @@ class SyncProcessor
                 $sourceType = $payload['source_type'] ?? null;
                 $sourceId = $payload['source_id'] ?? null;
 
+                // Defense-in-depth against exactly the class of bypass the
+                // salary_payments/supplier_payments/assets escalation guards
+                // above were fixed for: those gate the higher-level table
+                // (salary_payments, etc.), but a modified client could skip
+                // straight to journal_headers/journal_lines/general_ledger
+                // instead and post the same fraudulent entry directly,
+                // sidestepping every one of those guards. Deliberately an
+                // allowlist of the *known*-sensitive source types those
+                // fixes already cover, not a blanket permission check on
+                // this table — journal_headers is the shared plumbing every
+                // legitimate posting flows through, including a plain
+                // cashier's own sale (SalePostingService), so restricting it
+                // broadly would break that core, high-frequency path.
+                // 'depreciation' is deliberately excluded: it's a system
+                // sweep tied to no particular user's action (see
+                // DepreciationPostingService), not a role-gated one.
+                $ownerOrManagerJournalSources = ['salary_payment', 'supplier_payment', 'cash_vault_drop', 'cash_vault_deposit', 'cash_vault_count'];
+                $ownerOnlyJournalSources = ['asset_acquisition', 'asset_disposal'];
+
+                if (! $trusted && in_array($sourceType, $ownerOrManagerJournalSources, true)
+                    && ! ($actingUser?->hasRole(['business_owner', 'manager']) ?? false)) {
+                    throw new \RuntimeException("journal_headers: posting a {$sourceType} journal requires owner or manager access.");
+                }
+
+                if (! $trusted && in_array($sourceType, $ownerOnlyJournalSources, true)
+                    && ! ($actingUser?->hasRole('business_owner') ?? false)) {
+                    throw new \RuntimeException("journal_headers: posting a {$sourceType} journal requires the business owner role.");
+                }
+
                 // Soft guard against the exact double-post this feature's
                 // cutover flag is designed to prevent — a second header for
                 // a source that already has one is almost certainly a race
