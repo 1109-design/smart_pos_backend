@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\Device;
 use App\Models\Tenant;
 use App\Models\User;
+use Database\Seeders\RolesAndPermissionsSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
@@ -18,6 +19,12 @@ use Tests\TestCase;
  * silently resurrecting a disposed asset — which the monthly depreciation
  * sweep would then pick back up and keep depreciating. Mirrors
  * SyncStockTransferTransitionTest / SyncBankReconciliationTransitionTest.
+ *
+ * Acts as a business owner throughout — separately, the 'assets' case also
+ * gates every untrusted write behind the owner role (see
+ * SyncAssetEscalationGuardTest); that's a different concern from the
+ * transition guard this file covers, so the acting user here is an owner
+ * to isolate it.
  */
 class SyncAssetDisposalTransitionTest extends TestCase
 {
@@ -26,11 +33,13 @@ class SyncAssetDisposalTransitionTest extends TestCase
     private function actingDeviceToken(string $tenantId): string
     {
         Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);
+        $this->seed(RolesAndPermissionsSeeder::class);
 
         $user = User::factory()->create([
             'id' => '88888888-8888-4888-8888-888888888888',
             'email' => 'sync-asset-owner@example.com',
         ]);
+        $user->assignRole('business_owner');
 
         $plain = $user->createToken('sync-test')->plainTextToken;
         $tokenId = (int) explode('|', $plain)[0];

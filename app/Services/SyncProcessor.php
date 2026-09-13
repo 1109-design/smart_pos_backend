@@ -2190,6 +2190,22 @@ class SyncProcessor
                 // Asset::isValidTransition() below so a device replaying its
                 // own stale 'active' snapshot can't resurrect a disposed
                 // asset (see that method's doc comment).
+                //
+                // Same fraud class as 'salary_payments'/'supplier_payments'
+                // above, but the dangerous action here is *creation* as much
+                // as disposal: a fabricated acquisition posts a real Dr
+                // Fixed Assets / Cr Cash-or-Bank entry for an item that was
+                // never actually bought, and a fabricated disposal does the
+                // same for proceeds that were never actually received. The
+                // till only shows the Assets screen at all to UserRole.owner
+                // (more_screen.dart) — mirrored here for every untrusted
+                // write to this table, not just the status field, since
+                // acquisition_cost/disposal_proceeds are exactly as
+                // dangerous as status itself.
+                if (! $trusted && ! ($actingUser?->hasRole('business_owner') ?? false)) {
+                    throw new \RuntimeException('assets: creating or editing an asset requires the business owner role.');
+                }
+
                 $currentAssetStatus = Asset::where('id', $uuid)->value('status');
                 $incomingAssetStatus = $payload['status'] ?? 'active';
 
