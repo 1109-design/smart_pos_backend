@@ -202,12 +202,28 @@ class SyncController extends Controller
         if ($request->filled('since')) {
             $query->where('synced_at', '>', $request->input('since'));
         } elseif ($device) {
-            $cursors = SyncCursor::where('device_id', $device->id)
+            $cursorsByTable = SyncCursor::where('device_id', $device->id)
                 ->when($tables, fn ($q) => $q->whereIn('table_name', $tables))
                 ->pluck('last_pulled_at', 'table_name');
 
-            if ($cursors->isNotEmpty()) {
-                $query->where('synced_at', '>', $cursors->min());
+            if ($cursorsByTable->isNotEmpty()) {
+                // Per-table threshold, not a single global minimum — a
+                // realtime quickPullTables() call routinely requests several
+                // tables whose cursors have diverged (one advanced by
+                // frequent activity, another stale), and a single `synced_at
+                // > cursors->min()` bound made the whole query use the
+                // oldest one, re-fetching records for the already-current
+                // tables that were already pulled and applied. Idempotent
+                // (not data corruption) but wasted bandwidth/processing on
+                // every such call. A table with no cursor row yet (never
+                // pulled before) gets no lower bound, so its full history
+                // comes through on the first pull that asks for it.
+                $query->where(function ($q) use ($cursorsByTable) {
+                    foreach ($cursorsByTable as $table => $cursor) {
+                        $q->orWhere(fn ($qq) => $qq->where('table_name', $table)->where('synced_at', '>', $cursor));
+                    }
+                    $q->orWhereNotIn('table_name', $cursorsByTable->keys()->all());
+                });
             }
         }
 
