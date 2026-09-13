@@ -85,6 +85,12 @@ class MasterDataSeeder
                 'business_name' => self::BUSINESS_NAME,
                 'owner_email' => 'owner@masimbahardware.co.zw',
                 'tier' => 'ultimate',
+                // Non-'starter' tiers gate on this being in the future (see
+                // Tenant::isSubscriptionActive()) — omitted here, a fresh
+                // seed left every device login/pairing call failing with
+                // "Subscription expired." on a business that was never
+                // actually expired, just never given a subscription at all.
+                'subscription_valid_until' => now()->addYears(2),
                 'pairing_code' => 'SIMHW1',
                 'is_active' => true,
                 'country' => 'ZW',
@@ -95,7 +101,7 @@ class MasterDataSeeder
 
     private function ensureBusiness(): Business
     {
-        return Business::firstOrCreate(
+        $business = Business::firstOrCreate(
             ['id' => self::BUSINESS_ID],
             [
                 'name' => self::BUSINESS_NAME,
@@ -106,6 +112,39 @@ class MasterDataSeeder
                 'currency_code' => 'USD',
             ]
         );
+
+        // Same gap as ensureStaff() above: created directly, so without this
+        // no device ever receives the business profile via /sync/pull —
+        // only whatever minimal {id, name} the pairing/activation response
+        // hands over on first pairing (see DeviceAuthController). Field
+        // names here are the client's incoming-payload names (see
+        // sync_service.dart's 'businesses' case), not the Laravel column
+        // names — vat_number/base_currency_code, not tax_number/
+        // currency_code, matching what SyncProcessor::process('businesses')
+        // itself sends when a real device syncs this table.
+        SyncRecord::create([
+            'business_id' => $business->id,
+            'table_name' => 'businesses',
+            'record_uuid' => $business->id,
+            'operation' => 'upsert',
+            'payload' => [
+                'name' => $business->name,
+                'address' => $business->address,
+                'phone' => $business->phone,
+                'email' => $business->email,
+                'vat_number' => $business->tax_number,
+                'tin' => $business->tin,
+                'base_currency_code' => $business->currency_code,
+                'logo_path' => $business->logo_path,
+                'fiscalisation_enabled' => $business->fiscalisation_enabled,
+                'day_shift_start' => $business->day_shift_start,
+                'night_shift_start' => $business->night_shift_start,
+            ],
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+        ]);
+
+        return $business;
     }
 
     private function ensureWorkflowSettings(Business $business): void
@@ -175,6 +214,33 @@ class MasterDataSeeder
             }
 
             User::updateOrCreate(['id' => $userId], $userData)->syncRoles([$person['role']]);
+
+            // process() is skipped above (see comment), but the SyncRecord
+            // isn't optional — every other seeded table gets one via
+            // syncUpsert(), and without it no device's /sync/pull ever
+            // receives these staff rows at all: not a cursor issue, they
+            // simply never enter the changefeed. That's exactly what left
+            // Reports > Sales by Cashier showing raw UUID fragments instead
+            // of names for every cashier but the one who'd logged in locally
+            // (whose row arrives separately, via the device's own
+            // login/pairing response). Payload mirrors syncUser()'s own
+            // shape — no 'password', which is never part of a sync payload.
+            SyncRecord::create([
+                'business_id' => $context->businessId,
+                'table_name' => 'users',
+                'record_uuid' => $userId,
+                'operation' => 'upsert',
+                'payload' => [
+                    'business_id' => $context->businessId,
+                    'name' => $person['name'],
+                    'email' => $email,
+                    'pin_hash' => $userData['pin_hash'],
+                    'role' => $person['role'],
+                    'is_active' => true,
+                ],
+                'source_updated_at' => now(),
+                'synced_at' => now(),
+            ]);
 
             $context->staff[] = [
                 'id' => $userId,

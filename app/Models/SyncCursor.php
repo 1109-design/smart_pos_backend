@@ -10,6 +10,7 @@ class SyncCursor extends Model
         'device_id',
         'table_name',
         'last_pulled_at',
+        'last_pulled_id',
     ];
 
     protected $casts = [

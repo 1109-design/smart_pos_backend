@@ -3,7 +3,6 @@
 namespace Database\Seeders\Simulation;
 
 use App\Models\Coupon;
-use App\Models\Payment;
 use App\Models\ProductStock;
 use App\Models\SheetLot;
 use App\Models\SyncRecord;
@@ -433,7 +432,12 @@ class DailyOperationsSimulator
         $toFace = fn (float $usd) => $currency === $context->baseCurrency ? $usd : round($usd * $rate, 2);
 
         if ($isCreditSale) {
-            Payment::create([
+            // syncUpsert(), not Payment::create() — 'payments' is a synced
+            // table (see sync_service.dart's _syncableTables) and a bare
+            // create() here left no SyncRecord behind, same gap that broke
+            // cashier names in Reports; see ensureStaff()'s comment.
+            $this->syncUpsert('payments', (string) Str::uuid(), [
+                'business_id' => $context->businessId,
                 'transaction_id' => $transactionId, 'method' => 'credit', 'amount' => $toFace($total),
                 'currency_code' => $currency, 'exchange_rate_used' => $rate, 'base_equivalent' => $total,
                 'change_given' => 0,
@@ -468,11 +472,13 @@ class DailyOperationsSimulator
             $secondShareUsd = round($total - $firstShareUsd, 2);
             $secondMethod = $method === 'cash' ? 'ecocash' : 'cash';
 
-            Payment::create([
+            $this->syncUpsert('payments', (string) Str::uuid(), [
+                'business_id' => $context->businessId,
                 'transaction_id' => $transactionId, 'method' => $method, 'amount' => $toFace($firstShareUsd),
                 'currency_code' => $currency, 'exchange_rate_used' => $rate, 'base_equivalent' => $firstShareUsd,
             ]);
-            Payment::create([
+            $this->syncUpsert('payments', (string) Str::uuid(), [
+                'business_id' => $context->businessId,
                 'transaction_id' => $transactionId, 'method' => $secondMethod, 'amount' => $toFace($secondShareUsd),
                 'currency_code' => $currency, 'exchange_rate_used' => $rate, 'base_equivalent' => $secondShareUsd,
             ]);
@@ -487,7 +493,8 @@ class DailyOperationsSimulator
             $changeGiven = SimContext::between(0.1, 3.0);
         }
 
-        Payment::create([
+        $this->syncUpsert('payments', (string) Str::uuid(), [
+            'business_id' => $context->businessId,
             'transaction_id' => $transactionId, 'method' => $method, 'amount' => $toFace($total),
             'currency_code' => $currency, 'exchange_rate_used' => $rate, 'base_equivalent' => $total,
             'change_given' => $changeGiven,
