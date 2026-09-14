@@ -9,7 +9,10 @@ use App\Models\Accounting\GlAccount;
 use App\Models\Accounting\JournalHeader;
 use App\Models\Accounting\JournalLine;
 use App\Models\AccountRoleMapping;
+use App\Models\ApprovalDelegation;
 use App\Models\ApprovalRequest;
+use App\Models\ApprovalRule;
+use App\Models\ApprovalRuleSet;
 use App\Models\Asset;
 use App\Models\BankAccount;
 use App\Models\BankReconciliation;
@@ -163,6 +166,9 @@ class SyncProcessor
         'account_role_mappings' => AccountRoleMapping::class,
         'supplier_payments' => SupplierPayment::class,
         'assets' => Asset::class,
+        'approval_rule_sets' => ApprovalRuleSet::class,
+        'approval_rules' => ApprovalRule::class,
+        'approval_delegations' => ApprovalDelegation::class,
         // Chart of accounts is normally seeded and managed server-side only
         // (see sync_service.dart's `_pullOnlyTables` doc comment) — these two
         // become bidirectional for exactly one narrow case: a bank account
@@ -2377,6 +2383,95 @@ class SyncProcessor
                     ]
                 );
                 app(AssetPostingService::class)->postIfReady($asset);
+                break;
+
+            case 'approval_rule_sets':
+                // Same fraud class as 'role_permissions'/'account_role_mappings'
+                // above: a rule set's `is_enabled` flag and (via its rules)
+                // required_role/min_approvers/condition thresholds ARE the
+                // approval control for an entire process (e.g. every PO over
+                // some amount) — loosening them from an untrusted device is
+                // equivalent to forging server-side sign-off. The till only
+                // shows rule-set configuration to UserRole.owner, mirrored here.
+                if (! $trusted && ! ($actingUser?->hasRole('business_owner') ?? false)) {
+                    throw new \RuntimeException('approval_rule_sets: only the business owner can manage approval rule sets.');
+                }
+
+                ApprovalRuleSet::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'process' => $payload['process'] ?? '',
+                        'name' => $payload['name'] ?? '',
+                        'description' => $payload['description'] ?? null,
+                        'is_enabled' => $payload['is_enabled'] ?? true,
+                    ]
+                );
+                break;
+
+            case 'approval_rules':
+                // Same guard as 'approval_rule_sets' just above — this is the
+                // row that actually carries required_role/min_approvers/
+                // escalate_to_role for one level of a rule set.
+                if (! $trusted && ! ($actingUser?->hasRole('business_owner') ?? false)) {
+                    throw new \RuntimeException('approval_rules: only the business owner can manage approval rules.');
+                }
+
+                ApprovalRule::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'rule_set_id' => $payload['rule_set_id'] ?? null,
+                        'level' => $payload['level'] ?? 1,
+                        'condition_type' => $payload['condition_type'] ?? null,
+                        'condition_value' => $payload['condition_value'] ?? null,
+                        'condition_value_max' => $payload['condition_value_max'] ?? null,
+                        'required_role' => $payload['required_role'] ?? null,
+                        'approval_group_id' => $payload['approval_group_id'] ?? null,
+                        'min_approvers' => $payload['min_approvers'] ?? 1,
+                        'is_sequential' => $payload['is_sequential'] ?? true,
+                        'sla_hours' => $payload['sla_hours'] ?? 24,
+                        'escalate_to_role' => $payload['escalate_to_role'] ?? null,
+                        'escalate_after_hours' => $payload['escalate_after_hours'] ?? null,
+                        'require_different_user' => $payload['require_different_user'] ?? true,
+                    ]
+                );
+                break;
+
+            case 'approval_delegations':
+                // Different fraud shape from the two cases above: this row
+                // doesn't change what a rule requires, it hands the
+                // delegate_user_id the delegator's approval authority
+                // outright (see ApprovalRuleEngine::canApprove()'s
+                // delegatorRoles fallback, both sides). An untrusted device
+                // naming ANY delegator_user_id (e.g. the owner) and itself
+                // as delegate would self-grant that authority — worse than
+                // the rule-set gate above since it bypasses required_role
+                // checks entirely rather than just weakening them. Allow it
+                // only when the acting user IS the named delegator (genuine
+                // self-service delegation, e.g. "I'm on leave") or is the
+                // business owner (emergency override on someone else's
+                // behalf) — mirrors no existing till screen yet (delegation
+                // UI is still pending), so this is deliberately conservative.
+                $delegatorUserId = $payload['delegator_user_id'] ?? null;
+                if (! $trusted
+                    && $actingUser?->id !== $delegatorUserId
+                    && ! ($actingUser?->hasRole('business_owner') ?? false)) {
+                    throw new \RuntimeException('approval_delegations: you may only create a delegation from your own account, or as the business owner.');
+                }
+
+                ApprovalDelegation::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'delegator_user_id' => $delegatorUserId,
+                        'delegate_user_id' => $payload['delegate_user_id'] ?? null,
+                        'reason' => $payload['reason'] ?? null,
+                        'starts_at' => $payload['starts_at'] ?? null,
+                        'ends_at' => $payload['ends_at'] ?? null,
+                        'is_active' => $payload['is_active'] ?? true,
+                    ]
+                );
                 break;
         }
     }
