@@ -464,7 +464,8 @@ class SyncProcessor
                 break;
 
             case 'stock_transfers':
-                $currentTransferStatus = StockTransfer::where('id', $uuid)->value('status');
+                $existingTransfer = StockTransfer::find($uuid);
+                $currentTransferStatus = $existingTransfer?->status;
                 $incomingTransferStatus = $payload['status'] ?? 'pending';
 
                 if (! StockTransfer::isValidTransition($currentTransferStatus, $incomingTransferStatus)) {
@@ -473,10 +474,34 @@ class SyncProcessor
                     );
                 }
 
+                // A transfer leaving 'pending' into 'approved' was
+                // previously accepted from any device with zero
+                // authorization check: the transition-shape guard above only
+                // validates the shape, not who's allowed to make it. Same
+                // self-approval gap as the requisition/stocktake gates
+                // elsewhere in this method, closed the same way, behind the
+                // stock.transfer.approve permission that was already in the
+                // catalogue but never wired to an enforcement point. Deliberately
+                // does NOT gate 'pending' -> 'in_transit' — direct dispatch
+                // without a separate approval step is an existing, intended
+                // workflow (see SyncStockTransferTransitionTest's "dispatch is
+                // allowed directly from pending"); only an explicit 'approved'
+                // claim is gated.
+                if (! $trusted
+                    && $currentTransferStatus === 'pending'
+                    && $incomingTransferStatus === 'approved') {
+                    $transferBusinessId = $payload['business_id'] ?? $existingTransfer?->business_id;
+                    $actingRole = $actingUser?->getRoleNames()->first();
+
+                    if (! app(BackOfficeAuthorizer::class)->can($transferBusinessId, $actingRole, BackOfficePermission::STOCK_TRANSFER_APPROVE)) {
+                        throw new \RuntimeException('stock_transfers: approving a transfer requires the stock.transfer.approve permission.');
+                    }
+                }
+
                 StockTransfer::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'business_id' => $payload['business_id'] ?? null,
+                        'business_id' => $payload['business_id'] ?? $existingTransfer?->business_id,
                         'transfer_number' => $payload['transfer_number'] ?? '',
                         'from_location_id' => $payload['from_location_id'] ?? null,
                         'to_location_id' => $payload['to_location_id'] ?? null,
@@ -553,6 +578,14 @@ class SyncProcessor
                             : ($payload['payload_json'] ?? null),
                         // ── Enterprise approval engine fields (schema v62) ─────
                         'rule_set_id' => $payload['rule_set_id'] ?? null,
+                        'sla_due_at' => $payload['sla_due_at'] ?? null,
+                        'priority' => $payload['priority'] ?? 'normal',
+                        'current_level' => $payload['current_level'] ?? 1,
+                        'max_level' => $payload['max_level'] ?? 1,
+                        'estimated_value' => $payload['estimated_value'] ?? null,
+                        'branch_id' => $payload['branch_id'] ?? null,
+                        'is_delegated' => $payload['is_delegated'] ?? false,
+                        'delegated_from_user_id' => $payload['delegated_from_user_id'] ?? null,
                     ]
                 );
                 break;
@@ -1483,33 +1516,44 @@ class SyncProcessor
                 break;
 
             case 'shifts':
+                // Same full-row-upsert footgun as 'businesses'/'invoices': a
+                // status-only close push must not null out opening_float or
+                // the identity fields of an already-open shift.
+                $existingShift = Shift::find($uuid);
+                $preserveShift = fn (string $key, $default = null) => array_key_exists($key, $payload)
+                    ? $payload[$key]
+                    : ($existingShift?->{$key} ?? $default);
+
                 Shift::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'business_id' => $payload['business_id'] ?? null,
-                        'location_id' => $payload['location_id'] ?? null,
-                        'till_id' => $payload['till_id'] ?? null,
-                        'cashier_id' => $payload['cashier_id'] ?? null,
-                        'opened_at' => $payload['opened_at'] ?? now(),
-                        'closed_at' => $payload['closed_at'] ?? null,
-                        'status' => $payload['status'] ?? 'open',
-                        'opening_float' => $payload['opening_float'] ?? 0,
-                        'expected_cash' => $payload['expected_cash'] ?? null,
-                        'counted_cash' => $payload['counted_cash'] ?? null,
-                        'variance' => $payload['variance'] ?? null,
-                        'total_sales' => $payload['total_sales'] ?? null,
-                        'cash_sales' => $payload['cash_sales'] ?? null,
-                        'card_sales' => $payload['card_sales'] ?? null,
-                        'mobile_money_sales' => $payload['mobile_money_sales'] ?? null,
-                        'credit_sales' => $payload['credit_sales'] ?? null,
-                        'total_refunds' => $payload['total_refunds'] ?? null,
-                        'total_discounts' => $payload['total_discounts'] ?? null,
-                        'transaction_count' => $payload['transaction_count'] ?? null,
-                        'opening_float_json' => $payload['opening_float_json'] ?? null,
-                        'counted_cash_json' => $payload['counted_cash_json'] ?? null,
-                        'notes' => $payload['notes'] ?? null,
+                        'business_id' => $preserveShift('business_id'),
+                        'location_id' => $preserveShift('location_id'),
+                        'till_id' => $preserveShift('till_id'),
+                        'cashier_id' => $preserveShift('cashier_id'),
+                        'opened_at' => $preserveShift('opened_at', now()),
+                        'closed_at' => $preserveShift('closed_at'),
+                        'status' => $preserveShift('status', 'open'),
+                        'opening_float' => $preserveShift('opening_float', 0),
+                        // counted_cash/counted_cash_json are a physical cash
+                        // count nobody else can verify — kept as reported.
+                        'counted_cash' => $preserveShift('counted_cash'),
+                        'counted_cash_json' => $preserveShift('counted_cash_json'),
+                        'opening_float_json' => $preserveShift('opening_float_json'),
+                        'notes' => $preserveShift('notes'),
+                        // expected_cash/variance/total_sales/cash_sales/
+                        // card_sales/mobile_money_sales/credit_sales/
+                        // total_refunds/total_discounts/transaction_count
+                        // are deliberately NOT written from the payload here
+                        // — see recomputeShiftFigures() below, called
+                        // unconditionally after every save. Till-skimming
+                        // fraud: a self-reported total_sales/expected_cash
+                        // with no independent derivation let a cashier
+                        // under-report takings with the shortfall never
+                        // showing as a variance.
                     ]
                 );
+                $this->recomputeShiftFigures($uuid);
                 break;
 
             case 'expenses':
@@ -1812,28 +1856,43 @@ class SyncProcessor
                 break;
 
             case 'invoices':
+                // Same full-row-upsert footgun as 'businesses' above: an
+                // incomplete payload (e.g. a status-only or notes-only
+                // resend) previously reset every omitted field back to its
+                // bare default, silently wiping subtotal/discount_total/
+                // tax_total/total on a genuine invoice. Preserve whatever
+                // the payload omits instead of defaulting it.
+                $existingInvoice = Invoice::find($uuid);
+                $preserveInvoice = fn (string $key, $default = null) => array_key_exists($key, $payload)
+                    ? $payload[$key]
+                    : ($existingInvoice?->{$key} ?? $default);
+
                 Invoice::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'business_id' => $payload['business_id'] ?? null,
-                        'location_id' => $payload['location_id'] ?? null,
-                        'customer_id' => $payload['customer_id'] ?? null,
-                        'quotation_id' => $payload['quotation_id'] ?? null,
-                        'invoice_number' => $payload['invoice_number'] ?? '',
-                        'type' => $payload['type'] ?? 'standard',
-                        'status' => $payload['status'] ?? 'draft',
-                        'issue_date' => $payload['issue_date'] ?? now(),
-                        'due_date' => $payload['due_date'] ?? null,
-                        'payment_terms_days' => $payload['payment_terms_days'] ?? 0,
-                        'subtotal' => $payload['subtotal'] ?? 0,
-                        'discount_total' => $payload['discount_total'] ?? 0,
-                        'tax_total' => $payload['tax_total'] ?? 0,
-                        'deposit_required' => $payload['deposit_required'] ?? 0,
-                        'total' => $payload['total'] ?? 0,
-                        'amount_paid' => $payload['amount_paid'] ?? 0,
-                        'recurring_schedule_id' => $payload['recurring_schedule_id'] ?? null,
-                        'notes' => $payload['notes'] ?? null,
-                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                        'business_id' => $preserveInvoice('business_id'),
+                        'location_id' => $preserveInvoice('location_id'),
+                        'customer_id' => $preserveInvoice('customer_id'),
+                        'quotation_id' => $preserveInvoice('quotation_id'),
+                        'invoice_number' => $preserveInvoice('invoice_number', ''),
+                        'type' => $preserveInvoice('type', 'standard'),
+                        'status' => $preserveInvoice('status', 'draft'),
+                        'issue_date' => $preserveInvoice('issue_date', now()),
+                        'due_date' => $preserveInvoice('due_date'),
+                        'payment_terms_days' => $preserveInvoice('payment_terms_days', 0),
+                        'subtotal' => $preserveInvoice('subtotal', 0),
+                        'discount_total' => $preserveInvoice('discount_total', 0),
+                        'tax_total' => $preserveInvoice('tax_total', 0),
+                        'deposit_required' => $preserveInvoice('deposit_required', 0),
+                        'total' => $preserveInvoice('total', 0),
+                        // amount_paid is intentionally NOT preserved from the
+                        // payload — it's re-derived below from the real
+                        // invoice_payments ledger regardless of what any
+                        // client claims (the AR-fraud fix).
+                        'amount_paid' => $existingInvoice?->amount_paid ?? 0,
+                        'recurring_schedule_id' => $preserveInvoice('recurring_schedule_id'),
+                        'notes' => $preserveInvoice('notes'),
+                        'created_by_user_id' => $preserveInvoice('created_by_user_id'),
                     ]
                 );
                 $this->recomputeInvoiceAmountPaid($uuid);
@@ -1881,6 +1940,25 @@ class SyncProcessor
                 break;
 
             case 'credit_notes':
+                // Unlike a POS refund (approval_requests-gated) or an
+                // invoice payment write-off, a credit note had zero
+                // authorization check of any kind — any device could credit
+                // money back against a customer's balance. Gated behind
+                // finance.credit_note.create, the permission already in the
+                // catalogue (granted to accountant/finance_manager by
+                // default) but never wired to an enforcement point. Only
+                // gates the initial creation — a later resend of the same
+                // uuid (e.g. re-syncing after a connectivity drop) is not
+                // re-litigated.
+                if (! $trusted && CreditNote::find($uuid) === null) {
+                    $creditNoteBusinessId = $payload['business_id'] ?? null;
+                    $actingRole = $actingUser?->getRoleNames()->first();
+
+                    if (! app(BackOfficeAuthorizer::class)->can($creditNoteBusinessId, $actingRole, BackOfficePermission::FINANCE_CREDIT_NOTE_CREATE)) {
+                        throw new \RuntimeException('credit_notes: creating a credit note requires the finance.credit_note.create permission.');
+                    }
+                }
+
                 CreditNote::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -2726,6 +2804,114 @@ class SyncProcessor
         }
 
         $invoice->update($update);
+    }
+
+    /**
+     * Live-verification finding: expected_cash/counted_cash/variance/
+     * total_sales/cash_sales/card_sales/mobile_money_sales/credit_sales/
+     * total_refunds/total_discounts/transaction_count were all accepted
+     * straight from a device's own shift-close payload with no independent
+     * server-side derivation — the same "self-reported financial figure, no
+     * ledger check" shape as the invoices.amount_paid fraud fixed in
+     * recomputeInvoiceAmountPaid() above. Enables classic till-skimming:
+     * report a lower total_sales/expected_cash than the shift's real
+     * transactions add up to, so pocketing the difference never shows as a
+     * variance. counted_cash itself (a physical cash count nobody else can
+     * verify) is left as reported; every other figure is derived here from
+     * the real Transaction/Payment/ContainerDepositLedger/ChangeOwedLedger
+     * rows, mirroring shift_close_provider.dart's shiftSummaryProvider /
+     * confirmAndCloseShift() exactly (same statuses, same cash-out
+     * subtractions) so the two never drift apart. Scoped by cashier + time
+     * window + location, not a shift_id column — transactions have no such
+     * column, and the Flutter client itself doesn't scope by one either.
+     */
+    protected function recomputeShiftFigures(string $shiftId): void
+    {
+        $shift = Shift::find($shiftId);
+        if ($shift === null || $shift->cashier_id === null || $shift->opened_at === null) {
+            return;
+        }
+
+        $windowEnd = $shift->closed_at ?? now();
+
+        $transactions = Transaction::where('business_id', $shift->business_id)
+            ->where('user_id', $shift->cashier_id)
+            ->where('created_at', '>=', $shift->opened_at)
+            ->where('created_at', '<=', $windowEnd)
+            ->when($shift->location_id, fn ($q) => $q->where('location_id', $shift->location_id))
+            ->get();
+
+        // Same classification as shiftSummaryProvider: a refund is a
+        // separate negative-total reversal transaction, not an edit of the
+        // original — the original (status flipped to refunded/
+        // partial_refund) still belongs in gross; only a negative-total row
+        // is a reversal.
+        $originalSaleStatuses = ['completed', 'refunded', 'partial_refund'];
+        $originalSales = $transactions->filter(
+            fn (Transaction $t) => (float) $t->total >= 0 && in_array($t->status, $originalSaleStatuses, true)
+        );
+        $reversals = $transactions->filter(fn (Transaction $t) => (float) $t->total < 0);
+        $completed = $transactions->filter(fn (Transaction $t) => $t->status === 'completed');
+
+        $grossSales = $originalSales->sum(fn (Transaction $t) => (float) $t->total);
+        $refundTotal = $reversals->sum(fn (Transaction $t) => abs((float) $t->total));
+        $discountTotal = $originalSales->sum(fn (Transaction $t) => (float) $t->discount_total);
+
+        $cashSales = 0.0;
+        $cardSales = 0.0;
+        $mobileSales = 0.0;
+        $creditSales = 0.0;
+        // Payment-method breakdown deliberately scoped to `completed` only,
+        // same as the client — a refund's cash/card payout has no Payments
+        // row of its own, so widening this to refunded/partial_refund
+        // originals would count cash that's since left the till.
+        $payments = Payment::whereIn('transaction_id', $completed->pluck('id'))->get();
+        foreach ($payments as $payment) {
+            $method = strtolower($payment->method);
+            $amount = (float) $payment->base_equivalent;
+            if (str_contains($method, 'cash')) {
+                $cashSales += $amount;
+            } elseif (str_contains($method, 'card')) {
+                $cardSales += $amount;
+            } elseif (str_contains($method, 'mobile') || str_contains($method, 'ecocash')
+                || str_contains($method, 'm-pesa') || str_contains($method, 'mpesa')) {
+                $mobileSales += $amount;
+            } elseif (str_contains($method, 'credit')) {
+                $creditSales += $amount;
+            }
+        }
+
+        $depositRefundsCash = (float) ContainerDepositLedger::where('business_id', $shift->business_id)
+            ->where('user_id', $shift->cashier_id)
+            ->where('type', 'return')
+            ->where('refund_method', 'cash')
+            ->where('created_at', '>=', $shift->opened_at)
+            ->where('created_at', '<=', $windowEnd)
+            ->get()
+            ->sum(fn (ContainerDepositLedger $l) => abs((float) $l->quantity) * (float) $l->deposit_amount_per_unit);
+
+        $changeClaimsCash = (float) ChangeOwedLedger::where('business_id', $shift->business_id)
+            ->where('user_id', $shift->cashier_id)
+            ->where('type', 'claim')
+            ->where('created_at', '>=', $shift->opened_at)
+            ->where('created_at', '<=', $windowEnd)
+            ->get()
+            ->sum(fn (ChangeOwedLedger $l) => abs((float) $l->amount));
+
+        $expectedCash = (float) $shift->opening_float + $cashSales - $depositRefundsCash - $changeClaimsCash;
+
+        $shift->forceFill([
+            'total_sales' => $grossSales,
+            'cash_sales' => $cashSales,
+            'card_sales' => $cardSales,
+            'mobile_money_sales' => $mobileSales,
+            'credit_sales' => $creditSales,
+            'total_refunds' => $refundTotal,
+            'total_discounts' => $discountTotal,
+            'transaction_count' => $completed->count(),
+            'expected_cash' => $expectedCash,
+            'variance' => $shift->counted_cash !== null ? ((float) $shift->counted_cash - $expectedCash) : null,
+        ])->save();
     }
 
     protected function handleDelete(string $table, string $uuid): void

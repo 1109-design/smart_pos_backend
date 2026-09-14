@@ -15,6 +15,9 @@ class ApprovalRequest extends Model
         'id', 'business_id', 'subject_type', 'subject_id', 'action',
         'requested_by_user_id', 'status', 'approver_user_id', 'approved_at',
         'reason', 'payload_json',
+        'rule_set_id', 'current_level', 'max_level', 'sla_due_at',
+        'escalated_at', 'escalated_to_user_id', 'priority', 'estimated_value',
+        'branch_id', 'is_delegated', 'delegated_from_user_id', 'rejection_reason',
     ];
 
     protected static function booted(): void
@@ -43,6 +46,9 @@ class ApprovalRequest extends Model
         return [
             'approved_at' => 'datetime',
             'payload_json' => 'array',
+            'sla_due_at' => 'datetime',
+            'escalated_at' => 'datetime',
+            'is_delegated' => 'boolean',
         ];
     }
 
@@ -56,9 +62,37 @@ class ApprovalRequest extends Model
         return $this->belongsTo(User::class, 'approver_user_id');
     }
 
+    public function ruleSet(): BelongsTo
+    {
+        return $this->belongsTo(ApprovalRuleSet::class, 'rule_set_id');
+    }
+
     public function isPending(): bool
     {
         return $this->status === 'pending';
+    }
+
+    public function isOverdue(): bool
+    {
+        return $this->sla_due_at !== null
+            && now()->greaterThan($this->sla_due_at)
+            && $this->isPending();
+    }
+
+    public function isUrgent(): bool
+    {
+        return $this->sla_due_at !== null
+            && now()->greaterThan($this->sla_due_at->copy()->subHour())
+            && $this->isPending();
+    }
+
+    public function priorityLabel(): string
+    {
+        if (in_array($this->priority, ['critical', 'high', 'normal', 'low'])) {
+            return $this->priority;
+        }
+
+        return 'normal';
     }
 
     /**
