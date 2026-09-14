@@ -31,6 +31,7 @@ use App\Models\Product;
 use App\Models\ProductContainerLink;
 use App\Models\ProductPriceTier;
 use App\Models\ProductStock;
+use App\Models\ProductSellableLocation;
 use App\Models\ProductTaxRate;
 use App\Models\ProductUnit;
 use App\Models\ProductVariant;
@@ -215,6 +216,12 @@ class SyncProcessor
             return;
         }
 
+        if ($table === 'product_sellable_locations') {
+            $this->assertProductSellableLocationOwnership($uuid, $payload, $businessId);
+
+            return;
+        }
+
         if ($model = self::TENANT_SCOPED_MODELS[$table] ?? null) {
             if (empty($businessId)) {
                 throw new \RuntimeException("{$table}: business_id is required to sync this record.");
@@ -312,6 +319,32 @@ class SyncProcessor
         $taxRateOwner = $taxRateId ? TaxRate::where('id', $taxRateId)->value('business_id') : null;
         if ($taxRateOwner === null || (string) $taxRateOwner !== (string) $businessId) {
             throw new \RuntimeException('product_tax_rates: referenced tax rate does not belong to this business.');
+        }
+    }
+
+    /**
+     * product_sellable_locations uses a composite (product_id, location_id)
+     * key instead of a single uuid, so it can't share the generic
+     * child-table path above — same reason as product_tax_rates.
+     */
+    protected function assertProductSellableLocationOwnership(string $uuid, array $payload, ?string $businessId): void
+    {
+        if (empty($businessId)) {
+            throw new \RuntimeException('product_sellable_locations: business_id is required to sync this record.');
+        }
+
+        $parts = explode('|', $uuid);
+        $productId = count($parts) === 2 ? $parts[0] : ($payload['product_id'] ?? '');
+        $locationId = count($parts) === 2 ? $parts[1] : ($payload['location_id'] ?? '');
+
+        $productOwner = $productId ? Product::where('id', $productId)->value('business_id') : null;
+        if ($productOwner === null || (string) $productOwner !== (string) $businessId) {
+            throw new \RuntimeException('product_sellable_locations: referenced product does not belong to this business.');
+        }
+
+        $locationOwner = $locationId ? Location::where('id', $locationId)->value('business_id') : null;
+        if ($locationOwner === null || (string) $locationOwner !== (string) $businessId) {
+            throw new \RuntimeException('product_sellable_locations: referenced location does not belong to this business.');
         }
     }
 
@@ -816,6 +849,22 @@ class SyncProcessor
                     ProductTaxRate::firstOrCreate([
                         'product_id' => $payload['product_id'] ?? '',
                         'tax_rate_id' => $payload['tax_rate_id'] ?? '',
+                    ]);
+                }
+                break;
+
+            case 'product_sellable_locations':
+                // uuid is "productId|locationId" composite key
+                $parts = explode('|', $uuid);
+                if (count($parts) === 2) {
+                    ProductSellableLocation::firstOrCreate([
+                        'product_id' => $parts[0],
+                        'location_id' => $parts[1],
+                    ]);
+                } else {
+                    ProductSellableLocation::firstOrCreate([
+                        'product_id' => $payload['product_id'] ?? '',
+                        'location_id' => $payload['location_id'] ?? '',
                     ]);
                 }
                 break;
@@ -2256,6 +2305,16 @@ class SyncProcessor
             if (count($parts) === 2) {
                 ProductTaxRate::where('product_id', $parts[0])
                     ->where('tax_rate_id', $parts[1])
+                    ->delete();
+            }
+        }
+
+        // Special case: product_sellable_locations composite key
+        if ($table === 'product_sellable_locations') {
+            $parts = explode('|', $uuid);
+            if (count($parts) === 2) {
+                ProductSellableLocation::where('product_id', $parts[0])
+                    ->where('location_id', $parts[1])
                     ->delete();
             }
         }
