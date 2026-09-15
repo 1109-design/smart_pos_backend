@@ -60,10 +60,12 @@ class TillsController extends BackOfficeController
     }
 
     /**
-     * Move a till to a different location. This is the only sanctioned way a
-     * till's location changes — SyncProcessor refuses the same change coming
-     * from a device sync push (see the 'tills' case there), so a device
-     * can never silently relocate a till on its own.
+     * Move a till to a different location. The other sanctioned way is a
+     * manager-authorized offline change from the till app itself, synced up
+     * through the normal push path — see the 'tills' case in
+     * SyncProcessor::handleUpsert(), which independently re-checks the acting
+     * user's manage_tills permission from the server's own records rather
+     * than trusting anything the device claims about itself.
      */
     public function reassignLocation(Request $request, string $till, SyncProcessor $processor): RedirectResponse
     {
