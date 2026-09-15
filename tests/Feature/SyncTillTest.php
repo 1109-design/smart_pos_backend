@@ -3,10 +3,12 @@
 namespace Tests\Feature;
 
 use App\Models\Device;
+use App\Models\Location;
 use App\Models\Shift;
 use App\Models\Tenant;
 use App\Models\Till;
 use App\Models\User;
+use Database\Seeders\RolesAndPermissionsSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Tests\TestCase;
@@ -20,6 +22,12 @@ class SyncTillTest extends TestCase
         Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);
 
         $user = User::factory()->create(['business_id' => $tenantId, 'email' => $tenantId.'-owner@example.com']);
+
+        return $this->deviceTokenFor($tenantId, $user);
+    }
+
+    private function deviceTokenFor(string $tenantId, User $user): string
+    {
         $plain = $user->createToken('sync-test')->plainTextToken;
         $tokenId = (int) explode('|', $plain)[0];
 
@@ -273,5 +281,170 @@ class SyncTillTest extends TestCase
             'name' => 'Front Counter Renamed',
             'location_id' => $originalLocationId,
         ]);
+    }
+
+    /**
+     * Regression: the mismatch check used to read
+     * `$payload['location_id'] ?? null`, so a push that omitted location_id
+     * (or sent it as null) produced a null $tillLocationId that also failed
+     * the guard's `!== null` condition — skipping authorization entirely and
+     * then writing that null straight into the till's location_id. An
+     * untrusted device with no special permission could silently clear an
+     * existing till's location this way.
+     */
+    public function test_an_omitted_or_null_location_id_does_not_clear_an_existing_tills_location(): void
+    {
+        $tenantId = 'tenant-sync-till-null-location';
+        $token = $this->actingDeviceToken($tenantId);
+        $originalLocationId = (string) Str::uuid();
+        $till = Till::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'location_id' => $originalLocationId,
+            'name' => 'Front Counter',
+            'register_number' => 1,
+            'is_active' => true,
+        ]);
+
+        // Omitted entirely.
+        $response = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'tills',
+                    'uuid' => $till->id,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'name' => 'Front Counter',
+                        'register_number' => 1,
+                        'is_active' => true,
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ]);
+        $response->assertOk();
+        $this->assertSame($originalLocationId, $till->fresh()->location_id);
+
+        // Explicitly null.
+        $response = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'tills',
+                    'uuid' => $till->id,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'location_id' => null,
+                        'name' => 'Front Counter',
+                        'register_number' => 1,
+                        'is_active' => true,
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ]);
+        $response->assertOk();
+        $this->assertSame($originalLocationId, $till->fresh()->location_id);
+    }
+
+    /**
+     * Regression: the manager-authorized till-relocation path checked
+     * manage_tills and open-shift status but never the acting user's own
+     * location scope, so a manager restricted to one branch could relocate
+     * a till between two other branches entirely outside their visibility —
+     * something TillsController::reassignLocation already refuses for the
+     * same action via currentLocationScope().
+     */
+    public function test_a_scoped_manager_cannot_relocate_a_till_outside_their_scope_via_sync_push(): void
+    {
+        $tenantId = 'tenant-sync-till-scoped-manager';
+        Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);
+        $this->seed(RolesAndPermissionsSeeder::class);
+
+        $ownLocation = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Own Branch', 'type' => 'shop', 'is_active' => true]);
+        $branchB = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Branch B', 'type' => 'shop', 'is_active' => true]);
+        $branchC = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Branch C', 'type' => 'shop', 'is_active' => true]);
+
+        $manager = User::factory()->create(['business_id' => $tenantId, 'email' => $tenantId.'-manager@example.com']);
+        $manager->assignRole('manager');
+        $manager->locations()->attach($ownLocation->id);
+        $token = $this->deviceTokenFor($tenantId, $manager);
+
+        $till = Till::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'location_id' => $branchB->id,
+            'name' => 'Till 1',
+            'register_number' => 1,
+            'is_active' => true,
+        ]);
+
+        $response = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'tills',
+                    'uuid' => $till->id,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'location_id' => $branchC->id,
+                        'name' => 'Till 1',
+                        'register_number' => 1,
+                        'is_active' => true,
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ]);
+
+        $response->assertOk();
+        $this->assertSame($branchB->id, $till->fresh()->location_id);
+    }
+
+    /**
+     * The manager-authorized relocation path should still work when the
+     * manager's scope actually covers both the till's current and target
+     * location — the scope check must not turn into a blanket refusal.
+     */
+    public function test_a_scoped_manager_can_relocate_a_till_between_their_own_locations_via_sync_push(): void
+    {
+        $tenantId = 'tenant-sync-till-scoped-manager-ok';
+        Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);
+        $this->seed(RolesAndPermissionsSeeder::class);
+
+        $branchA = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Branch A', 'type' => 'shop', 'is_active' => true]);
+        $branchB = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Branch B', 'type' => 'shop', 'is_active' => true]);
+
+        $manager = User::factory()->create(['business_id' => $tenantId, 'email' => $tenantId.'-manager-ok@example.com']);
+        $manager->assignRole('manager');
+        $manager->locations()->attach([$branchA->id, $branchB->id]);
+        $token = $this->deviceTokenFor($tenantId, $manager);
+
+        $till = Till::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'location_id' => $branchA->id,
+            'name' => 'Till 1',
+            'register_number' => 1,
+            'is_active' => true,
+        ]);
+
+        $response = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'tills',
+                    'uuid' => $till->id,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'location_id' => $branchB->id,
+                        'name' => 'Till 1',
+                        'register_number' => 1,
+                        'is_active' => true,
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ]);
+
+        $response->assertOk();
+        $this->assertSame($branchB->id, $till->fresh()->location_id);
     }
 }

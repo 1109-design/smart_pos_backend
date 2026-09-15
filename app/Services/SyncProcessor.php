@@ -73,6 +73,7 @@ use App\Models\SyncRecord;
 use App\Models\TaxRate;
 use App\Models\Till;
 use App\Models\TillCashMovement;
+use App\Models\TillLocationAudit;
 use App\Models\Transaction;
 use App\Models\TransactionItem;
 use App\Models\TransactionTax;
@@ -220,10 +221,12 @@ class SyncProcessor
     /**
      * @param  bool  $trusted  False only for payloads that originated from a
      *                         device sync push (or a conflict-resolution replay
-     *                         of one) — see the 'tills' case, which refuses to
-     *                         let an untrusted payload move an existing till to
-     *                         a different location. Every other call site here
-     *                         is server-authored (BackOffice controllers, artisan
+     *                         of one) — see the 'tills' case, which only lets an
+     *                         untrusted payload move an existing till to a
+     *                         different location when $actingUser actually holds
+     *                         manage_tills; a bare or under-privileged push still
+     *                         gets refused. Every other call site here is
+     *                         server-authored (BackOffice controllers, artisan
      *                         commands), so the default is true.
      */
     public function process(string $table, string $uuid, string $operation, array $payload, bool $trusted = true, ?User $actingUser = null): void
@@ -1474,21 +1477,65 @@ class SyncProcessor
 
             case 'tills':
                 $existingTill = Till::find($uuid);
-                $tillLocationId = $payload['location_id'] ?? null;
+                // A missing/omitted location_id must not be treated as "no
+                // change requested" (that would fall through the mismatch
+                // check below as a bare null) nor as "clear the location"
+                // (an untrusted push could then null out an existing till's
+                // location with zero authorization). Preserve the existing
+                // value unless the payload explicitly names the field.
+                $tillLocationId = array_key_exists('location_id', $payload)
+                    ? $payload['location_id']
+                    : $existingTill?->location_id;
 
-                // A till's location is deliberately moved only through the
-                // authorized BackOffice reassignment endpoint (which calls
-                // this method with $trusted: true) — never by a device simply
-                // pushing a different location_id for a till it already knows
-                // about. First-time creation from a device is unaffected.
+                // A till's location can't move just because a device pushed a
+                // different location_id — that would let any till silently
+                // relocate itself. But it also shouldn't be portal-only: a
+                // manager working the till app offline needs this to work like
+                // every other Flutter-first action (act locally, sync later),
+                // so an untrusted push is honored when the server's own copy
+                // of the acting user actually holds manage_tills — the same
+                // permission TillsController::reassignLocation requires — the
+                // till has no open shift (mirrors that controller's guard;
+                // moving a till mid-shift would orphan its cash reconciliation)
+                // — and the acting user's own location scope covers both the
+                // till's current and target location, the same restriction
+                // TillsController::reassignLocation enforces via
+                // currentLocationScope() for a branch-scoped manager.
+                // Bare device pushes with no such user (or a lower-privileged
+                // one) are still refused, same as before.
                 if (! $trusted && $existingTill && $existingTill->location_id !== null
                     && $tillLocationId !== $existingTill->location_id) {
-                    Log::warning('Ignored untrusted attempt to move a till to a different location via sync push', [
-                        'till_id' => $uuid,
-                        'current_location_id' => $existingTill->location_id,
-                        'attempted_location_id' => $tillLocationId,
-                    ]);
-                    $tillLocationId = $existingTill->location_id;
+                    $tillBusinessId = $payload['business_id'] ?? $existingTill->business_id;
+                    $actingRole = $actingUser?->getRoleNames()->first();
+                    $authorizer = app(BackOfficeAuthorizer::class);
+                    $actingScope = $actingUser !== null ? $authorizer->locationScope($actingUser) : null;
+
+                    $authorized = $actingUser !== null
+                        && $authorizer->can($tillBusinessId, $actingRole, BackOfficePermission::MANAGE_TILLS)
+                        && ! Shift::where('till_id', $uuid)->where('status', 'open')->exists()
+                        && ($actingScope === null || (
+                            in_array($existingTill->location_id, $actingScope, true)
+                            && in_array($tillLocationId, $actingScope, true)
+                        ));
+
+                    if (! $authorized) {
+                        Log::warning('Ignored unauthorized attempt to move a till to a different location via sync push', [
+                            'till_id' => $uuid,
+                            'current_location_id' => $existingTill->location_id,
+                            'attempted_location_id' => $tillLocationId,
+                            'acting_user_id' => $actingUser?->id,
+                        ]);
+                        $tillLocationId = $existingTill->location_id;
+                    } else {
+                        TillLocationAudit::create([
+                            'business_id' => $tillBusinessId,
+                            'till_id' => $uuid,
+                            'from_location_id' => $existingTill->location_id,
+                            'to_location_id' => $tillLocationId,
+                            'changed_by_user_id' => $actingUser->id,
+                            'changed_by_user_name' => $actingUser->name,
+                        ]);
+                    }
                 }
 
                 Till::updateOrCreate(
