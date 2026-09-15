@@ -184,6 +184,9 @@ class SyncController extends Controller
     {
         $request->validate([
             'since' => 'nullable|date',
+            // Tie-breaker alongside `since` — see the migration adding
+            // last_pulled_id for why synced_at alone silently drops rows.
+            'after_id' => 'nullable|integer',
             'tables' => 'nullable|array',
             'tables.*' => 'string',
         ]);
@@ -199,12 +202,29 @@ class SyncController extends Controller
             $query->whereIn('table_name', $tables);
         }
 
+        // synced_at has only whole-second precision, so a busy table can
+        // have hundreds of rows sharing one exact value — plain `> $since`
+        // pagination means whichever tied rows land just past a page
+        // boundary get permanently excluded once the cursor moves on to
+        // that same synced_at. `after_id` (sync_records.id, a tie-free
+        // autoincrement) breaks the tie: also accept anything sharing the
+        // boundary synced_at with a strictly greater id.
         if ($request->filled('since')) {
-            $query->where('synced_at', '>', $request->input('since'));
+            $sinceAt = $request->input('since');
+            $afterId = $request->input('after_id');
+            $query->where(function ($q) use ($sinceAt, $afterId) {
+                $q->where('synced_at', '>', $sinceAt);
+                if ($afterId !== null) {
+                    $q->orWhere(function ($q2) use ($sinceAt, $afterId) {
+                        $q2->where('synced_at', '=', $sinceAt)->where('id', '>', $afterId);
+                    });
+                }
+            });
         } elseif ($device) {
             $cursorsByTable = SyncCursor::where('device_id', $device->id)
                 ->when($tables, fn ($q) => $q->whereIn('table_name', $tables))
-                ->pluck('last_pulled_at', 'table_name');
+                ->get(['table_name', 'last_pulled_at', 'last_pulled_id'])
+                ->keyBy('table_name');
 
             if ($cursorsByTable->isNotEmpty()) {
                 // Per-table threshold, not a single global minimum — a
@@ -218,9 +238,23 @@ class SyncController extends Controller
                 // every such call. A table with no cursor row yet (never
                 // pulled before) gets no lower bound, so its full history
                 // comes through on the first pull that asks for it.
+                //
+                // Each table's own threshold is applied tie-safely too, via
+                // last_pulled_id — same reasoning as the `since`/`after_id`
+                // branch above.
                 $query->where(function ($q) use ($cursorsByTable) {
                     foreach ($cursorsByTable as $table => $cursor) {
-                        $q->orWhere(fn ($qq) => $qq->where('table_name', $table)->where('synced_at', '>', $cursor));
+                        $q->orWhere(function ($qq) use ($table, $cursor) {
+                            $qq->where('table_name', $table)->where(function ($q2) use ($cursor) {
+                                $q2->where('synced_at', '>', $cursor->last_pulled_at);
+                                if ($cursor->last_pulled_id !== null) {
+                                    $q2->orWhere(function ($q3) use ($cursor) {
+                                        $q3->where('synced_at', '=', $cursor->last_pulled_at)
+                                            ->where('id', '>', $cursor->last_pulled_id);
+                                    });
+                                }
+                            });
+                        });
                     }
                     $q->orWhereNotIn('table_name', $cursorsByTable->keys()->all());
                 });
@@ -235,13 +269,17 @@ class SyncController extends Controller
         }
 
         $limit = 500;
-        $records = $query->orderBy('synced_at')->limit($limit)->get();
+        $records = $query->orderBy('synced_at')->orderBy('id')->limit($limit)->get();
 
         if ($device && $records->isNotEmpty()) {
             foreach ($records->groupBy('table_name') as $table => $tableRecords) {
+                // Records arrive pre-sorted by (synced_at, id) from the query
+                // above, so the last one in each table's group is already
+                // the true max by that compound order — no re-sort needed.
+                $last = $tableRecords->last();
                 SyncCursor::updateOrCreate(
                     ['device_id' => $device->id, 'table_name' => $table],
-                    ['last_pulled_at' => $tableRecords->max('synced_at')]
+                    ['last_pulled_at' => $last->synced_at, 'last_pulled_id' => $last->id]
                 );
             }
         }
