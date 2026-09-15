@@ -61,6 +61,7 @@ use App\Models\RequisitionItem;
 use App\Models\RolePermission;
 use App\Models\SalaryPayment;
 use App\Models\SheetCut;
+use App\Models\SheetLossRecord;
 use App\Models\SheetLot;
 use App\Models\Shift;
 use App\Models\StockMovement;
@@ -106,6 +107,10 @@ class SyncProcessor
         'transaction_items', 'transaction_taxes', 'payments', 'po_audit_logs',
         'container_deposit_ledger', 'change_owed_ledger', 'till_cash_movements',
         'invoice_payments', 'credit_note_items', 'sheet_cuts',
+        // GLS·02 — a loss record is never deleted or mutated; a wrong entry
+        // is corrected by a reversing adjustment elsewhere, same convention
+        // as general_ledger below.
+        'sheet_loss_records',
         // Client-posted (or server-posted, pre-cutover) journals — see
         // JournalLine/GeneralLedgerEntry's own model-level immutability
         // guards. A correction is a reversal, never a delete.
@@ -150,6 +155,7 @@ class SyncProcessor
         'requisitions' => Requisition::class,
         'projects' => Project::class,
         'sheet_lots' => SheetLot::class,
+        'sheet_loss_records' => SheetLossRecord::class,
         'users' => User::class,
         'container_deposit_ledger' => ContainerDepositLedger::class,
         'change_owed_ledger' => ChangeOwedLedger::class,
@@ -756,6 +762,17 @@ class SyncProcessor
                         'area' => $payload['area'] ?? 0,
                         'status' => $payload['status'] ?? 'available',
                         'received_by_user_id' => $payload['received_by_user_id'] ?? null,
+                        // GLS·02
+                        'parent_lot_id' => $payload['parent_lot_id'] ?? null,
+                        'root_lot_id' => $payload['root_lot_id'] ?? null,
+                        'display_code' => $payload['display_code'] ?? null,
+                        'bin_location' => $payload['bin_location'] ?? null,
+                        'unit_cost' => $payload['unit_cost'] ?? null,
+                        'source_purchase_order_id' => $payload['source_purchase_order_id'] ?? null,
+                        'reserved_for_type' => $payload['reserved_for_type'] ?? null,
+                        'reserved_for_id' => $payload['reserved_for_id'] ?? null,
+                        'reserved_until' => $payload['reserved_until'] ?? null,
+                        'reserved_by_user_id' => $payload['reserved_by_user_id'] ?? null,
                     ]
                 );
                 break;
@@ -771,6 +788,34 @@ class SyncProcessor
                         'transaction_id' => $payload['transaction_id'] ?? null,
                         'user_id' => $payload['user_id'] ?? null,
                         'cut_at' => $payload['cut_at'] ?? now(),
+                        // GLS·02
+                        'result_kind' => $payload['result_kind'] ?? null,
+                        'child_lot_id' => $payload['child_lot_id'] ?? null,
+                        'reason' => $payload['reason'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'sheet_loss_records':
+                SheetLossRecord::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'sheet_lot_id' => $payload['sheet_lot_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'kind' => $payload['kind'] ?? 'cutting_waste',
+                        'reason' => $payload['reason'] ?? 'other',
+                        'width' => $payload['width'] ?? null,
+                        'height' => $payload['height'] ?? null,
+                        'area' => $payload['area'] ?? 0,
+                        'unit_cost' => $payload['unit_cost'] ?? null,
+                        'financial_impact' => $payload['financial_impact'] ?? 0,
+                        'notes' => $payload['notes'] ?? null,
+                        'photo_path' => $payload['photo_path'] ?? null,
+                        'approval_request_id' => $payload['approval_request_id'] ?? null,
+                        'reported_by_user_id' => $payload['reported_by_user_id'] ?? null,
+                        'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
+                        'created_at' => $payload['created_at'] ?? now(),
                     ]
                 );
                 break;
@@ -942,6 +987,17 @@ class SyncProcessor
                         'unit' => $payload['unit'] ?? 'piece',
                         'sheet_width' => $payload['sheet_width'] ?? null,
                         'sheet_height' => $payload['sheet_height'] ?? null,
+                        // GLS·02 — every 'products' upsert is a full-row
+                        // replace (see this case's other `?? default`
+                        // fields), so a payload built before these columns
+                        // existed — or from a call site that forgot them —
+                        // would otherwise silently wipe a sheet product's
+                        // cutting rules on every unrelated receive/sale.
+                        'sheet_min_usable_width' => $payload['sheet_min_usable_width'] ?? null,
+                        'sheet_min_usable_height' => $payload['sheet_min_usable_height'] ?? null,
+                        'sheet_kerf_width' => $payload['sheet_kerf_width'] ?? null,
+                        'sheet_cutting_charge' => $payload['sheet_cutting_charge'] ?? null,
+                        'sheet_allow_rotate' => $payload['sheet_allow_rotate'] ?? true,
                         'track_stock' => $payload['track_stock'] ?? true,
                         // stock_quantity is accepted from payload for initial setup.
                         // It will be overridden below if movements exist (multi-device safe).

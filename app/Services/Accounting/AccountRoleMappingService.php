@@ -35,6 +35,10 @@ class AccountRoleMappingService
         'salary_expense' => ['category' => 'Expenses', 'subCategory' => 'Operating Expenses', 'code' => '6020', 'name' => 'Wages'],
         'fixed_assets' => ['category' => 'Assets', 'subCategory' => 'Fixed Assets', 'code' => '1500', 'name' => 'Fixed Assets'],
         'disposal_gain_loss' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6075', 'name' => 'Gain/Loss on Disposal of Assets'],
+        // GLS·02 — dimensional-material cutting waste / scrap / breakage
+        // write-offs. Shares '6050' (Stock Loss / Write-offs) rather than a
+        // new chart code — see the Flutter side's identical note.
+        'material_scrap_loss' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6050', 'name' => 'Stock Loss / Write-offs'],
         // Deliberately NOT mapped: 'accumulated depreciation' would need to
         // match whatever GL account the still-hardcoded, still-server-only
         // monthly depreciation sweep (postMonthlyDepreciation()) posts
