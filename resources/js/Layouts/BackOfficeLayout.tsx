@@ -175,7 +175,7 @@ export default function BackOfficeLayout({ children }: PropsWithChildren) {
     );
 
     return (
-        <div className="flex min-h-screen bg-slate-50">
+        <div className="flex min-h-screen bg-slate-50 print:bg-white">
             {/* Mobile overlay */}
             {sidebarOpen && (
                 <div
@@ -187,7 +187,7 @@ export default function BackOfficeLayout({ children }: PropsWithChildren) {
             {/* Sidebar */}
             <aside className={`
                 fixed inset-y-0 left-0 z-40 w-60 bg-slate-900 flex flex-col transition-transform duration-200
-                lg:translate-x-0
+                lg:translate-x-0 print:hidden
                 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
             `}>
                 <div className="h-16 flex items-center gap-3 px-5 border-b border-slate-800">
@@ -207,9 +207,9 @@ export default function BackOfficeLayout({ children }: PropsWithChildren) {
             </aside>
 
             {/* Main */}
-            <div className="flex-1 flex flex-col min-w-0 lg:ml-60">
+            <div className="flex-1 flex flex-col min-w-0 lg:ml-60 print:ml-0">
                 {/* Mobile topbar */}
-                <header className="lg:hidden h-14 bg-white border-b border-slate-200 flex items-center gap-3 px-4 sticky top-0 z-20">
+                <header className="lg:hidden h-14 bg-white border-b border-slate-200 flex items-center gap-3 px-4 sticky top-0 z-20 print:hidden">
                     <button
                         onClick={() => setSidebarOpen(true)}
                         className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 transition-colors"
@@ -228,7 +228,7 @@ export default function BackOfficeLayout({ children }: PropsWithChildren) {
                     </div>
                 </header>
 
-                <main className="flex-1 p-4 sm:p-6 lg:p-8">{children}</main>
+                <main className="flex-1 p-4 sm:p-6 lg:p-8 print:p-0">{children}</main>
             </div>
         </div>
     );

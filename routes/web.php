@@ -28,6 +28,7 @@ use App\Http\Controllers\BackOffice\SessionController as BackOfficeSession;
 use App\Http\Controllers\BackOffice\SettingsController as BackOfficeSettings;
 use App\Http\Controllers\BackOffice\SheetYieldController as BackOfficeSheetYield;
 use App\Http\Controllers\BackOffice\ShiftsController as BackOfficeShifts;
+use App\Http\Controllers\BackOffice\StockInventoryByLocationController as BackOfficeStockInventoryByLocation;
 use App\Http\Controllers\BackOffice\StockTakesController as BackOfficeStockTakes;
 use App\Http\Controllers\BackOffice\StoremanController as BackOfficeStoreman;
 use App\Http\Controllers\BackOffice\SupplierInvoicesController as BackOfficeSupplierInvoices;
@@ -126,6 +127,8 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::get('reports/trial-balance', [BackOfficeFinancialStatements::class, 'trialBalance'])->name('reports.trial-balance');
         Route::get('reports/income-statement', [BackOfficeFinancialStatements::class, 'incomeStatement'])->name('reports.income-statement');
         Route::get('reports/balance-sheet', [BackOfficeFinancialStatements::class, 'balanceSheet'])->name('reports.balance-sheet');
+        Route::get('reports/inventory-by-location', BackOfficeStockInventoryByLocation::class)->name('reports.inventory-by-location');
+        Route::get('reports/inventory-by-location/export', [BackOfficeStockInventoryByLocation::class, 'export'])->name('reports.inventory-by-location.export');
 
         Route::get('exchange-rates', [BackOfficeExchangeRates::class, 'index'])->name('exchange-rates.index');
         Route::get('exchange-rates/{fromCurrency}', [BackOfficeExchangeRates::class, 'show'])->name('exchange-rates.show');
