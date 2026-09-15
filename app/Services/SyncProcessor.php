@@ -827,7 +827,11 @@ class SyncProcessor
                         // value on every write.
                         'bank_accounts_json' => $preserve('bank_accounts_json'),
                         'currency_code' => $payload['base_currency_code'] ?? $existingBusiness?->currency_code ?? 'USD',
-                        'logo_path' => $preserve('logo_path'),
+                        // logo_path/primary_color are deliberately absent here: they're
+                        // owned by the 'business_branding' sync record and the logo
+                        // upload endpoint, not this generic device push. Applying a
+                        // device's local logo_path (an opaque on-device file path) here
+                        // would overwrite the server's real public URL on every sync.
                         'metadata' => $preserve('metadata'),
                         'fiscalisation_enabled' => $preserve('fiscalisation_enabled', false),
                         'day_shift_start' => $preserve('day_shift_start'),

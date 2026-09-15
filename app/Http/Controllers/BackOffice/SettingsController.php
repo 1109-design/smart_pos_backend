@@ -5,6 +5,7 @@ namespace App\Http\Controllers\BackOffice;
 use App\Models\Business;
 use App\Models\User;
 use App\Services\BackOfficeAuthorizer;
+use App\Services\BusinessBrandingService;
 use App\Services\CatalogueResetService;
 use App\Services\StockResetService;
 use App\Services\SyncProcessor;
@@ -41,6 +42,61 @@ class SettingsController extends BackOfficeController
                 'po_approval_threshold' => $business?->poApprovalThreshold(),
                 'stock_take_variance_threshold_percent' => $business?->stockTakeVarianceThresholdPercent(),
             ],
+            'branding' => [
+                'business_name' => $business?->name,
+                'primary_color' => $business?->primary_color,
+                'logo_url' => $business?->logoUrl(),
+            ],
+        ]);
+    }
+
+    /**
+     * Sets the tenant's brand color, shown across the BackOffice sidebar and
+     * threaded to devices via Business::publishBrandingSyncRecord(). See
+     * BusinessBrandingService for why this and the logo below never touch
+     * the generic 'businesses' sync payload.
+     */
+    public function updateBranding(Request $request, BusinessBrandingService $service): RedirectResponse
+    {
+        $this->authorizeOwner();
+
+        $data = $request->validate([
+            'primary_color' => ['nullable', 'regex:/^#[0-9A-Fa-f]{6}$/'],
+        ]);
+
+        $business = Business::find($this->tenantId());
+        if ($business) {
+            $service->updateColor($business, $data['primary_color'] ?? null);
+            $this->refreshSessionBranding($business);
+        }
+
+        return back()->with('success', 'Branding updated.');
+    }
+
+    /** Logo upload is a separate action from updateBranding() above so the color picker and file input can be submitted independently. */
+    public function uploadBrandingLogo(Request $request, BusinessBrandingService $service): RedirectResponse
+    {
+        $this->authorizeOwner();
+
+        $data = $request->validate([
+            'logo' => ['required', 'image', 'mimes:png,jpg,jpeg,webp', 'max:2048'],
+        ]);
+
+        $business = Business::find($this->tenantId());
+        if ($business) {
+            $service->uploadLogo($business, $data['logo']);
+            $this->refreshSessionBranding($business);
+        }
+
+        return back()->with('success', 'Logo updated.');
+    }
+
+    /** Keeps the currently logged-in owner's session in sync so a branding change is visible immediately, without re-login (mirrors business_name's existing session caching in SessionController::store()). */
+    private function refreshSessionBranding(Business $business): void
+    {
+        session([
+            'backoffice.primary_color' => $business->primary_color,
+            'backoffice.logo_url' => $business->logoUrl(),
         ]);
     }
 

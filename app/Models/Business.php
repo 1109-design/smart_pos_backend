@@ -5,6 +5,7 @@ namespace App\Models;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Storage;
 
 class Business extends Model
 {
@@ -21,6 +22,7 @@ class Business extends Model
         'bank_accounts_json',
         'currency_code',
         'logo_path',
+        'primary_color',
         'metadata',
         'fiscalisation_enabled',
         'day_shift_start',
@@ -92,6 +94,38 @@ class Business extends Model
                 'business_id' => $this->id,
                 'accounting_go_live_date' => $this->accounting_go_live_date?->toDateString(),
                 'client_gl_posting_enabled_at' => $this->client_gl_posting_enabled_at?->toIso8601String(),
+            ],
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+        ]);
+    }
+
+    /** Public URL for the current logo, or null if none has been uploaded. */
+    public function logoUrl(): ?string
+    {
+        return $this->logo_path ? Storage::disk('public')->url($this->logo_path) : null;
+    }
+
+    /**
+     * Branding (logo + color) is delivered under its own narrow
+     * 'business_branding' sync table, same reasoning as
+     * publishAccountingSettingsSyncRecord() above — never fold logo_path or
+     * primary_color into the generic 'businesses' sync payload/apply case.
+     * This is also pull-only: only the server ever publishes it, a device
+     * never pushes its own value back (see sync_service.dart's
+     * _pullOnlyTables).
+     */
+    public function publishBrandingSyncRecord(): void
+    {
+        SyncRecord::create([
+            'business_id' => $this->id,
+            'table_name' => 'business_branding',
+            'record_uuid' => $this->id,
+            'operation' => 'upsert',
+            'payload' => [
+                'business_id' => $this->id,
+                'primary_color' => $this->primary_color,
+                'logo_url' => $this->logoUrl(),
             ],
             'source_updated_at' => now(),
             'synced_at' => now(),

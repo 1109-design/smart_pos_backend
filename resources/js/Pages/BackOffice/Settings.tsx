@@ -15,21 +15,59 @@ interface Workflows {
     stock_take_variance_threshold_percent: number | null;
 }
 
+interface Branding {
+    business_name: string | null;
+    primary_color: string | null;
+    logo_url: string | null;
+}
+
 interface Props {
     stock_reset: StockReset;
     catalogue_reset: StockReset;
     workflows: Workflows;
+    branding: Branding;
 }
 
 const CONFIRM_WORD = 'RESET';
 const CATALOGUE_CONFIRM_PHRASE = 'DELETE EVERYTHING';
+const DEFAULT_BRAND_COLOR = '#059669';
 
-export default function BackOfficeSettings({ stock_reset, catalogue_reset, workflows }: Props) {
+export default function BackOfficeSettings({ stock_reset, catalogue_reset, workflows, branding }: Props) {
     const [showConfirm, setShowConfirm] = useState(false);
     const [showCatalogueConfirm, setShowCatalogueConfirm] = useState(false);
     const { flash } = usePage().props as unknown as { flash: { success: string | null } };
     const form = useForm({ confirm: '' });
     const catalogueForm = useForm({ confirm: '' });
+
+    const colorForm = useForm({ primary_color: branding.primary_color ?? DEFAULT_BRAND_COLOR });
+    const logoForm = useForm<{ logo: File | null }>({ logo: null });
+    const [logoPreview, setLogoPreview] = useState<string | null>(null);
+
+    const saveColor = (e: React.FormEvent) => {
+        e.preventDefault();
+        colorForm.post('/office/settings/branding', { preserveScroll: true });
+    };
+
+    const pickLogo = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0] ?? null;
+        logoForm.setData('logo', file);
+        setLogoPreview(file ? URL.createObjectURL(file) : null);
+    };
+
+    const uploadLogo = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!logoForm.data.logo) {
+            return;
+        }
+        logoForm.post('/office/settings/branding/logo', {
+            preserveScroll: true,
+            forceFormData: true,
+            onSuccess: () => {
+                logoForm.reset();
+                setLogoPreview(null);
+            },
+        });
+    };
 
     const [poThreshold, setPoThreshold] = useState(workflows.po_approval_threshold?.toString() ?? '');
     const [varianceThreshold, setVarianceThreshold] = useState(
@@ -100,6 +138,65 @@ export default function BackOfficeSettings({ stock_reset, catalogue_reset, workf
                     {flash.success}
                 </div>
             )}
+
+            <div className="mb-3">
+                <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wider">Branding</h2>
+            </div>
+            <div className="mb-8 bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+                <p className="text-sm text-slate-500 mb-5 max-w-xl">
+                    Shown across the BackOffice sidebar and inside the till app — the login screen, navigation, and
+                    receipts. Leave unset to keep the default SmartPOS look.
+                </p>
+
+                <div className="flex flex-col sm:flex-row sm:items-start gap-8">
+                    <form onSubmit={saveColor} className="flex-1">
+                        <p className="text-sm font-medium text-slate-800 mb-1">Brand color</p>
+                        <p className="text-xs text-slate-500 mb-3">{branding.business_name ?? 'Your business'}'s primary accent color.</p>
+                        <div className="flex items-center gap-2">
+                            <input
+                                type="color"
+                                value={colorForm.data.primary_color}
+                                onChange={(e) => colorForm.setData('primary_color', e.target.value)}
+                                className="w-10 h-10 rounded-lg border border-slate-200 cursor-pointer flex-shrink-0"
+                            />
+                            <input
+                                type="text"
+                                value={colorForm.data.primary_color}
+                                onChange={(e) => colorForm.setData('primary_color', e.target.value)}
+                                placeholder={DEFAULT_BRAND_COLOR}
+                                className="w-32 text-sm rounded-xl border border-slate-200 px-3 py-2 font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                            <button type="submit" disabled={colorForm.processing} className="btn-primary py-2 px-4">Save</button>
+                        </div>
+                        {colorForm.errors.primary_color && (
+                            <p className="text-xs text-red-500 mt-1">{colorForm.errors.primary_color}</p>
+                        )}
+                    </form>
+
+                    <form onSubmit={uploadLogo} className="flex-1">
+                        <p className="text-sm font-medium text-slate-800 mb-1">Logo</p>
+                        <p className="text-xs text-slate-500 mb-3">PNG, JPG or WEBP, up to 2MB.</p>
+                        <div className="flex items-center gap-3">
+                            <div className="w-14 h-14 rounded-xl border border-slate-200 bg-slate-50 flex items-center justify-center overflow-hidden flex-shrink-0">
+                                {(logoPreview ?? branding.logo_url) ? (
+                                    <img src={logoPreview ?? branding.logo_url ?? undefined} alt="Logo preview" className="w-full h-full object-contain" />
+                                ) : (
+                                    <span className="text-xs text-slate-400">None</span>
+                                )}
+                            </div>
+                            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={pickLogo} className="text-sm text-slate-600" />
+                            <button
+                                type="submit"
+                                disabled={logoForm.processing || !logoForm.data.logo}
+                                className="btn-primary py-2 px-4 disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                                Upload
+                            </button>
+                        </div>
+                        {logoForm.errors.logo && <p className="text-xs text-red-500 mt-1">{logoForm.errors.logo}</p>}
+                    </form>
+                </div>
+            </div>
 
             <div className="mb-3">
                 <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wider">Workflows</h2>

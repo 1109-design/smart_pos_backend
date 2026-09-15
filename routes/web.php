@@ -216,6 +216,8 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::post('settings/reset-stock', [BackOfficeSettings::class, 'resetStock'])->name('settings.reset-stock');
         Route::post('settings/reset-catalogue', [BackOfficeSettings::class, 'resetCatalogue'])->name('settings.reset-catalogue');
         Route::post('settings/workflows', [BackOfficeSettings::class, 'updateWorkflowSettings'])->name('settings.workflows');
+        Route::post('settings/branding', [BackOfficeSettings::class, 'updateBranding'])->name('settings.branding');
+        Route::post('settings/branding/logo', [BackOfficeSettings::class, 'uploadBrandingLogo'])->name('settings.branding.logo');
 
         Route::get('suppliers', [BackOfficeSuppliers::class, 'index'])->name('suppliers.index');
         Route::get('suppliers/opening-balances/template', [BackOfficeSupplierOpeningBalances::class, 'template'])->name('suppliers.opening-balances.template');
