@@ -19,6 +19,8 @@ class SheetLot extends Model
         'parent_lot_id', 'root_lot_id', 'display_code', 'bin_location',
         'unit_cost', 'source_purchase_order_id', 'reserved_for_type',
         'reserved_for_id', 'reserved_until', 'reserved_by_user_id',
+        // GLS·03
+        'warehouse_bin_id',
     ];
 
     protected function casts(): array
@@ -50,6 +52,11 @@ class SheetLot extends Model
     public function childLots(): HasMany
     {
         return $this->hasMany(self::class, 'parent_lot_id');
+    }
+
+    public function warehouseBin(): BelongsTo
+    {
+        return $this->belongsTo(WarehouseBin::class);
     }
 
     public function originalArea(): float

@@ -81,6 +81,7 @@ use App\Models\TransactionItem;
 use App\Models\TransactionTax;
 use App\Models\UnitOfMeasure;
 use App\Models\User;
+use App\Models\WarehouseBin;
 use App\Services\Accounting\AssetPostingService;
 use App\Services\Accounting\CreditPaymentPostingService;
 use App\Services\Accounting\GrvPostingService;
@@ -111,6 +112,9 @@ class SyncProcessor
         // is corrected by a reversing adjustment elsewhere, same convention
         // as general_ledger below.
         'sheet_loss_records',
+        // GLS·03 — no delete UI exists for a bin; safer to leave an
+        // orphaned one than strand a sheet_lots.warehouse_bin_id reference.
+        'warehouse_bins',
         // Client-posted (or server-posted, pre-cutover) journals — see
         // JournalLine/GeneralLedgerEntry's own model-level immutability
         // guards. A correction is a reversal, never a delete.
@@ -156,6 +160,7 @@ class SyncProcessor
         'projects' => Project::class,
         'sheet_lots' => SheetLot::class,
         'sheet_loss_records' => SheetLossRecord::class,
+        'warehouse_bins' => WarehouseBin::class,
         'users' => User::class,
         'container_deposit_ledger' => ContainerDepositLedger::class,
         'change_owed_ledger' => ChangeOwedLedger::class,
@@ -650,6 +655,8 @@ class SyncProcessor
                         'qty_sent' => $payload['qty_sent'] ?? 0,
                         'qty_received' => $payload['qty_received'] ?? 0,
                         'notes' => $payload['notes'] ?? null,
+                        // GLS·03
+                        'sheet_lot_id' => $payload['sheet_lot_id'] ?? null,
                     ]
                 );
                 break;
@@ -773,6 +780,22 @@ class SyncProcessor
                         'reserved_for_id' => $payload['reserved_for_id'] ?? null,
                         'reserved_until' => $payload['reserved_until'] ?? null,
                         'reserved_by_user_id' => $payload['reserved_by_user_id'] ?? null,
+                        // GLS·03
+                        'warehouse_bin_id' => $payload['warehouse_bin_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'warehouse_bins':
+                WarehouseBin::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'zone' => $payload['zone'] ?? null,
+                        'rack' => $payload['rack'] ?? null,
+                        'bay' => $payload['bay'] ?? null,
+                        'position' => $payload['position'] ?? null,
                     ]
                 );
                 break;
@@ -2013,6 +2036,10 @@ class SyncProcessor
                         'tax_rate_id' => $payload['tax_rate_id'] ?? null,
                         'line_total' => $payload['line_total'] ?? 0,
                         'invoiced_quantity' => $payload['invoiced_quantity'] ?? 0,
+                        // GLS·03
+                        'sheet_lot_id' => $payload['sheet_lot_id'] ?? null,
+                        'sheet_cut_width' => $payload['sheet_cut_width'] ?? null,
+                        'sheet_cut_height' => $payload['sheet_cut_height'] ?? null,
                     ]
                 );
                 break;

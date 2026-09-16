@@ -14,6 +14,8 @@ class QuotationItem extends Model
         'id', 'quotation_id', 'product_id', 'product_name',
         'quantity', 'unit_price', 'discount_pct', 'tax_rate_id',
         'line_total', 'invoiced_quantity',
+        // GLS·03
+        'sheet_lot_id', 'sheet_cut_width', 'sheet_cut_height',
     ];
 
     public function quotation(): BelongsTo
@@ -24,5 +26,10 @@ class QuotationItem extends Model
     public function product(): BelongsTo
     {
         return $this->belongsTo(Product::class);
+    }
+
+    public function sheetLot(): BelongsTo
+    {
+        return $this->belongsTo(SheetLot::class);
     }
 }
