@@ -218,6 +218,10 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::post('settings/workflows', [BackOfficeSettings::class, 'updateWorkflowSettings'])->name('settings.workflows');
         Route::post('settings/branding', [BackOfficeSettings::class, 'updateBranding'])->name('settings.branding');
         Route::post('settings/branding/logo', [BackOfficeSettings::class, 'uploadBrandingLogo'])->name('settings.branding.logo');
+        Route::post('settings/branding/letterhead', [BackOfficeSettings::class, 'uploadBrandingLetterhead'])->name('settings.branding.letterhead');
+        Route::post('settings/branding/footer-image', [BackOfficeSettings::class, 'uploadBrandingFooterImage'])->name('settings.branding.footer-image');
+        Route::post('settings/branding/footer-text', [BackOfficeSettings::class, 'updateFooterText'])->name('settings.branding.footer-text');
+        Route::post('settings/document-branding', [BackOfficeSettings::class, 'updateDocumentBrandingSettings'])->name('settings.document-branding');
 
         Route::get('suppliers', [BackOfficeSuppliers::class, 'index'])->name('suppliers.index');
         Route::get('suppliers/opening-balances/template', [BackOfficeSupplierOpeningBalances::class, 'template'])->name('suppliers.opening-balances.template');

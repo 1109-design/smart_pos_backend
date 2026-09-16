@@ -47,6 +47,9 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     // Business branding — a device uploads its locally-picked logo so it
     // fans out to every other device and the BackOffice web app
     Route::post('business/logo', [BusinessBrandingController::class, 'uploadLogo']);
+    Route::post('business/letterhead', [BusinessBrandingController::class, 'uploadLetterhead']);
+    Route::post('business/footer-image', [BusinessBrandingController::class, 'uploadFooterImage']);
+    Route::put('business/footer-text', [BusinessBrandingController::class, 'updateFooterText']);
 
     // Reports back a location a cashier picked on-device (the fallback
     // prompt shown when no admin assignment exists) so the web portal's

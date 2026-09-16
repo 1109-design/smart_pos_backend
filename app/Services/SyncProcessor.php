@@ -28,6 +28,7 @@ use App\Models\CreditNoteItem;
 use App\Models\CreditTransaction;
 use App\Models\Currency;
 use App\Models\Customer;
+use App\Models\DocumentBrandingSetting;
 use App\Models\Employee;
 use App\Models\ExchangeRate;
 use App\Models\Expense;
@@ -87,6 +88,7 @@ use App\Services\Accounting\CreditPaymentPostingService;
 use App\Services\Accounting\GrvPostingService;
 use App\Services\Accounting\InvoicePaymentPostingService;
 use App\Services\Accounting\OpeningBalanceService;
+use App\Services\Accounting\ProductOpeningStockPostingService;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use App\Services\Accounting\SalaryPostingService;
 use App\Services\Accounting\SalePostingService;
@@ -895,11 +897,14 @@ class SyncProcessor
                         // value on every write.
                         'bank_accounts_json' => $preserve('bank_accounts_json'),
                         'currency_code' => $payload['base_currency_code'] ?? $existingBusiness?->currency_code ?? 'USD',
-                        // logo_path/primary_color are deliberately absent here: they're
-                        // owned by the 'business_branding' sync record and the logo
-                        // upload endpoint, not this generic device push. Applying a
-                        // device's local logo_path (an opaque on-device file path) here
+                        // logo_path/primary_color/letterhead_path/footer_path are
+                        // deliberately absent here: they're owned by the
+                        // 'business_branding' sync record and their own upload
+                        // endpoints, not this generic device push. Applying a
+                        // device's local path (an opaque on-device file path) here
                         // would overwrite the server's real public URL on every sync.
+                        // footer_text is plain text, safe to preserve like any other field.
+                        'footer_text' => $preserve('footer_text'),
                         'metadata' => $preserve('metadata'),
                         'fiscalisation_enabled' => $preserve('fiscalisation_enabled', false),
                         'day_shift_start' => $preserve('day_shift_start'),
@@ -1039,15 +1044,22 @@ class SyncProcessor
                 // BackOffice create form) attributes the opening quantity to that
                 // location too, instead of leaving it in the flat total only.
                 if (! $productExisted && $openingStock != 0) {
-                    StockMovement::create([
+                    $openingMovement = StockMovement::create([
                         'business_id' => $payload['business_id'] ?? null,
                         'location_id' => $payload['location_id'] ?? null,
                         'product_id' => $uuid,
                         'type' => 'opening_stock',
                         'quantity_change' => $openingStock,
+                        'unit_cost' => $payload['cost_price'] ?? 0,
                         'reason' => 'Opening stock (take-on)',
                         'user_id' => $payload['user_id'] ?? null,
                     ]);
+                    // Record the take-on value in the books too — see
+                    // ProductOpeningStockPostingService for why this ledger
+                    // entry alone previously left the balance sheet blind to
+                    // any stock a business took on when it started using the
+                    // system (e.g. via a sheet/CSV import).
+                    app(ProductOpeningStockPostingService::class)->recordTakeOn($openingMovement);
                 }
                 // If any movements exist for this product, recompute from the ledger
                 // so concurrent pushes from multiple devices converge correctly.
@@ -1413,6 +1425,14 @@ class SyncProcessor
                 // approved stock take — post its GL effect the same
                 // tolerant-of-failure way as the GRV posting above.
                 app(StockTakePostingService::class)->recordVariance($movement);
+
+                // An 'opening_stock' movement here is a take-on figure set
+                // (or corrected) via ProductsController::applyLocationBalance()
+                // — the "Set Opening Balance" action and the CSV/sheet
+                // re-import's quantity reconciliation. The 'products' case
+                // above covers a brand-new product's own initial quantity;
+                // this covers every later adjustment to a take-on figure.
+                app(ProductOpeningStockPostingService::class)->recordTakeOn($movement);
                 break;
 
             case 'loyalty_transactions':
@@ -1920,6 +1940,21 @@ class SyncProcessor
                 );
                 break;
 
+            case 'document_branding_settings':
+                DocumentBrandingSetting::updateOrCreate(
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'document_type' => $payload['document_type'] ?? '',
+                    ],
+                    [
+                        'use_letterhead' => $payload['use_letterhead'] ?? true,
+                        'use_footer' => $payload['use_footer'] ?? true,
+                        'show_logo' => $payload['show_logo'] ?? true,
+                        'paper_size' => $payload['paper_size'] ?? null,
+                    ]
+                );
+                break;
+
             case 'po_audit_logs':
                 // Append-only — skip if a record with this uuid as po_id+action already exists
                 PoAuditLog::firstOrCreate(
@@ -2019,6 +2054,8 @@ class SyncProcessor
                         'sent_at' => $payload['sent_at'] ?? null,
                         'accepted_at' => $payload['accepted_at'] ?? null,
                         'rejected_at' => $payload['rejected_at'] ?? null,
+                        'currency_code' => $payload['currency_code'] ?? null,
+                        'exchange_rate' => $payload['exchange_rate'] ?? 1,
                     ]
                 );
                 break;
@@ -2707,7 +2744,13 @@ class SyncProcessor
         $user = User::updateOrCreate(['id' => $uuid], $userData);
 
         if (method_exists($user, 'syncRoles') && isset($payload['role'])) {
-            $incomingRole = $payload['role'];
+            // Devices speak the short 'owner' role name (see
+            // user_management_screen.dart's SegmentedButton); Spatie's
+            // actual role record is 'business_owner', same as every other
+            // inbound/outbound boundary in this app already translates
+            // (UserController, BackOffice\UsersController). Without this,
+            // syncRoles(['owner']) throws RoleDoesNotExist for guard 'web'.
+            $incomingRole = $payload['role'] === 'owner' ? 'business_owner' : $payload['role'];
 
             // Critical privilege-escalation guard: BackOfficeController's
             // UsersController already gates every role assignment behind

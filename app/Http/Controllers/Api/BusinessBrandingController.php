@@ -26,6 +26,68 @@ class BusinessBrandingController extends Controller
             'logo' => ['required', 'image', 'mimes:png,jpg,jpeg,webp', 'max:2048'],
         ]);
 
+        $business = $this->resolveBusiness($request);
+        if (! $business instanceof Business) {
+            return $business;
+        }
+
+        $service->uploadLogo($business, $data['logo']);
+
+        return response()->json(['logo_url' => $business->logoUrl()]);
+    }
+
+    /** Same flow as uploadLogo() above, for the client's existing letterhead artwork. */
+    public function uploadLetterhead(Request $request, BusinessBrandingService $service): JsonResponse
+    {
+        $data = $request->validate([
+            'letterhead' => ['required', 'image', 'mimes:png,jpg,jpeg,webp', 'max:4096'],
+        ]);
+
+        $business = $this->resolveBusiness($request);
+        if (! $business instanceof Business) {
+            return $business;
+        }
+
+        $service->uploadLetterhead($business, $data['letterhead']);
+
+        return response()->json(['letterhead_url' => $business->letterheadUrl()]);
+    }
+
+    public function uploadFooterImage(Request $request, BusinessBrandingService $service): JsonResponse
+    {
+        $data = $request->validate([
+            'footer' => ['required', 'image', 'mimes:png,jpg,jpeg,webp', 'max:4096'],
+        ]);
+
+        $business = $this->resolveBusiness($request);
+        if (! $business instanceof Business) {
+            return $business;
+        }
+
+        $service->uploadFooterImage($business, $data['footer']);
+
+        return response()->json(['footer_url' => $business->footerUrl()]);
+    }
+
+    public function updateFooterText(Request $request, BusinessBrandingService $service): JsonResponse
+    {
+        $data = $request->validate([
+            'footer_text' => ['nullable', 'string', 'max:2000'],
+        ]);
+
+        $business = $this->resolveBusiness($request);
+        if (! $business instanceof Business) {
+            return $business;
+        }
+
+        $service->updateFooterText($business, $data['footer_text'] ?? null);
+
+        return response()->json(['footer_text' => $business->footer_text]);
+    }
+
+    /** Resolves the calling device's business, or a JsonResponse error to return as-is. */
+    private function resolveBusiness(Request $request): Business|JsonResponse
+    {
         $device = $this->deviceResolver->fromRequest($request);
         if (! $device) {
             return response()->json(['message' => 'Device is not paired to a business.'], 403);
@@ -36,8 +98,6 @@ class BusinessBrandingController extends Controller
             return response()->json(['message' => 'Business not found.'], 404);
         }
 
-        $service->uploadLogo($business, $data['logo']);
-
-        return response()->json(['logo_url' => $business->logoUrl()]);
+        return $business;
     }
 }

@@ -46,7 +46,7 @@ class BackOfficeAccountRoleMappingsTest extends TestCase
         $response = $this->get('/office/account-mappings');
 
         $response->assertOk();
-        $response->assertInertia(fn ($page) => $page->has('roles', 7));
+        $response->assertInertia(fn ($page) => $page->has('roles', 8));
     }
 
     public function test_manager_cannot_access_account_mappings(): void

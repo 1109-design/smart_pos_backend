@@ -23,6 +23,9 @@ class Business extends Model
         'currency_code',
         'logo_path',
         'primary_color',
+        'letterhead_path',
+        'footer_path',
+        'footer_text',
         'metadata',
         'fiscalisation_enabled',
         'day_shift_start',
@@ -106,14 +109,28 @@ class Business extends Model
         return $this->logo_path ? Storage::disk('public')->url($this->logo_path) : null;
     }
 
+    /** Public URL for the current letterhead image, or null if none has been uploaded. */
+    public function letterheadUrl(): ?string
+    {
+        return $this->letterhead_path ? Storage::disk('public')->url($this->letterhead_path) : null;
+    }
+
+    /** Public URL for the current footer image, or null if none has been uploaded. */
+    public function footerUrl(): ?string
+    {
+        return $this->footer_path ? Storage::disk('public')->url($this->footer_path) : null;
+    }
+
     /**
-     * Branding (logo + color) is delivered under its own narrow
-     * 'business_branding' sync table, same reasoning as
-     * publishAccountingSettingsSyncRecord() above — never fold logo_path or
-     * primary_color into the generic 'businesses' sync payload/apply case.
-     * This is also pull-only: only the server ever publishes it, a device
-     * never pushes its own value back (see sync_service.dart's
-     * _pullOnlyTables).
+     * Branding (logo, color, letterhead, footer) is delivered under its own
+     * narrow 'business_branding' sync table, same reasoning as
+     * publishAccountingSettingsSyncRecord() above — never fold logo_path,
+     * primary_color, letterhead_path or footer_path into the generic
+     * 'businesses' sync payload/apply case. This is also pull-only: only
+     * the server ever publishes it, a device never pushes its own value
+     * back (see sync_service.dart's _pullOnlyTables). footer_text is plain
+     * text data and syncs separately, bidirectionally, as an ordinary
+     * 'businesses' column.
      */
     public function publishBrandingSyncRecord(): void
     {
@@ -126,6 +143,8 @@ class Business extends Model
                 'business_id' => $this->id,
                 'primary_color' => $this->primary_color,
                 'logo_url' => $this->logoUrl(),
+                'letterhead_url' => $this->letterheadUrl(),
+                'footer_url' => $this->footerUrl(),
             ],
             'source_updated_at' => now(),
             'synced_at' => now(),

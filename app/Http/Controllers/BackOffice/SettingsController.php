@@ -3,12 +3,14 @@
 namespace App\Http\Controllers\BackOffice;
 
 use App\Models\Business;
+use App\Models\DocumentBrandingSetting;
 use App\Models\User;
 use App\Services\BackOfficeAuthorizer;
 use App\Services\BusinessBrandingService;
 use App\Services\CatalogueResetService;
 use App\Services\StockResetService;
 use App\Services\SyncProcessor;
+use App\Support\DocumentType;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -46,8 +48,33 @@ class SettingsController extends BackOfficeController
                 'business_name' => $business?->name,
                 'primary_color' => $business?->primary_color,
                 'logo_url' => $business?->logoUrl(),
+                'letterhead_url' => $business?->letterheadUrl(),
+                'footer_url' => $business?->footerUrl(),
+                'footer_text' => $business?->footer_text,
             ],
+            'document_branding_settings' => $this->documentBrandingSettingsForResponse($this->tenantId()),
         ]);
+    }
+
+    /** @return array<string, array{use_letterhead: bool, use_footer: bool, show_logo: bool, paper_size: string}> */
+    private function documentBrandingSettingsForResponse(?string $businessId): array
+    {
+        $existing = DocumentBrandingSetting::where('business_id', $businessId)
+            ->get()
+            ->keyBy('document_type');
+
+        $result = [];
+        foreach (DocumentType::all() as $type) {
+            $row = $existing->get($type);
+            $result[$type] = [
+                'use_letterhead' => $row?->use_letterhead ?? true,
+                'use_footer' => $row?->use_footer ?? true,
+                'show_logo' => $row?->show_logo ?? true,
+                'paper_size' => $row?->paper_size ?? DocumentType::defaultPaperSize($type),
+            ];
+        }
+
+        return $result;
     }
 
     /**
@@ -89,6 +116,88 @@ class SettingsController extends BackOfficeController
         }
 
         return back()->with('success', 'Logo updated.');
+    }
+
+    /** Same flow as uploadBrandingLogo() above, for the client's existing letterhead artwork. */
+    public function uploadBrandingLetterhead(Request $request, BusinessBrandingService $service): RedirectResponse
+    {
+        $this->authorizeOwner();
+
+        $data = $request->validate([
+            'letterhead' => ['required', 'image', 'mimes:png,jpg,jpeg,webp', 'max:4096'],
+        ]);
+
+        $business = Business::find($this->tenantId());
+        if ($business) {
+            $service->uploadLetterhead($business, $data['letterhead']);
+        }
+
+        return back()->with('success', 'Letterhead updated.');
+    }
+
+    public function uploadBrandingFooterImage(Request $request, BusinessBrandingService $service): RedirectResponse
+    {
+        $this->authorizeOwner();
+
+        $data = $request->validate([
+            'footer' => ['required', 'image', 'mimes:png,jpg,jpeg,webp', 'max:4096'],
+        ]);
+
+        $business = Business::find($this->tenantId());
+        if ($business) {
+            $service->uploadFooterImage($business, $data['footer']);
+        }
+
+        return back()->with('success', 'Footer image updated.');
+    }
+
+    public function updateFooterText(Request $request, BusinessBrandingService $service): RedirectResponse
+    {
+        $this->authorizeOwner();
+
+        $data = $request->validate([
+            'footer_text' => ['nullable', 'string', 'max:2000'],
+        ]);
+
+        $business = Business::find($this->tenantId());
+        if ($business) {
+            $service->updateFooterText($business, $data['footer_text'] ?? null);
+        }
+
+        return back()->with('success', 'Footer text updated.');
+    }
+
+    /**
+     * One document type's print toggles at a time (mirrors updateBranding()'s
+     * one-field-per-request shape) — the frontend posts a row whenever the
+     * admin flips a switch or changes the paper size for that document type.
+     */
+    public function updateDocumentBrandingSettings(Request $request): RedirectResponse
+    {
+        $this->authorizeOwner();
+
+        $data = $request->validate([
+            'document_type' => ['required', 'string', 'in:'.implode(',', DocumentType::all())],
+            'use_letterhead' => ['required', 'boolean'],
+            'use_footer' => ['required', 'boolean'],
+            'show_logo' => ['required', 'boolean'],
+            'paper_size' => ['required', 'string', 'max:20'],
+        ]);
+
+        DocumentBrandingSetting::updateOrCreate(
+            [
+                'business_id' => $this->tenantId(),
+                'document_type' => $data['document_type'],
+            ],
+            [
+                'use_letterhead' => $data['use_letterhead'],
+                'use_footer' => $data['use_footer'],
+                'show_logo' => $data['show_logo'],
+                'paper_size' => $data['paper_size'],
+            ]
+        );
+
+        return back()->with('success', 'Document branding settings updated.');
     }
 
     /** Keeps the currently logged-in owner's session in sync so a branding change is visible immediately, without re-login (mirrors business_name's existing session caching in SessionController::store()). */

@@ -19,20 +19,42 @@ interface Branding {
     business_name: string | null;
     primary_color: string | null;
     logo_url: string | null;
+    letterhead_url: string | null;
+    footer_url: string | null;
+    footer_text: string | null;
 }
+
+interface DocumentBrandingSetting {
+    use_letterhead: boolean;
+    use_footer: boolean;
+    show_logo: boolean;
+    paper_size: string;
+}
+
+type DocumentType = 'sales_receipt' | 'invoice' | 'quotation' | 'requisition';
 
 interface Props {
     stock_reset: StockReset;
     catalogue_reset: StockReset;
     workflows: Workflows;
     branding: Branding;
+    document_branding_settings: Record<DocumentType, DocumentBrandingSetting>;
 }
 
 const CONFIRM_WORD = 'RESET';
 const CATALOGUE_CONFIRM_PHRASE = 'DELETE EVERYTHING';
 const DEFAULT_BRAND_COLOR = '#059669';
 
-export default function BackOfficeSettings({ stock_reset, catalogue_reset, workflows, branding }: Props) {
+const DOCUMENT_TYPE_LABELS: Record<DocumentType, string> = {
+    sales_receipt: 'Sales Receipt',
+    invoice: 'Invoice',
+    quotation: 'Quotation',
+    requisition: 'Requisition',
+};
+
+const PAPER_SIZES = ['80mm', '58mm', 'A4', 'A5', 'Letter'];
+
+export default function BackOfficeSettings({ stock_reset, catalogue_reset, workflows, branding, document_branding_settings }: Props) {
     const [showConfirm, setShowConfirm] = useState(false);
     const [showCatalogueConfirm, setShowCatalogueConfirm] = useState(false);
     const { flash } = usePage().props as unknown as { flash: { success: string | null } };
@@ -42,6 +64,14 @@ export default function BackOfficeSettings({ stock_reset, catalogue_reset, workf
     const colorForm = useForm({ primary_color: branding.primary_color ?? DEFAULT_BRAND_COLOR });
     const logoForm = useForm<{ logo: File | null }>({ logo: null });
     const [logoPreview, setLogoPreview] = useState<string | null>(null);
+
+    const letterheadForm = useForm<{ letterhead: File | null }>({ letterhead: null });
+    const [letterheadPreview, setLetterheadPreview] = useState<string | null>(null);
+
+    const footerImageForm = useForm<{ footer: File | null }>({ footer: null });
+    const [footerImagePreview, setFooterImagePreview] = useState<string | null>(null);
+
+    const footerTextForm = useForm({ footer_text: branding.footer_text ?? '' });
 
     const saveColor = (e: React.FormEvent) => {
         e.preventDefault();
@@ -67,6 +97,63 @@ export default function BackOfficeSettings({ stock_reset, catalogue_reset, workf
                 setLogoPreview(null);
             },
         });
+    };
+
+    const pickLetterhead = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0] ?? null;
+        letterheadForm.setData('letterhead', file);
+        setLetterheadPreview(file ? URL.createObjectURL(file) : null);
+    };
+
+    const uploadLetterhead = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!letterheadForm.data.letterhead) {
+            return;
+        }
+        letterheadForm.post('/office/settings/branding/letterhead', {
+            preserveScroll: true,
+            forceFormData: true,
+            onSuccess: () => {
+                letterheadForm.reset();
+                setLetterheadPreview(null);
+            },
+        });
+    };
+
+    const pickFooterImage = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0] ?? null;
+        footerImageForm.setData('footer', file);
+        setFooterImagePreview(file ? URL.createObjectURL(file) : null);
+    };
+
+    const uploadFooterImage = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!footerImageForm.data.footer) {
+            return;
+        }
+        footerImageForm.post('/office/settings/branding/footer-image', {
+            preserveScroll: true,
+            forceFormData: true,
+            onSuccess: () => {
+                footerImageForm.reset();
+                setFooterImagePreview(null);
+            },
+        });
+    };
+
+    const saveFooterText = (e: React.FormEvent) => {
+        e.preventDefault();
+        footerTextForm.post('/office/settings/branding/footer-text', { preserveScroll: true });
+    };
+
+    const [docSettings, setDocSettings] = useState(document_branding_settings);
+
+    const saveDocumentSetting = (type: DocumentType) => {
+        router.post('/office/settings/document-branding', { document_type: type, ...docSettings[type] }, { preserveScroll: true });
+    };
+
+    const updateDocSetting = <K extends keyof DocumentBrandingSetting>(type: DocumentType, key: K, value: DocumentBrandingSetting[K]) => {
+        setDocSettings((prev) => ({ ...prev, [type]: { ...prev[type], [key]: value } }));
     };
 
     const [poThreshold, setPoThreshold] = useState(workflows.po_approval_threshold?.toString() ?? '');
@@ -195,6 +282,134 @@ export default function BackOfficeSettings({ stock_reset, catalogue_reset, workf
                         </div>
                         {logoForm.errors.logo && <p className="text-xs text-red-500 mt-1">{logoForm.errors.logo}</p>}
                     </form>
+                </div>
+
+                <div className="border-t border-slate-100 mt-5 pt-5">
+                    <p className="text-sm font-medium text-slate-800 mb-1">Letterhead</p>
+                    <p className="text-xs text-slate-500 mb-3 max-w-xl">
+                        Your existing letterhead artwork, printed across the top of A4 documents (invoices, quotations,
+                        requisitions) in place of the generated header. PNG, JPG or WEBP, up to 4MB.
+                    </p>
+                    <form onSubmit={uploadLetterhead} className="flex items-center gap-3">
+                        <div className="w-24 h-14 rounded-xl border border-slate-200 bg-slate-50 flex items-center justify-center overflow-hidden flex-shrink-0">
+                            {(letterheadPreview ?? branding.letterhead_url) ? (
+                                <img src={letterheadPreview ?? branding.letterhead_url ?? undefined} alt="Letterhead preview" className="w-full h-full object-contain" />
+                            ) : (
+                                <span className="text-xs text-slate-400">None</span>
+                            )}
+                        </div>
+                        <input type="file" accept="image/png,image/jpeg,image/webp" onChange={pickLetterhead} className="text-sm text-slate-600" />
+                        <button
+                            type="submit"
+                            disabled={letterheadForm.processing || !letterheadForm.data.letterhead}
+                            className="btn-primary py-2 px-4 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            Upload
+                        </button>
+                    </form>
+                    {letterheadForm.errors.letterhead && <p className="text-xs text-red-500 mt-1">{letterheadForm.errors.letterhead}</p>}
+                </div>
+
+                <div className="border-t border-slate-100 mt-5 pt-5">
+                    <p className="text-sm font-medium text-slate-800 mb-1">Footer</p>
+                    <p className="text-xs text-slate-500 mb-3 max-w-xl">
+                        An optional footer image (e.g. bank/registration details already laid out) plus free-form footer
+                        text (terms, a thank-you note). Either or both can be left blank.
+                    </p>
+                    <form onSubmit={uploadFooterImage} className="flex items-center gap-3 mb-4">
+                        <div className="w-24 h-14 rounded-xl border border-slate-200 bg-slate-50 flex items-center justify-center overflow-hidden flex-shrink-0">
+                            {(footerImagePreview ?? branding.footer_url) ? (
+                                <img src={footerImagePreview ?? branding.footer_url ?? undefined} alt="Footer preview" className="w-full h-full object-contain" />
+                            ) : (
+                                <span className="text-xs text-slate-400">None</span>
+                            )}
+                        </div>
+                        <input type="file" accept="image/png,image/jpeg,image/webp" onChange={pickFooterImage} className="text-sm text-slate-600" />
+                        <button
+                            type="submit"
+                            disabled={footerImageForm.processing || !footerImageForm.data.footer}
+                            className="btn-primary py-2 px-4 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            Upload
+                        </button>
+                    </form>
+                    {footerImageForm.errors.footer && <p className="text-xs text-red-500 mt-1 mb-3">{footerImageForm.errors.footer}</p>}
+
+                    <form onSubmit={saveFooterText} className="flex items-start gap-2">
+                        <textarea
+                            value={footerTextForm.data.footer_text}
+                            onChange={(e) => footerTextForm.setData('footer_text', e.target.value)}
+                            placeholder="e.g. Bank: CBZ 123456 · Terms: goods sold are not returnable · Thank you for your business"
+                            rows={2}
+                            maxLength={2000}
+                            className="flex-1 text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                        <button type="submit" disabled={footerTextForm.processing} className="btn-primary py-2 px-4">Save</button>
+                    </form>
+                    {footerTextForm.errors.footer_text && <p className="text-xs text-red-500 mt-1">{footerTextForm.errors.footer_text}</p>}
+                </div>
+            </div>
+
+            <div className="mb-3">
+                <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wider">Document Types</h2>
+            </div>
+            <div className="mb-8 bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+                <p className="text-sm text-slate-500 mb-5 max-w-xl">
+                    Choose whether each document type uses the letterhead/footer above, and what paper size it prints on.
+                    A document type left off simply falls back to the generated header — nothing breaks if branding is
+                    missing.
+                </p>
+                <div className="divide-y divide-slate-100">
+                    {(Object.keys(DOCUMENT_TYPE_LABELS) as DocumentType[]).map((type) => {
+                        const setting = docSettings[type];
+                        return (
+                            <div key={type} className="py-4 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6">
+                                <p className="text-sm font-medium text-slate-800 w-32 flex-shrink-0">{DOCUMENT_TYPE_LABELS[type]}</p>
+                                <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={setting.use_letterhead}
+                                        onChange={(e) => updateDocSetting(type, 'use_letterhead', e.target.checked)}
+                                        className="w-3.5 h-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                                    />
+                                    Letterhead
+                                </label>
+                                <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={setting.use_footer}
+                                        onChange={(e) => updateDocSetting(type, 'use_footer', e.target.checked)}
+                                        className="w-3.5 h-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                                    />
+                                    Footer
+                                </label>
+                                <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={setting.show_logo}
+                                        onChange={(e) => updateDocSetting(type, 'show_logo', e.target.checked)}
+                                        className="w-3.5 h-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                                    />
+                                    Logo
+                                </label>
+                                <select
+                                    value={setting.paper_size}
+                                    onChange={(e) => updateDocSetting(type, 'paper_size', e.target.value)}
+                                    className="text-xs rounded-lg border border-slate-200 px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                >
+                                    {PAPER_SIZES.map((size) => (
+                                        <option key={size} value={size}>{size}</option>
+                                    ))}
+                                </select>
+                                <button
+                                    onClick={() => saveDocumentSetting(type)}
+                                    className="text-xs px-3 py-1.5 rounded-lg font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200 sm:ml-auto"
+                                >
+                                    Save
+                                </button>
+                            </div>
+                        );
+                    })}
                 </div>
             </div>
 
