@@ -19,10 +19,21 @@ class DocumentType
 
     const REQUISITION = 'requisition';
 
+    const GRV = 'grv';
+
+    const DELIVERY_NOTE = 'delivery_note';
+
     /** @return list<string> */
     public static function all(): array
     {
-        return [self::SALES_RECEIPT, self::INVOICE, self::QUOTATION, self::REQUISITION];
+        return [
+            self::SALES_RECEIPT,
+            self::INVOICE,
+            self::QUOTATION,
+            self::REQUISITION,
+            self::GRV,
+            self::DELIVERY_NOTE,
+        ];
     }
 
     /** Sensible paper size when a business hasn't overridden document_branding_settings.paper_size. */

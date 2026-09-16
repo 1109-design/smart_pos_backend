@@ -314,6 +314,28 @@ class BusinessBrandingTest extends TestCase
         ]);
     }
 
+    public function test_backoffice_owner_can_update_delivery_note_branding_settings(): void
+    {
+        $tenantId = 'tenant-branding-delivery-note';
+        $this->actingBackOfficeSession($tenantId);
+        Business::create(['id' => $tenantId, 'name' => 'Delivery Note Shop']);
+
+        $this->post('/office/settings/document-branding', [
+            'document_type' => 'delivery_note',
+            'use_letterhead' => true,
+            'use_footer' => true,
+            'show_logo' => true,
+            'paper_size' => 'A4',
+        ])->assertRedirect();
+
+        $this->assertDatabaseHas('document_branding_settings', [
+            'business_id' => $tenantId,
+            'document_type' => 'delivery_note',
+            'use_letterhead' => true,
+            'use_footer' => true,
+        ]);
+    }
+
     public function test_document_branding_settings_defaults_when_unconfigured(): void
     {
         $tenantId = 'tenant-branding-11';
