@@ -16,6 +16,7 @@ class Quotation extends Model
         'status', 'valid_until', 'subtotal', 'discount_total', 'tax_total', 'total',
         'notes', 'parent_quotation_id', 'created_by_user_id',
         'sent_at', 'accepted_at', 'rejected_at',
+        'currency_code', 'exchange_rate',
     ];
 
     protected function casts(): array

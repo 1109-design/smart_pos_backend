@@ -138,6 +138,34 @@ class SyncUserRoleEscalationGuardTest extends TestCase
         $this->assertTrue(User::find($newEmployeeId)->hasRole('cashier'));
     }
 
+    /**
+     * The till app's UI (user_management_screen.dart) speaks the short role
+     * name 'owner', never Spatie's actual 'business_owner' record — every
+     * other boundary in this app (UserController, BackOffice\UsersController)
+     * already translates between the two, but syncUser() didn't, so
+     * syncRoles(['owner']) threw RoleDoesNotExist for guard 'web' and the
+     * push failed outright. Reproduced against a live server before this fix.
+     */
+    public function test_a_device_pushing_the_short_owner_role_name_is_translated_to_business_owner(): void
+    {
+        $tenantId = 'tenant-owner-alias';
+        Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);
+
+        $owner = User::factory()->create(['business_id' => $tenantId, 'email' => $tenantId.'-owner@example.com']);
+        $owner->assignRole('business_owner');
+        $token = $this->actingDeviceToken($tenantId, $owner);
+
+        $newEmployeeId = (string) Str::uuid();
+        $response = $this->pushUserRole($token, $tenantId, $newEmployeeId, 'owner', [
+            'name' => 'New Co-Owner',
+            'email' => 'new-owner@example.com',
+        ]);
+
+        $response->assertOk();
+        $this->assertCount(1, $response->json('accepted'));
+        $this->assertTrue(User::find($newEmployeeId)->hasRole('business_owner'));
+    }
+
     public function test_a_device_resyncing_its_own_unchanged_role_is_not_blocked(): void
     {
         $tenantId = 'tenant-escalation-noop';

@@ -2,7 +2,20 @@
 
 namespace App\Services;
 
+use App\Models\Accounting\AccountingPeriod;
+use App\Models\Accounting\AccountSubCategory;
+use App\Models\Accounting\GeneralLedgerEntry;
+use App\Models\Accounting\GlAccount;
+use App\Models\Accounting\JournalHeader;
+use App\Models\Accounting\JournalLine;
+use App\Models\AccountRoleMapping;
+use App\Models\ApprovalDelegation;
 use App\Models\ApprovalRequest;
+use App\Models\ApprovalRule;
+use App\Models\ApprovalRuleSet;
+use App\Models\Asset;
+use App\Models\BankAccount;
+use App\Models\BankReconciliation;
 use App\Models\Bundle;
 use App\Models\BundleItem;
 use App\Models\Business;
@@ -15,6 +28,7 @@ use App\Models\CreditNoteItem;
 use App\Models\CreditTransaction;
 use App\Models\Currency;
 use App\Models\Customer;
+use App\Models\DocumentBrandingSetting;
 use App\Models\Employee;
 use App\Models\ExchangeRate;
 use App\Models\Expense;
@@ -31,8 +45,8 @@ use App\Models\ProcurementBudget;
 use App\Models\Product;
 use App\Models\ProductContainerLink;
 use App\Models\ProductPriceTier;
-use App\Models\ProductStock;
 use App\Models\ProductSellableLocation;
+use App\Models\ProductStock;
 use App\Models\ProductTaxRate;
 use App\Models\ProductUnit;
 use App\Models\ProductVariant;
@@ -49,6 +63,7 @@ use App\Models\RequisitionItem;
 use App\Models\RolePermission;
 use App\Models\SalaryPayment;
 use App\Models\SheetCut;
+use App\Models\SheetLossRecord;
 use App\Models\SheetLot;
 use App\Models\Shift;
 use App\Models\StockMovement;
@@ -57,21 +72,29 @@ use App\Models\StockTakeItem;
 use App\Models\StockTransfer;
 use App\Models\StockTransferItem;
 use App\Models\Supplier;
+use App\Models\SupplierPayment;
 use App\Models\SyncRecord;
 use App\Models\TaxRate;
 use App\Models\Till;
 use App\Models\TillCashMovement;
+use App\Models\TillLocationAudit;
 use App\Models\Transaction;
 use App\Models\TransactionItem;
 use App\Models\TransactionTax;
 use App\Models\UnitOfMeasure;
 use App\Models\User;
+use App\Models\WarehouseBin;
+use App\Services\Accounting\AssetPostingService;
+use App\Services\Accounting\CreditPaymentPostingService;
 use App\Services\Accounting\GrvPostingService;
+use App\Services\Accounting\InvoicePaymentPostingService;
 use App\Services\Accounting\OpeningBalanceService;
+use App\Services\Accounting\ProductOpeningStockPostingService;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use App\Services\Accounting\SalaryPostingService;
 use App\Services\Accounting\SalePostingService;
 use App\Services\Accounting\StockTakePostingService;
+use App\Services\Accounting\SupplierPaymentService;
 use App\Services\Zimra\ZimraSalesService;
 use App\Support\BackOfficePermission;
 use Illuminate\Support\Carbon;
@@ -88,6 +111,26 @@ class SyncProcessor
         'transaction_items', 'transaction_taxes', 'payments', 'po_audit_logs',
         'container_deposit_ledger', 'change_owed_ledger', 'till_cash_movements',
         'invoice_payments', 'credit_note_items', 'sheet_cuts',
+        // GLS·02 — a loss record is never deleted or mutated; a wrong entry
+        // is corrected by a reversing adjustment elsewhere, same convention
+        // as general_ledger below.
+        'sheet_loss_records',
+        // GLS·03 — no delete UI exists for a bin; safer to leave an
+        // orphaned one than strand a sheet_lots.warehouse_bin_id reference.
+        'warehouse_bins',
+        // Client-posted (or server-posted, pre-cutover) journals — see
+        // JournalLine/GeneralLedgerEntry's own model-level immutability
+        // guards. A correction is a reversal, never a delete.
+        'journal_headers', 'journal_lines', 'general_ledger',
+        // A reconciliation session is closed by flipping its status to
+        // cancelled/completed, never deleted — see BankReconciliationService.
+        'bank_reconciliations',
+        // Append-only, same reasoning as invoice_payments — a correction is
+        // a new offsetting entry, never a delete.
+        'supplier_payments',
+        // An asset is disposed (status: disposed), never deleted — see
+        // AssetPostingService::recordDisposal().
+        'assets',
     ];
 
     // Tables with their own business_id column, guarded in assertOwnership().
@@ -119,6 +162,8 @@ class SyncProcessor
         'requisitions' => Requisition::class,
         'projects' => Project::class,
         'sheet_lots' => SheetLot::class,
+        'sheet_loss_records' => SheetLossRecord::class,
+        'warehouse_bins' => WarehouseBin::class,
         'users' => User::class,
         'container_deposit_ledger' => ContainerDepositLedger::class,
         'change_owed_ledger' => ChangeOwedLedger::class,
@@ -130,6 +175,25 @@ class SyncProcessor
         'recurring_invoice_schedules' => RecurringInvoiceSchedule::class,
         'procurement_budgets' => ProcurementBudget::class,
         'units_of_measure' => UnitOfMeasure::class,
+        'journal_headers' => JournalHeader::class,
+        'general_ledger' => GeneralLedgerEntry::class,
+        'bank_accounts' => BankAccount::class,
+        'bank_reconciliations' => BankReconciliation::class,
+        'account_role_mappings' => AccountRoleMapping::class,
+        'supplier_payments' => SupplierPayment::class,
+        'assets' => Asset::class,
+        'approval_rule_sets' => ApprovalRuleSet::class,
+        'approval_rules' => ApprovalRule::class,
+        'approval_delegations' => ApprovalDelegation::class,
+        // Chart of accounts is normally seeded and managed server-side only
+        // (see sync_service.dart's `_pullOnlyTables` doc comment) — these two
+        // become bidirectional for exactly one narrow case: a bank account
+        // created offline mints its own GlAccount (under a "Bank Accounts"
+        // AccountSubCategory) locally first and pushes both up. See
+        // BankAccountService (Flutter) and BankAccountService::create()
+        // (here) for the two mirrored provisioning paths.
+        'account_sub_categories' => AccountSubCategory::class,
+        'gl_accounts' => GlAccount::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -161,6 +225,7 @@ class SyncProcessor
         'product_price_tiers' => [ProductPriceTier::class, 'product_id'],
         'project_milestones' => [ProjectMilestone::class, 'project_id'],
         'milestone_tasks' => [MilestoneTask::class, 'milestone_id'],
+        'journal_lines' => [JournalLine::class, 'journal_header_id'],
     ];
 
     // Deliberately unguarded, and why:
@@ -172,10 +237,12 @@ class SyncProcessor
     /**
      * @param  bool  $trusted  False only for payloads that originated from a
      *                         device sync push (or a conflict-resolution replay
-     *                         of one) — see the 'tills' case, which refuses to
-     *                         let an untrusted payload move an existing till to
-     *                         a different location. Every other call site here
-     *                         is server-authored (BackOffice controllers, artisan
+     *                         of one) — see the 'tills' case, which only lets an
+     *                         untrusted payload move an existing till to a
+     *                         different location when $actingUser actually holds
+     *                         manage_tills; a bare or under-privileged push still
+     *                         gets refused. Every other call site here is
+     *                         server-authored (BackOffice controllers, artisan
      *                         commands), so the default is true.
      */
     public function process(string $table, string $uuid, string $operation, array $payload, bool $trusted = true, ?User $actingUser = null): void
@@ -295,6 +362,7 @@ class SyncProcessor
                 ->join('project_milestones', 'project_milestones.project_id', '=', 'projects.id')
                 ->where('project_milestones.id', $parentId)
                 ->value('projects.business_id'),
+            'journal_lines' => JournalHeader::where('id', $parentId)->value('business_id'),
             default => null,
         };
     }
@@ -321,6 +389,62 @@ class SyncProcessor
         $taxRateOwner = $taxRateId ? TaxRate::where('id', $taxRateId)->value('business_id') : null;
         if ($taxRateOwner === null || (string) $taxRateOwner !== (string) $businessId) {
             throw new \RuntimeException('product_tax_rates: referenced tax rate does not belong to this business.');
+        }
+    }
+
+    /**
+     * A journal_line's own tenant scoping (CHILD_SCOPED_MODELS, keyed via
+     * journal_header_id) only proves the HEADER belongs to the caller — it
+     * says nothing about the gl_account_id the line itself references. Without
+     * this, a compromised or buggy device could post a debit/credit against
+     * another business's GL account by id, corrupting that business's
+     * balance. Unlike the soft accounting-quality checks below, this is a
+     * tenant-isolation invariant a legitimate client can never violate, so
+     * it throws — matching assertOwnership()'s existing severity for the
+     * same kind of cross-tenant violation.
+     */
+    protected function assertAccountOwnedByJournalBusiness(?string $journalHeaderId, ?string $glAccountId, string $table): void
+    {
+        if (! $journalHeaderId || ! $glAccountId) {
+            return;
+        }
+
+        $headerBusinessId = JournalHeader::where('id', $journalHeaderId)->value('business_id');
+        $accountBusinessId = GlAccount::where('id', $glAccountId)->value('business_id');
+
+        if ($headerBusinessId !== null && $accountBusinessId !== null && (string) $headerBusinessId !== (string) $accountBusinessId) {
+            throw new \RuntimeException("{$table}: referenced gl_account does not belong to this business.");
+        }
+    }
+
+    /**
+     * Soft, log-only re-validation of a client-posted journal — balance and
+     * period-closed. Deliberately never throws: these are accounting-quality
+     * signals for manual follow-up, not tenant-isolation invariants, and a
+     * false positive (e.g. a decimal rounding edge case) must never turn a
+     * whole push group's worth of sibling records into a stuck, endlessly
+     * retried sync error (see SyncController::push()'s per-group rollback).
+     * Client-side JournalService is expected to already guarantee both of
+     * these before it ever writes 'posted' locally — this just catches drift
+     * or a client bug rather than trusting the payload blindly.
+     */
+    protected function checkClientJournalIntegrity(?JournalHeader $header): void
+    {
+        if (! $header) {
+            return;
+        }
+
+        try {
+            $totals = $header->lines()->selectRaw('COALESCE(SUM(debit), 0) as d, COALESCE(SUM(credit), 0) as c')->first();
+            if (abs((float) $totals->d - (float) $totals->c) >= 0.005) {
+                Log::warning("Accounting: client-posted journal {$header->id} ({$header->journal_number}) does not balance — debit {$totals->d} vs credit {$totals->c}. Needs manual review.");
+            }
+
+            if (AccountingPeriod::isClosedFor($header->business_id, $header->trans_date->toDateString())) {
+                Log::warning("Accounting: client-posted journal {$header->id} ({$header->journal_number}) is dated inside a closed accounting period ({$header->trans_date->toDateString()}). Needs manual review.");
+            }
+        } catch (\Throwable $e) {
+            Log::warning("Accounting: failed to re-validate client-posted journal {$header->id}: {$e->getMessage()}");
         }
     }
 
@@ -397,7 +521,8 @@ class SyncProcessor
                 break;
 
             case 'stock_transfers':
-                $currentTransferStatus = StockTransfer::where('id', $uuid)->value('status');
+                $existingTransfer = StockTransfer::find($uuid);
+                $currentTransferStatus = $existingTransfer?->status;
                 $incomingTransferStatus = $payload['status'] ?? 'pending';
 
                 if (! StockTransfer::isValidTransition($currentTransferStatus, $incomingTransferStatus)) {
@@ -406,10 +531,34 @@ class SyncProcessor
                     );
                 }
 
+                // A transfer leaving 'pending' into 'approved' was
+                // previously accepted from any device with zero
+                // authorization check: the transition-shape guard above only
+                // validates the shape, not who's allowed to make it. Same
+                // self-approval gap as the requisition/stocktake gates
+                // elsewhere in this method, closed the same way, behind the
+                // stock.transfer.approve permission that was already in the
+                // catalogue but never wired to an enforcement point. Deliberately
+                // does NOT gate 'pending' -> 'in_transit' — direct dispatch
+                // without a separate approval step is an existing, intended
+                // workflow (see SyncStockTransferTransitionTest's "dispatch is
+                // allowed directly from pending"); only an explicit 'approved'
+                // claim is gated.
+                if (! $trusted
+                    && $currentTransferStatus === 'pending'
+                    && $incomingTransferStatus === 'approved') {
+                    $transferBusinessId = $payload['business_id'] ?? $existingTransfer?->business_id;
+                    $actingRole = $actingUser?->getRoleNames()->first();
+
+                    if (! app(BackOfficeAuthorizer::class)->can($transferBusinessId, $actingRole, BackOfficePermission::STOCK_TRANSFER_APPROVE)) {
+                        throw new \RuntimeException('stock_transfers: approving a transfer requires the stock.transfer.approve permission.');
+                    }
+                }
+
                 StockTransfer::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'business_id' => $payload['business_id'] ?? null,
+                        'business_id' => $payload['business_id'] ?? $existingTransfer?->business_id,
                         'transfer_number' => $payload['transfer_number'] ?? '',
                         'from_location_id' => $payload['from_location_id'] ?? null,
                         'to_location_id' => $payload['to_location_id'] ?? null,
@@ -425,6 +574,46 @@ class SyncProcessor
                 break;
 
             case 'approval_requests':
+                $existingApprovalRequest = ApprovalRequest::find($uuid);
+                $currentApprovalStatus = $existingApprovalRequest?->status;
+                $incomingApprovalStatus = $payload['status'] ?? 'pending';
+
+                if (! ApprovalRequest::isValidTransition($currentApprovalStatus, $incomingApprovalStatus)) {
+                    throw new \RuntimeException(
+                        "Invalid approval request transition: '{$currentApprovalStatus}' -> '{$incomingApprovalStatus}'"
+                    );
+                }
+
+                // Same enforcement as ApprovalService::resolve() (separation
+                // of duties + rule-based required-role), applied here too —
+                // a device can resolve an approval_requests row through this
+                // generic sync-push path directly (the till's own PIN-
+                // approved/queued flows both write here), completely
+                // bypassing ApprovalService::resolve(), which only the
+                // BackOffice web controller ever calls. Without this, the
+                // guard added there closes the BackOffice route but leaves
+                // this one wide open — the same class of bypass every other
+                // escalation gate in this file exists to close. $actingUser
+                // (the device's own authenticated identity), never a
+                // payload-claimed approver_user_id, decides who's deciding.
+                if (! $trusted && $currentApprovalStatus === 'pending' && in_array($incomingApprovalStatus, ['approved', 'rejected'], true)) {
+                    $requiredRole = $existingApprovalRequest->rule_set_id
+                        ? app(ApprovalRuleEngine::class)->findApplicableRule(
+                            ApprovalRuleSet::find($existingApprovalRequest->rule_set_id),
+                            ['amount' => (float) ($existingApprovalRequest->estimated_value ?? 0)],
+                            $existingApprovalRequest->current_level ?? 1,
+                        )?->required_role
+                        : null;
+
+                    if (! $actingUser || ! app(ApprovalRuleEngine::class)->canApprove($existingApprovalRequest->business_id, $actingUser->id, $existingApprovalRequest, $requiredRole)) {
+                        throw new \RuntimeException(
+                            $requiredRole
+                                ? "approval_requests: deciding this request requires {$requiredRole} authority or higher."
+                                : 'approval_requests: you cannot approve or reject your own request.'
+                        );
+                    }
+                }
+
                 ApprovalRequest::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -433,7 +622,7 @@ class SyncProcessor
                         'subject_id' => $payload['subject_id'] ?? null,
                         'action' => $payload['action'] ?? '',
                         'requested_by_user_id' => $payload['requested_by_user_id'] ?? null,
-                        'status' => $payload['status'] ?? 'pending',
+                        'status' => $incomingApprovalStatus,
                         'approver_user_id' => $payload['approver_user_id'] ?? null,
                         'approved_at' => $payload['approved_at'] ?? null,
                         'reason' => $payload['reason'] ?? null,
@@ -444,6 +633,16 @@ class SyncProcessor
                         'payload_json' => is_string($payload['payload_json'] ?? null)
                             ? json_decode($payload['payload_json'], true)
                             : ($payload['payload_json'] ?? null),
+                        // ── Enterprise approval engine fields (schema v62) ─────
+                        'rule_set_id' => $payload['rule_set_id'] ?? null,
+                        'sla_due_at' => $payload['sla_due_at'] ?? null,
+                        'priority' => $payload['priority'] ?? 'normal',
+                        'current_level' => $payload['current_level'] ?? 1,
+                        'max_level' => $payload['max_level'] ?? 1,
+                        'estimated_value' => $payload['estimated_value'] ?? null,
+                        'branch_id' => $payload['branch_id'] ?? null,
+                        'is_delegated' => $payload['is_delegated'] ?? false,
+                        'delegated_from_user_id' => $payload['delegated_from_user_id'] ?? null,
                     ]
                 );
                 break;
@@ -460,11 +659,22 @@ class SyncProcessor
                         'qty_sent' => $payload['qty_sent'] ?? 0,
                         'qty_received' => $payload['qty_received'] ?? 0,
                         'notes' => $payload['notes'] ?? null,
+                        // GLS·03
+                        'sheet_lot_id' => $payload['sheet_lot_id'] ?? null,
                     ]
                 );
                 break;
 
             case 'requisitions':
+                $currentRequisitionStatus = Requisition::where('id', $uuid)->value('status');
+                $incomingRequisitionStatus = $payload['status'] ?? 'pending';
+
+                if (! Requisition::isValidTransition($currentRequisitionStatus, $incomingRequisitionStatus)) {
+                    throw new \RuntimeException(
+                        "Invalid requisition transition: '{$currentRequisitionStatus}' -> '{$incomingRequisitionStatus}'"
+                    );
+                }
+
                 Requisition::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -474,7 +684,7 @@ class SyncProcessor
                         'purpose' => $payload['purpose'] ?? 'general',
                         'project_id' => $payload['project_id'] ?? null,
                         'notes' => $payload['notes'] ?? null,
-                        'status' => $payload['status'] ?? 'pending',
+                        'status' => $incomingRequisitionStatus,
                         'requested_by_user_id' => $payload['requested_by_user_id'] ?? null,
                         'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
                         'approved_at' => $payload['approved_at'] ?? null,
@@ -563,6 +773,33 @@ class SyncProcessor
                         'area' => $payload['area'] ?? 0,
                         'status' => $payload['status'] ?? 'available',
                         'received_by_user_id' => $payload['received_by_user_id'] ?? null,
+                        // GLS·02
+                        'parent_lot_id' => $payload['parent_lot_id'] ?? null,
+                        'root_lot_id' => $payload['root_lot_id'] ?? null,
+                        'display_code' => $payload['display_code'] ?? null,
+                        'bin_location' => $payload['bin_location'] ?? null,
+                        'unit_cost' => $payload['unit_cost'] ?? null,
+                        'source_purchase_order_id' => $payload['source_purchase_order_id'] ?? null,
+                        'reserved_for_type' => $payload['reserved_for_type'] ?? null,
+                        'reserved_for_id' => $payload['reserved_for_id'] ?? null,
+                        'reserved_until' => $payload['reserved_until'] ?? null,
+                        'reserved_by_user_id' => $payload['reserved_by_user_id'] ?? null,
+                        // GLS·03
+                        'warehouse_bin_id' => $payload['warehouse_bin_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'warehouse_bins':
+                WarehouseBin::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'zone' => $payload['zone'] ?? null,
+                        'rack' => $payload['rack'] ?? null,
+                        'bay' => $payload['bay'] ?? null,
+                        'position' => $payload['position'] ?? null,
                     ]
                 );
                 break;
@@ -578,6 +815,34 @@ class SyncProcessor
                         'transaction_id' => $payload['transaction_id'] ?? null,
                         'user_id' => $payload['user_id'] ?? null,
                         'cut_at' => $payload['cut_at'] ?? now(),
+                        // GLS·02
+                        'result_kind' => $payload['result_kind'] ?? null,
+                        'child_lot_id' => $payload['child_lot_id'] ?? null,
+                        'reason' => $payload['reason'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'sheet_loss_records':
+                SheetLossRecord::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'sheet_lot_id' => $payload['sheet_lot_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'kind' => $payload['kind'] ?? 'cutting_waste',
+                        'reason' => $payload['reason'] ?? 'other',
+                        'width' => $payload['width'] ?? null,
+                        'height' => $payload['height'] ?? null,
+                        'area' => $payload['area'] ?? 0,
+                        'unit_cost' => $payload['unit_cost'] ?? null,
+                        'financial_impact' => $payload['financial_impact'] ?? 0,
+                        'notes' => $payload['notes'] ?? null,
+                        'photo_path' => $payload['photo_path'] ?? null,
+                        'approval_request_id' => $payload['approval_request_id'] ?? null,
+                        'reported_by_user_id' => $payload['reported_by_user_id'] ?? null,
+                        'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
+                        'created_at' => $payload['created_at'] ?? now(),
                     ]
                 );
                 break;
@@ -634,7 +899,14 @@ class SyncProcessor
                         // value on every write.
                         'bank_accounts_json' => $preserve('bank_accounts_json'),
                         'currency_code' => $payload['base_currency_code'] ?? $existingBusiness?->currency_code ?? 'USD',
-                        'logo_path' => $preserve('logo_path'),
+                        // logo_path/primary_color/letterhead_path/footer_path are
+                        // deliberately absent here: they're owned by the
+                        // 'business_branding' sync record and their own upload
+                        // endpoints, not this generic device push. Applying a
+                        // device's local path (an opaque on-device file path) here
+                        // would overwrite the server's real public URL on every sync.
+                        // footer_text is plain text, safe to preserve like any other field.
+                        'footer_text' => $preserve('footer_text'),
                         'metadata' => $preserve('metadata'),
                         'fiscalisation_enabled' => $preserve('fiscalisation_enabled', false),
                         'day_shift_start' => $preserve('day_shift_start'),
@@ -745,6 +1017,17 @@ class SyncProcessor
                         'unit' => $payload['unit'] ?? 'piece',
                         'sheet_width' => $payload['sheet_width'] ?? null,
                         'sheet_height' => $payload['sheet_height'] ?? null,
+                        // GLS·02 — every 'products' upsert is a full-row
+                        // replace (see this case's other `?? default`
+                        // fields), so a payload built before these columns
+                        // existed — or from a call site that forgot them —
+                        // would otherwise silently wipe a sheet product's
+                        // cutting rules on every unrelated receive/sale.
+                        'sheet_min_usable_width' => $payload['sheet_min_usable_width'] ?? null,
+                        'sheet_min_usable_height' => $payload['sheet_min_usable_height'] ?? null,
+                        'sheet_kerf_width' => $payload['sheet_kerf_width'] ?? null,
+                        'sheet_cutting_charge' => $payload['sheet_cutting_charge'] ?? null,
+                        'sheet_allow_rotate' => $payload['sheet_allow_rotate'] ?? true,
                         'track_stock' => $payload['track_stock'] ?? true,
                         // stock_quantity is accepted from payload for initial setup.
                         // It will be overridden below if movements exist (multi-device safe).
@@ -763,15 +1046,22 @@ class SyncProcessor
                 // BackOffice create form) attributes the opening quantity to that
                 // location too, instead of leaving it in the flat total only.
                 if (! $productExisted && $openingStock != 0) {
-                    StockMovement::create([
+                    $openingMovement = StockMovement::create([
                         'business_id' => $payload['business_id'] ?? null,
                         'location_id' => $payload['location_id'] ?? null,
                         'product_id' => $uuid,
                         'type' => 'opening_stock',
                         'quantity_change' => $openingStock,
+                        'unit_cost' => $payload['cost_price'] ?? 0,
                         'reason' => 'Opening stock (take-on)',
                         'user_id' => $payload['user_id'] ?? null,
                     ]);
+                    // Record the take-on value in the books too — see
+                    // ProductOpeningStockPostingService for why this ledger
+                    // entry alone previously left the balance sheet blind to
+                    // any stock a business took on when it started using the
+                    // system (e.g. via a sheet/CSV import).
+                    app(ProductOpeningStockPostingService::class)->recordTakeOn($openingMovement);
                 }
                 // If any movements exist for this product, recompute from the ledger
                 // so concurrent pushes from multiple devices converge correctly.
@@ -1054,6 +1344,7 @@ class SyncProcessor
                         'change_given' => $payload['change_given'] ?? 0,
                         'reference' => $payload['reference'] ?? null,
                         'rounding_adjustment' => $payload['rounding_adjustment'] ?? 0,
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
                     ]
                 );
 
@@ -1136,6 +1427,14 @@ class SyncProcessor
                 // approved stock take — post its GL effect the same
                 // tolerant-of-failure way as the GRV posting above.
                 app(StockTakePostingService::class)->recordVariance($movement);
+
+                // An 'opening_stock' movement here is a take-on figure set
+                // (or corrected) via ProductsController::applyLocationBalance()
+                // — the "Set Opening Balance" action and the CSV/sheet
+                // re-import's quantity reconciliation. The 'products' case
+                // above covers a brand-new product's own initial quantity;
+                // this covers every later adjustment to a take-on figure.
+                app(ProductOpeningStockPostingService::class)->recordTakeOn($movement);
                 break;
 
             case 'loyalty_transactions':
@@ -1156,7 +1455,7 @@ class SyncProcessor
                 break;
 
             case 'credit_transactions':
-                CreditTransaction::updateOrCreate(
+                $creditTransaction = CreditTransaction::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'customer_id' => $payload['customer_id'] ?? null,
@@ -1166,12 +1465,17 @@ class SyncProcessor
                         'method' => $payload['method'] ?? null,
                         'reference' => $payload['reference'] ?? null,
                         'receipt_number' => $payload['receipt_number'] ?? null,
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
                     ]
                 );
                 // Recompute customer credit_balance from the full ledger.
                 if (! empty($payload['customer_id'])) {
                     $this->recomputeCustomerBalances($payload['customer_id']);
                 }
+                // The missing half of credit-sale accounting — see
+                // CreditPaymentPostingService's doc comment. Only 'repayment'
+                // rows post anything; the service itself no-ops otherwise.
+                app(CreditPaymentPostingService::class)->postIfReady($creditTransaction);
                 // A one-time opening balance also needs to land in the
                 // formal books (if this business has any) — see
                 // OpeningBalanceService's doc comment. The till-side ledger
@@ -1350,21 +1654,65 @@ class SyncProcessor
 
             case 'tills':
                 $existingTill = Till::find($uuid);
-                $tillLocationId = $payload['location_id'] ?? null;
+                // A missing/omitted location_id must not be treated as "no
+                // change requested" (that would fall through the mismatch
+                // check below as a bare null) nor as "clear the location"
+                // (an untrusted push could then null out an existing till's
+                // location with zero authorization). Preserve the existing
+                // value unless the payload explicitly names the field.
+                $tillLocationId = array_key_exists('location_id', $payload)
+                    ? $payload['location_id']
+                    : $existingTill?->location_id;
 
-                // A till's location is deliberately moved only through the
-                // authorized BackOffice reassignment endpoint (which calls
-                // this method with $trusted: true) — never by a device simply
-                // pushing a different location_id for a till it already knows
-                // about. First-time creation from a device is unaffected.
+                // A till's location can't move just because a device pushed a
+                // different location_id — that would let any till silently
+                // relocate itself. But it also shouldn't be portal-only: a
+                // manager working the till app offline needs this to work like
+                // every other Flutter-first action (act locally, sync later),
+                // so an untrusted push is honored when the server's own copy
+                // of the acting user actually holds manage_tills — the same
+                // permission TillsController::reassignLocation requires — the
+                // till has no open shift (mirrors that controller's guard;
+                // moving a till mid-shift would orphan its cash reconciliation)
+                // — and the acting user's own location scope covers both the
+                // till's current and target location, the same restriction
+                // TillsController::reassignLocation enforces via
+                // currentLocationScope() for a branch-scoped manager.
+                // Bare device pushes with no such user (or a lower-privileged
+                // one) are still refused, same as before.
                 if (! $trusted && $existingTill && $existingTill->location_id !== null
                     && $tillLocationId !== $existingTill->location_id) {
-                    Log::warning('Ignored untrusted attempt to move a till to a different location via sync push', [
-                        'till_id' => $uuid,
-                        'current_location_id' => $existingTill->location_id,
-                        'attempted_location_id' => $tillLocationId,
-                    ]);
-                    $tillLocationId = $existingTill->location_id;
+                    $tillBusinessId = $payload['business_id'] ?? $existingTill->business_id;
+                    $actingRole = $actingUser?->getRoleNames()->first();
+                    $authorizer = app(BackOfficeAuthorizer::class);
+                    $actingScope = $actingUser !== null ? $authorizer->locationScope($actingUser) : null;
+
+                    $authorized = $actingUser !== null
+                        && $authorizer->can($tillBusinessId, $actingRole, BackOfficePermission::MANAGE_TILLS)
+                        && ! Shift::where('till_id', $uuid)->where('status', 'open')->exists()
+                        && ($actingScope === null || (
+                            in_array($existingTill->location_id, $actingScope, true)
+                            && in_array($tillLocationId, $actingScope, true)
+                        ));
+
+                    if (! $authorized) {
+                        Log::warning('Ignored unauthorized attempt to move a till to a different location via sync push', [
+                            'till_id' => $uuid,
+                            'current_location_id' => $existingTill->location_id,
+                            'attempted_location_id' => $tillLocationId,
+                            'acting_user_id' => $actingUser?->id,
+                        ]);
+                        $tillLocationId = $existingTill->location_id;
+                    } else {
+                        TillLocationAudit::create([
+                            'business_id' => $tillBusinessId,
+                            'till_id' => $uuid,
+                            'from_location_id' => $existingTill->location_id,
+                            'to_location_id' => $tillLocationId,
+                            'changed_by_user_id' => $actingUser->id,
+                            'changed_by_user_name' => $actingUser->name,
+                        ]);
+                    }
                 }
 
                 Till::updateOrCreate(
@@ -1398,33 +1746,44 @@ class SyncProcessor
                 break;
 
             case 'shifts':
+                // Same full-row-upsert footgun as 'businesses'/'invoices': a
+                // status-only close push must not null out opening_float or
+                // the identity fields of an already-open shift.
+                $existingShift = Shift::find($uuid);
+                $preserveShift = fn (string $key, $default = null) => array_key_exists($key, $payload)
+                    ? $payload[$key]
+                    : ($existingShift?->{$key} ?? $default);
+
                 Shift::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'business_id' => $payload['business_id'] ?? null,
-                        'location_id' => $payload['location_id'] ?? null,
-                        'till_id' => $payload['till_id'] ?? null,
-                        'cashier_id' => $payload['cashier_id'] ?? null,
-                        'opened_at' => $payload['opened_at'] ?? now(),
-                        'closed_at' => $payload['closed_at'] ?? null,
-                        'status' => $payload['status'] ?? 'open',
-                        'opening_float' => $payload['opening_float'] ?? 0,
-                        'expected_cash' => $payload['expected_cash'] ?? null,
-                        'counted_cash' => $payload['counted_cash'] ?? null,
-                        'variance' => $payload['variance'] ?? null,
-                        'total_sales' => $payload['total_sales'] ?? null,
-                        'cash_sales' => $payload['cash_sales'] ?? null,
-                        'card_sales' => $payload['card_sales'] ?? null,
-                        'mobile_money_sales' => $payload['mobile_money_sales'] ?? null,
-                        'credit_sales' => $payload['credit_sales'] ?? null,
-                        'total_refunds' => $payload['total_refunds'] ?? null,
-                        'total_discounts' => $payload['total_discounts'] ?? null,
-                        'transaction_count' => $payload['transaction_count'] ?? null,
-                        'opening_float_json' => $payload['opening_float_json'] ?? null,
-                        'counted_cash_json' => $payload['counted_cash_json'] ?? null,
-                        'notes' => $payload['notes'] ?? null,
+                        'business_id' => $preserveShift('business_id'),
+                        'location_id' => $preserveShift('location_id'),
+                        'till_id' => $preserveShift('till_id'),
+                        'cashier_id' => $preserveShift('cashier_id'),
+                        'opened_at' => $preserveShift('opened_at', now()),
+                        'closed_at' => $preserveShift('closed_at'),
+                        'status' => $preserveShift('status', 'open'),
+                        'opening_float' => $preserveShift('opening_float', 0),
+                        // counted_cash/counted_cash_json are a physical cash
+                        // count nobody else can verify — kept as reported.
+                        'counted_cash' => $preserveShift('counted_cash'),
+                        'counted_cash_json' => $preserveShift('counted_cash_json'),
+                        'opening_float_json' => $preserveShift('opening_float_json'),
+                        'notes' => $preserveShift('notes'),
+                        // expected_cash/variance/total_sales/cash_sales/
+                        // card_sales/mobile_money_sales/credit_sales/
+                        // total_refunds/total_discounts/transaction_count
+                        // are deliberately NOT written from the payload here
+                        // — see recomputeShiftFigures() below, called
+                        // unconditionally after every save. Till-skimming
+                        // fraud: a self-reported total_sales/expected_cash
+                        // with no independent derivation let a cashier
+                        // under-report takings with the shortfall never
+                        // showing as a variance.
                     ]
                 );
+                $this->recomputeShiftFigures($uuid);
                 break;
 
             case 'expenses':
@@ -1606,6 +1965,21 @@ class SyncProcessor
                 );
                 break;
 
+            case 'document_branding_settings':
+                DocumentBrandingSetting::updateOrCreate(
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'document_type' => $payload['document_type'] ?? '',
+                    ],
+                    [
+                        'use_letterhead' => $payload['use_letterhead'] ?? true,
+                        'use_footer' => $payload['use_footer'] ?? true,
+                        'show_logo' => $payload['show_logo'] ?? true,
+                        'paper_size' => $payload['paper_size'] ?? null,
+                    ]
+                );
+                break;
+
             case 'po_audit_logs':
                 // Append-only — skip if a record with this uuid as po_id+action already exists
                 PoAuditLog::firstOrCreate(
@@ -1678,6 +2052,7 @@ class SyncProcessor
                         'notes' => $payload['notes'] ?? null,
                         'paid_by_user_id' => $payload['paid_by_user_id'] ?? null,
                         'paid_at' => $payload['paid_at'] ?? now(),
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
                     ]
                 );
 
@@ -1704,6 +2079,8 @@ class SyncProcessor
                         'sent_at' => $payload['sent_at'] ?? null,
                         'accepted_at' => $payload['accepted_at'] ?? null,
                         'rejected_at' => $payload['rejected_at'] ?? null,
+                        'currency_code' => $payload['currency_code'] ?? null,
+                        'exchange_rate' => $payload['exchange_rate'] ?? 1,
                     ]
                 );
                 break;
@@ -1721,33 +2098,52 @@ class SyncProcessor
                         'tax_rate_id' => $payload['tax_rate_id'] ?? null,
                         'line_total' => $payload['line_total'] ?? 0,
                         'invoiced_quantity' => $payload['invoiced_quantity'] ?? 0,
+                        // GLS·03
+                        'sheet_lot_id' => $payload['sheet_lot_id'] ?? null,
+                        'sheet_cut_width' => $payload['sheet_cut_width'] ?? null,
+                        'sheet_cut_height' => $payload['sheet_cut_height'] ?? null,
                     ]
                 );
                 break;
 
             case 'invoices':
+                // Same full-row-upsert footgun as 'businesses' above: an
+                // incomplete payload (e.g. a status-only or notes-only
+                // resend) previously reset every omitted field back to its
+                // bare default, silently wiping subtotal/discount_total/
+                // tax_total/total on a genuine invoice. Preserve whatever
+                // the payload omits instead of defaulting it.
+                $existingInvoice = Invoice::find($uuid);
+                $preserveInvoice = fn (string $key, $default = null) => array_key_exists($key, $payload)
+                    ? $payload[$key]
+                    : ($existingInvoice?->{$key} ?? $default);
+
                 Invoice::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'business_id' => $payload['business_id'] ?? null,
-                        'location_id' => $payload['location_id'] ?? null,
-                        'customer_id' => $payload['customer_id'] ?? null,
-                        'quotation_id' => $payload['quotation_id'] ?? null,
-                        'invoice_number' => $payload['invoice_number'] ?? '',
-                        'type' => $payload['type'] ?? 'standard',
-                        'status' => $payload['status'] ?? 'draft',
-                        'issue_date' => $payload['issue_date'] ?? now(),
-                        'due_date' => $payload['due_date'] ?? null,
-                        'payment_terms_days' => $payload['payment_terms_days'] ?? 0,
-                        'subtotal' => $payload['subtotal'] ?? 0,
-                        'discount_total' => $payload['discount_total'] ?? 0,
-                        'tax_total' => $payload['tax_total'] ?? 0,
-                        'deposit_required' => $payload['deposit_required'] ?? 0,
-                        'total' => $payload['total'] ?? 0,
-                        'amount_paid' => $payload['amount_paid'] ?? 0,
-                        'recurring_schedule_id' => $payload['recurring_schedule_id'] ?? null,
-                        'notes' => $payload['notes'] ?? null,
-                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                        'business_id' => $preserveInvoice('business_id'),
+                        'location_id' => $preserveInvoice('location_id'),
+                        'customer_id' => $preserveInvoice('customer_id'),
+                        'quotation_id' => $preserveInvoice('quotation_id'),
+                        'invoice_number' => $preserveInvoice('invoice_number', ''),
+                        'type' => $preserveInvoice('type', 'standard'),
+                        'status' => $preserveInvoice('status', 'draft'),
+                        'issue_date' => $preserveInvoice('issue_date', now()),
+                        'due_date' => $preserveInvoice('due_date'),
+                        'payment_terms_days' => $preserveInvoice('payment_terms_days', 0),
+                        'subtotal' => $preserveInvoice('subtotal', 0),
+                        'discount_total' => $preserveInvoice('discount_total', 0),
+                        'tax_total' => $preserveInvoice('tax_total', 0),
+                        'deposit_required' => $preserveInvoice('deposit_required', 0),
+                        'total' => $preserveInvoice('total', 0),
+                        // amount_paid is intentionally NOT preserved from the
+                        // payload — it's re-derived below from the real
+                        // invoice_payments ledger regardless of what any
+                        // client claims (the AR-fraud fix).
+                        'amount_paid' => $existingInvoice?->amount_paid ?? 0,
+                        'recurring_schedule_id' => $preserveInvoice('recurring_schedule_id'),
+                        'notes' => $preserveInvoice('notes'),
+                        'created_by_user_id' => $preserveInvoice('created_by_user_id'),
                     ]
                 );
                 $this->recomputeInvoiceAmountPaid($uuid);
@@ -1772,24 +2168,48 @@ class SyncProcessor
 
             case 'invoice_payments':
                 // Append-only ledger — see IMMUTABLE (delete is ignored).
-                InvoicePayment::updateOrCreate(
+                $invoicePayment = InvoicePayment::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'invoice_id' => $payload['invoice_id'] ?? null,
                         'method' => $payload['method'] ?? 'cash',
                         'amount' => $payload['amount'] ?? 0,
                         'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'exchange_rate_used' => $payload['exchange_rate_used'] ?? 1,
                         'base_equivalent' => $payload['base_equivalent'] ?? 0,
                         'recorded_by_user_id' => $payload['recorded_by_user_id'] ?? null,
                         'paid_at' => $payload['paid_at'] ?? now(),
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
                     ]
                 );
                 if (! empty($payload['invoice_id'])) {
                     $this->recomputeInvoiceAmountPaid($payload['invoice_id']);
                 }
+                // The missing half of invoice accounting — see
+                // InvoicePaymentPostingService's doc comment.
+                app(InvoicePaymentPostingService::class)->postIfReady($invoicePayment);
                 break;
 
             case 'credit_notes':
+                // Unlike a POS refund (approval_requests-gated) or an
+                // invoice payment write-off, a credit note had zero
+                // authorization check of any kind — any device could credit
+                // money back against a customer's balance. Gated behind
+                // finance.credit_note.create, the permission already in the
+                // catalogue (granted to accountant/finance_manager by
+                // default) but never wired to an enforcement point. Only
+                // gates the initial creation — a later resend of the same
+                // uuid (e.g. re-syncing after a connectivity drop) is not
+                // re-litigated.
+                if (! $trusted && CreditNote::find($uuid) === null) {
+                    $creditNoteBusinessId = $payload['business_id'] ?? null;
+                    $actingRole = $actingUser?->getRoleNames()->first();
+
+                    if (! app(BackOfficeAuthorizer::class)->can($creditNoteBusinessId, $actingRole, BackOfficePermission::FINANCE_CREDIT_NOTE_CREATE)) {
+                        throw new \RuntimeException('credit_notes: creating a credit note requires the finance.credit_note.create permission.');
+                    }
+                }
+
                 CreditNote::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -1834,6 +2254,467 @@ class SyncProcessor
                         'is_active' => $payload['is_active'] ?? true,
                         'last_generated_invoice_id' => $payload['last_generated_invoice_id'] ?? null,
                         'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
+                // Client-posted journals — a plain mirror. The client (Flutter,
+                // once cut over via client_gl_posting_enabled_at) has already
+                // computed and "posted" this journal locally; Laravel never
+                // recomputes or re-validates it here, only stores what arrives.
+                // See JournalService/SalePostingService for the server-side
+                // equivalent used before a business is cut over.
+            case 'journal_headers':
+                $businessId = $payload['business_id'] ?? null;
+                $sourceType = $payload['source_type'] ?? null;
+                $sourceId = $payload['source_id'] ?? null;
+
+                // Defense-in-depth against exactly the class of bypass the
+                // salary_payments/supplier_payments/assets escalation guards
+                // above were fixed for: those gate the higher-level table
+                // (salary_payments, etc.), but a modified client could skip
+                // straight to journal_headers/journal_lines/general_ledger
+                // instead and post the same fraudulent entry directly,
+                // sidestepping every one of those guards. Deliberately an
+                // allowlist of the *known*-sensitive source types those
+                // fixes already cover, not a blanket permission check on
+                // this table — journal_headers is the shared plumbing every
+                // legitimate posting flows through, including a plain
+                // cashier's own sale (SalePostingService), so restricting it
+                // broadly would break that core, high-frequency path.
+                // 'depreciation' is deliberately excluded: it's a system
+                // sweep tied to no particular user's action (see
+                // DepreciationPostingService), not a role-gated one.
+                $ownerOrManagerJournalSources = ['salary_payment', 'supplier_payment', 'cash_vault_drop', 'cash_vault_deposit', 'cash_vault_count'];
+                $ownerOnlyJournalSources = ['asset_acquisition', 'asset_disposal'];
+
+                if (! $trusted && in_array($sourceType, $ownerOrManagerJournalSources, true)
+                    && ! ($actingUser?->hasRole(['business_owner', 'manager']) ?? false)) {
+                    throw new \RuntimeException("journal_headers: posting a {$sourceType} journal requires owner or manager access.");
+                }
+
+                if (! $trusted && in_array($sourceType, $ownerOnlyJournalSources, true)
+                    && ! ($actingUser?->hasRole('business_owner') ?? false)) {
+                    throw new \RuntimeException("journal_headers: posting a {$sourceType} journal requires the business owner role.");
+                }
+
+                // Soft guard against the exact double-post this feature's
+                // cutover flag is designed to prevent — a second header for
+                // a source that already has one is almost certainly a race
+                // or a bug, not a legitimate second journal. Logged, not
+                // rejected: a false positive here must never turn into a
+                // permanently stuck sync record for a device.
+                if ($businessId && $sourceType && $sourceId) {
+                    $duplicate = JournalHeader::where('business_id', $businessId)
+                        ->where('source_type', $sourceType)
+                        ->where('source_id', $sourceId)
+                        ->where('id', '!=', $uuid)
+                        ->exists();
+
+                    if ($duplicate) {
+                        Log::warning("Accounting: client pushed journal_header {$uuid} for {$sourceType}:{$sourceId}, but another journal already exists for that source — possible double-post, needs manual review.");
+                    }
+                }
+
+                JournalHeader::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $businessId,
+                        'journal_number' => $payload['journal_number'] ?? null,
+                        'trans_date' => $payload['trans_date'] ?? now()->toDateString(),
+                        'description' => $payload['description'] ?? null,
+                        'source_type' => $sourceType,
+                        'source_id' => $sourceId,
+                        'status' => $payload['status'] ?? 'posted',
+                        'posted_at' => $payload['posted_at'] ?? null,
+                        'posted_by_user_id' => $payload['posted_by_user_id'] ?? null,
+                        'reversed_by_journal_id' => $payload['reversed_by_journal_id'] ?? null,
+                        'reversed_at' => $payload['reversed_at'] ?? null,
+                        'reversed_by_user_id' => $payload['reversed_by_user_id'] ?? null,
+                        'reversal_of_journal_id' => $payload['reversal_of_journal_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'journal_lines':
+                $this->assertAccountOwnedByJournalBusiness($payload['journal_header_id'] ?? null, $payload['gl_account_id'] ?? null, 'journal_lines');
+
+                JournalLine::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'journal_header_id' => $payload['journal_header_id'] ?? null,
+                        'gl_account_id' => $payload['gl_account_id'] ?? null,
+                        'debit' => $payload['debit'] ?? 0,
+                        'credit' => $payload['credit'] ?? 0,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'exchange_rate' => $payload['exchange_rate'] ?? 1,
+                        'foreign_debit' => $payload['foreign_debit'] ?? 0,
+                        'foreign_credit' => $payload['foreign_credit'] ?? 0,
+                        'party_type' => $payload['party_type'] ?? null,
+                        'party_id' => $payload['party_id'] ?? null,
+                        'description' => $payload['description'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'general_ledger':
+                $glBusinessId = $payload['business_id'] ?? null;
+                $glAccountId = $payload['gl_account_id'] ?? null;
+
+                if ($glBusinessId && $glAccountId) {
+                    $accountOwner = GlAccount::where('id', $glAccountId)->value('business_id');
+                    if ($accountOwner !== null && (string) $accountOwner !== (string) $glBusinessId) {
+                        throw new \RuntimeException('general_ledger: referenced gl_account does not belong to this business.');
+                    }
+                }
+
+                GeneralLedgerEntry::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $glBusinessId,
+                        'trans_date' => $payload['trans_date'] ?? now()->toDateString(),
+                        'journal_header_id' => $payload['journal_header_id'] ?? null,
+                        'gl_account_id' => $glAccountId,
+                        'debit' => $payload['debit'] ?? 0,
+                        'credit' => $payload['credit'] ?? 0,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'exchange_rate' => $payload['exchange_rate'] ?? 1,
+                        'foreign_debit' => $payload['foreign_debit'] ?? 0,
+                        'foreign_credit' => $payload['foreign_credit'] ?? 0,
+                        'party_type' => $payload['party_type'] ?? null,
+                        'party_id' => $payload['party_id'] ?? null,
+                        'description' => $payload['description'] ?? null,
+                        'status' => $payload['status'] ?? 'active',
+                        'reconciled_at' => $payload['reconciled_at'] ?? null,
+                        'bank_reconciliation_id' => $payload['bank_reconciliation_id'] ?? null,
+                    ]
+                );
+
+                // general_ledger rows are the last thing the client writes
+                // when posting a journal, so by the time one arrives the
+                // header and all of its lines should already exist —
+                // the natural point to re-check integrity.
+                if ($payload['journal_header_id'] ?? null) {
+                    $this->checkClientJournalIntegrity(JournalHeader::find($payload['journal_header_id']));
+                }
+                break;
+
+            case 'account_sub_categories':
+                // Idempotent by id — a client only ever pushes one of these
+                // to bootstrap its own "Bank Accounts" subcategory the first
+                // time a bank account is created on that device; matches
+                // ChartOfAccountsSeeder::ensureSubCategory()'s own shape.
+                AccountSubCategory::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'account_category_id' => $payload['account_category_id'] ?? null,
+                        'name' => $payload['name'] ?? '',
+                        'reporting_order' => $payload['reporting_order'] ?? 99,
+                    ]
+                );
+                break;
+
+            case 'gl_accounts':
+                // Idempotent by id — see the 'account_sub_categories' case
+                // just above for why this ordinarily server-only table
+                // accepts a client push at all.
+                GlAccount::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'code' => $payload['code'] ?? '',
+                        'name' => $payload['name'] ?? '',
+                        'account_category_id' => $payload['account_category_id'] ?? null,
+                        'account_sub_category_id' => $payload['account_sub_category_id'] ?? null,
+                        'allow_direct_posting' => $payload['allow_direct_posting'] ?? true,
+                        'control_type' => $payload['control_type'] ?? null,
+                        'must_be_positive' => $payload['must_be_positive'] ?? false,
+                        'status' => $payload['status'] ?? 'active',
+                    ]
+                );
+                break;
+
+            case 'bank_accounts':
+                // Same fraud-guard shape as account_role_mappings just below
+                // (and gated on the same field for the same reason: this is
+                // the lever that decides which real GL account a bank
+                // account's activity posts to). The till only shows the
+                // bank accounts screen to Permission.manageCashVault
+                // (owner/manager by default) — a client-side gate a raw API
+                // call bypasses entirely. Scoped to gl_account_id changes on
+                // an *existing* account, mirroring account_role_mappings —
+                // creating a brand-new account or editing its name/branch/
+                // currency isn't itself a money-redirect vector.
+                $existingBankAccountGlId = BankAccount::where('id', $uuid)->value('gl_account_id');
+                $incomingBankAccountGlId = $payload['gl_account_id'] ?? null;
+
+                if (! $trusted && $existingBankAccountGlId !== null && $incomingBankAccountGlId !== $existingBankAccountGlId) {
+                    $actingRole = $actingUser?->getRoleNames()->first();
+
+                    if (! in_array($actingRole, ['business_owner', 'manager'], true)) {
+                        throw new \RuntimeException('bank_accounts: changing which GL account a bank account posts to requires the owner or manager role.');
+                    }
+                }
+
+                BankAccount::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'name' => $payload['name'] ?? '',
+                        'account_number' => $payload['account_number'] ?? null,
+                        'branch' => $payload['branch'] ?? null,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'gl_account_id' => $incomingBankAccountGlId,
+                        'is_active' => $payload['is_active'] ?? true,
+                    ]
+                );
+                break;
+
+            case 'bank_reconciliations':
+                $currentReconciliationStatus = BankReconciliation::where('id', $uuid)->value('status');
+                $incomingReconciliationStatus = $payload['status'] ?? 'in_progress';
+
+                if (! BankReconciliation::isValidTransition($currentReconciliationStatus, $incomingReconciliationStatus)) {
+                    throw new \RuntimeException(
+                        "Invalid bank reconciliation transition: '{$currentReconciliationStatus}' -> '{$incomingReconciliationStatus}'"
+                    );
+                }
+
+                BankReconciliation::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
+                        'statement_date' => $payload['statement_date'] ?? now()->toDateString(),
+                        'statement_balance' => $payload['statement_balance'] ?? 0,
+                        'status' => $incomingReconciliationStatus,
+                        'started_by_user_id' => $payload['started_by_user_id'] ?? null,
+                        'started_at' => $payload['started_at'] ?? now(),
+                        'completed_by_user_id' => $payload['completed_by_user_id'] ?? null,
+                        'completed_at' => $payload['completed_at'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'account_role_mappings':
+                // Critical fraud guard, same shape as the 'users' role-
+                // escalation fix above: this row decides which real GL
+                // account every future sale/payment/posting for an entire
+                // category lands in (see AccountRoleMappingService's doc
+                // comment). The till only ever shows its edit screen to
+                // UserRole.owner (settings_screen.dart) — but that's a
+                // client-side gate a modified app or a raw API call bypasses
+                // entirely, and this generic device sync path had no
+                // server-side check at all. Without this, any authenticated
+                // device could silently redirect where a whole revenue/
+                // expense category posts — a live internal-fraud vector, not
+                // just a cosmetic bug. A device resending its own already-
+                // current mapping unchanged is still let through so routine
+                // syncs never spuriously fail.
+                $mappingBusinessId = $payload['business_id'] ?? null;
+                $mappingRole = $payload['role'] ?? null;
+                $currentMappingGlAccountId = AccountRoleMapping::where('business_id', $mappingBusinessId)
+                    ->where('role', $mappingRole)
+                    ->value('gl_account_id');
+                $incomingMappingGlAccountId = $payload['gl_account_id'] ?? null;
+
+                if (! $trusted && $incomingMappingGlAccountId !== $currentMappingGlAccountId) {
+                    $actingRole = $actingUser?->getRoleNames()->first();
+
+                    if ($actingRole !== 'business_owner') {
+                        throw new \RuntimeException('account_role_mappings: changing GL account routing requires the business owner role.');
+                    }
+                }
+
+                AccountRoleMapping::updateOrCreate(
+                    [
+                        'business_id' => $mappingBusinessId,
+                        'role' => $mappingRole,
+                    ],
+                    [
+                        'id' => $uuid,
+                        'gl_account_id' => $incomingMappingGlAccountId,
+                    ]
+                );
+                break;
+
+            case 'supplier_payments':
+                // Append-only ledger — see IMMUTABLE (delete is ignored).
+                // The Flutter-first counterpart of 'invoice_payments' above:
+                // the device already posted its own GL journal locally (or
+                // will once cut over), this just mirrors the row and lets
+                // the server catch it if the client hasn't posted yet.
+                //
+                // Same class of gap 'salary_payments' above was already
+                // fixed for (reproduced live there as a fabricated $50,000
+                // payroll payment from a plain cashier device) — this
+                // sibling table had no equivalent guard. A fabricated
+                // supplier_payments row is the accounts-payable version of
+                // the same fraud: it reduces what the business shows as
+                // owing to a real supplier, with a real Dr Accounts Payable
+                // / Cr Cash-or-Bank journal one push away from posting.
+                if (! $trusted && ! ($actingUser?->hasRole(['business_owner', 'manager']) ?? false)) {
+                    throw new \RuntimeException('supplier_payments: recording a payment requires owner or manager access.');
+                }
+
+                $supplierPayment = SupplierPayment::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'supplier_id' => $payload['supplier_id'] ?? null,
+                        'amount' => $payload['amount'] ?? 0,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'payment_date' => $payload['payment_date'] ?? now()->toDateString(),
+                        'method' => $payload['method'] ?? 'cash',
+                        'reference' => $payload['reference'] ?? null,
+                        'recorded_by_user_id' => $payload['recorded_by_user_id'] ?? null,
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
+                    ]
+                );
+                app(SupplierPaymentService::class)->postIfReady($supplierPayment);
+                break;
+
+            case 'assets':
+                // Append-only-ish — see IMMUTABLE; disposal flips `status`
+                // via the same full-row upsert, never a delete — guarded by
+                // Asset::isValidTransition() below so a device replaying its
+                // own stale 'active' snapshot can't resurrect a disposed
+                // asset (see that method's doc comment).
+                //
+                // Same fraud class as 'salary_payments'/'supplier_payments'
+                // above, but the dangerous action here is *creation* as much
+                // as disposal: a fabricated acquisition posts a real Dr
+                // Fixed Assets / Cr Cash-or-Bank entry for an item that was
+                // never actually bought, and a fabricated disposal does the
+                // same for proceeds that were never actually received. The
+                // till only shows the Assets screen at all to UserRole.owner
+                // (more_screen.dart) — mirrored here for every untrusted
+                // write to this table, not just the status field, since
+                // acquisition_cost/disposal_proceeds are exactly as
+                // dangerous as status itself.
+                if (! $trusted && ! ($actingUser?->hasRole('business_owner') ?? false)) {
+                    throw new \RuntimeException('assets: creating or editing an asset requires the business owner role.');
+                }
+
+                $currentAssetStatus = Asset::where('id', $uuid)->value('status');
+                $incomingAssetStatus = $payload['status'] ?? 'active';
+
+                if (! Asset::isValidTransition($currentAssetStatus, $incomingAssetStatus)) {
+                    throw new \RuntimeException(
+                        "Invalid asset status transition: '{$currentAssetStatus}' -> '{$incomingAssetStatus}'"
+                    );
+                }
+
+                $asset = Asset::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'asset_number' => $payload['asset_number'] ?? null,
+                        'name' => $payload['name'] ?? '',
+                        'category' => $payload['category'] ?? null,
+                        'notes' => $payload['notes'] ?? null,
+                        'acquisition_date' => $payload['acquisition_date'] ?? now()->toDateString(),
+                        'acquisition_cost' => $payload['acquisition_cost'] ?? 0,
+                        'salvage_value' => $payload['salvage_value'] ?? 0,
+                        'useful_life_months' => $payload['useful_life_months'] ?? 0,
+                        'funding_method' => $payload['funding_method'] ?? 'cash',
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
+                        'disposal_bank_account_id' => $payload['disposal_bank_account_id'] ?? null,
+                        'status' => $incomingAssetStatus,
+                        'disposed_at' => $payload['disposed_at'] ?? null,
+                        'disposal_proceeds' => $payload['disposal_proceeds'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    ]
+                );
+                app(AssetPostingService::class)->postIfReady($asset);
+                break;
+
+            case 'approval_rule_sets':
+                // Same fraud class as 'role_permissions'/'account_role_mappings'
+                // above: a rule set's `is_enabled` flag and (via its rules)
+                // required_role/min_approvers/condition thresholds ARE the
+                // approval control for an entire process (e.g. every PO over
+                // some amount) — loosening them from an untrusted device is
+                // equivalent to forging server-side sign-off. The till only
+                // shows rule-set configuration to UserRole.owner, mirrored here.
+                if (! $trusted && ! ($actingUser?->hasRole('business_owner') ?? false)) {
+                    throw new \RuntimeException('approval_rule_sets: only the business owner can manage approval rule sets.');
+                }
+
+                ApprovalRuleSet::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'process' => $payload['process'] ?? '',
+                        'name' => $payload['name'] ?? '',
+                        'description' => $payload['description'] ?? null,
+                        'is_enabled' => $payload['is_enabled'] ?? true,
+                    ]
+                );
+                break;
+
+            case 'approval_rules':
+                // Same guard as 'approval_rule_sets' just above — this is the
+                // row that actually carries required_role/min_approvers/
+                // escalate_to_role for one level of a rule set.
+                if (! $trusted && ! ($actingUser?->hasRole('business_owner') ?? false)) {
+                    throw new \RuntimeException('approval_rules: only the business owner can manage approval rules.');
+                }
+
+                ApprovalRule::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'rule_set_id' => $payload['rule_set_id'] ?? null,
+                        'level' => $payload['level'] ?? 1,
+                        'condition_type' => $payload['condition_type'] ?? null,
+                        'condition_value' => $payload['condition_value'] ?? null,
+                        'condition_value_max' => $payload['condition_value_max'] ?? null,
+                        'required_role' => $payload['required_role'] ?? null,
+                        'approval_group_id' => $payload['approval_group_id'] ?? null,
+                        'min_approvers' => $payload['min_approvers'] ?? 1,
+                        'is_sequential' => $payload['is_sequential'] ?? true,
+                        'sla_hours' => $payload['sla_hours'] ?? 24,
+                        'escalate_to_role' => $payload['escalate_to_role'] ?? null,
+                        'escalate_after_hours' => $payload['escalate_after_hours'] ?? null,
+                        'require_different_user' => $payload['require_different_user'] ?? true,
+                    ]
+                );
+                break;
+
+            case 'approval_delegations':
+                // Different fraud shape from the two cases above: this row
+                // doesn't change what a rule requires, it hands the
+                // delegate_user_id the delegator's approval authority
+                // outright (see ApprovalRuleEngine::canApprove()'s
+                // delegatorRoles fallback, both sides). An untrusted device
+                // naming ANY delegator_user_id (e.g. the owner) and itself
+                // as delegate would self-grant that authority — worse than
+                // the rule-set gate above since it bypasses required_role
+                // checks entirely rather than just weakening them. Allow it
+                // only when the acting user IS the named delegator (genuine
+                // self-service delegation, e.g. "I'm on leave") or is the
+                // business owner (emergency override on someone else's
+                // behalf) — mirrors no existing till screen yet (delegation
+                // UI is still pending), so this is deliberately conservative.
+                $delegatorUserId = $payload['delegator_user_id'] ?? null;
+                if (! $trusted
+                    && $actingUser?->id !== $delegatorUserId
+                    && ! ($actingUser?->hasRole('business_owner') ?? false)) {
+                    throw new \RuntimeException('approval_delegations: you may only create a delegation from your own account, or as the business owner.');
+                }
+
+                ApprovalDelegation::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'delegator_user_id' => $delegatorUserId,
+                        'delegate_user_id' => $payload['delegate_user_id'] ?? null,
+                        'reason' => $payload['reason'] ?? null,
+                        'starts_at' => $payload['starts_at'] ?? null,
+                        'ends_at' => $payload['ends_at'] ?? null,
+                        'is_active' => $payload['is_active'] ?? true,
                     ]
                 );
                 break;
@@ -1888,7 +2769,13 @@ class SyncProcessor
         $user = User::updateOrCreate(['id' => $uuid], $userData);
 
         if (method_exists($user, 'syncRoles') && isset($payload['role'])) {
-            $incomingRole = $payload['role'];
+            // Devices speak the short 'owner' role name (see
+            // user_management_screen.dart's SegmentedButton); Spatie's
+            // actual role record is 'business_owner', same as every other
+            // inbound/outbound boundary in this app already translates
+            // (UserController, BackOffice\UsersController). Without this,
+            // syncRoles(['owner']) throws RoleDoesNotExist for guard 'web'.
+            $incomingRole = $payload['role'] === 'owner' ? 'business_owner' : $payload['role'];
 
             // Critical privilege-escalation guard: BackOfficeController's
             // UsersController already gates every role assignment behind
@@ -2174,6 +3061,12 @@ class SyncProcessor
             return ['pending_approval', false, null];
         }
 
+        if (! PurchaseOrder::isValidTransition($existing?->status, $incomingStatus)) {
+            throw new \RuntimeException(
+                "Invalid purchase order transition: '{$existing?->status}' -> '{$incomingStatus}'"
+            );
+        }
+
         $isFirstSubmission = $incomingStatus === 'sent' && ($existing === null || $existing->status === 'draft');
         if (! $isFirstSubmission) {
             return [$incomingStatus, false, null];
@@ -2257,6 +3150,114 @@ class SyncProcessor
         }
 
         $invoice->update($update);
+    }
+
+    /**
+     * Live-verification finding: expected_cash/counted_cash/variance/
+     * total_sales/cash_sales/card_sales/mobile_money_sales/credit_sales/
+     * total_refunds/total_discounts/transaction_count were all accepted
+     * straight from a device's own shift-close payload with no independent
+     * server-side derivation — the same "self-reported financial figure, no
+     * ledger check" shape as the invoices.amount_paid fraud fixed in
+     * recomputeInvoiceAmountPaid() above. Enables classic till-skimming:
+     * report a lower total_sales/expected_cash than the shift's real
+     * transactions add up to, so pocketing the difference never shows as a
+     * variance. counted_cash itself (a physical cash count nobody else can
+     * verify) is left as reported; every other figure is derived here from
+     * the real Transaction/Payment/ContainerDepositLedger/ChangeOwedLedger
+     * rows, mirroring shift_close_provider.dart's shiftSummaryProvider /
+     * confirmAndCloseShift() exactly (same statuses, same cash-out
+     * subtractions) so the two never drift apart. Scoped by cashier + time
+     * window + location, not a shift_id column — transactions have no such
+     * column, and the Flutter client itself doesn't scope by one either.
+     */
+    protected function recomputeShiftFigures(string $shiftId): void
+    {
+        $shift = Shift::find($shiftId);
+        if ($shift === null || $shift->cashier_id === null || $shift->opened_at === null) {
+            return;
+        }
+
+        $windowEnd = $shift->closed_at ?? now();
+
+        $transactions = Transaction::where('business_id', $shift->business_id)
+            ->where('user_id', $shift->cashier_id)
+            ->where('created_at', '>=', $shift->opened_at)
+            ->where('created_at', '<=', $windowEnd)
+            ->when($shift->location_id, fn ($q) => $q->where('location_id', $shift->location_id))
+            ->get();
+
+        // Same classification as shiftSummaryProvider: a refund is a
+        // separate negative-total reversal transaction, not an edit of the
+        // original — the original (status flipped to refunded/
+        // partial_refund) still belongs in gross; only a negative-total row
+        // is a reversal.
+        $originalSaleStatuses = ['completed', 'refunded', 'partial_refund'];
+        $originalSales = $transactions->filter(
+            fn (Transaction $t) => (float) $t->total >= 0 && in_array($t->status, $originalSaleStatuses, true)
+        );
+        $reversals = $transactions->filter(fn (Transaction $t) => (float) $t->total < 0);
+        $completed = $transactions->filter(fn (Transaction $t) => $t->status === 'completed');
+
+        $grossSales = $originalSales->sum(fn (Transaction $t) => (float) $t->total);
+        $refundTotal = $reversals->sum(fn (Transaction $t) => abs((float) $t->total));
+        $discountTotal = $originalSales->sum(fn (Transaction $t) => (float) $t->discount_total);
+
+        $cashSales = 0.0;
+        $cardSales = 0.0;
+        $mobileSales = 0.0;
+        $creditSales = 0.0;
+        // Payment-method breakdown deliberately scoped to `completed` only,
+        // same as the client — a refund's cash/card payout has no Payments
+        // row of its own, so widening this to refunded/partial_refund
+        // originals would count cash that's since left the till.
+        $payments = Payment::whereIn('transaction_id', $completed->pluck('id'))->get();
+        foreach ($payments as $payment) {
+            $method = strtolower($payment->method);
+            $amount = (float) $payment->base_equivalent;
+            if (str_contains($method, 'cash')) {
+                $cashSales += $amount;
+            } elseif (str_contains($method, 'card')) {
+                $cardSales += $amount;
+            } elseif (str_contains($method, 'mobile') || str_contains($method, 'ecocash')
+                || str_contains($method, 'm-pesa') || str_contains($method, 'mpesa')) {
+                $mobileSales += $amount;
+            } elseif (str_contains($method, 'credit')) {
+                $creditSales += $amount;
+            }
+        }
+
+        $depositRefundsCash = (float) ContainerDepositLedger::where('business_id', $shift->business_id)
+            ->where('user_id', $shift->cashier_id)
+            ->where('type', 'return')
+            ->where('refund_method', 'cash')
+            ->where('created_at', '>=', $shift->opened_at)
+            ->where('created_at', '<=', $windowEnd)
+            ->get()
+            ->sum(fn (ContainerDepositLedger $l) => abs((float) $l->quantity) * (float) $l->deposit_amount_per_unit);
+
+        $changeClaimsCash = (float) ChangeOwedLedger::where('business_id', $shift->business_id)
+            ->where('user_id', $shift->cashier_id)
+            ->where('type', 'claim')
+            ->where('created_at', '>=', $shift->opened_at)
+            ->where('created_at', '<=', $windowEnd)
+            ->get()
+            ->sum(fn (ChangeOwedLedger $l) => abs((float) $l->amount));
+
+        $expectedCash = (float) $shift->opening_float + $cashSales - $depositRefundsCash - $changeClaimsCash;
+
+        $shift->forceFill([
+            'total_sales' => $grossSales,
+            'cash_sales' => $cashSales,
+            'card_sales' => $cardSales,
+            'mobile_money_sales' => $mobileSales,
+            'credit_sales' => $creditSales,
+            'total_refunds' => $refundTotal,
+            'total_discounts' => $discountTotal,
+            'transaction_count' => $completed->count(),
+            'expected_cash' => $expectedCash,
+            'variance' => $shift->counted_cash !== null ? ((float) $shift->counted_cash - $expectedCash) : null,
+        ])->save();
     }
 
     protected function handleDelete(string $table, string $uuid): void

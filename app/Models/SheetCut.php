@@ -15,6 +15,8 @@ class SheetCut extends Model
     protected $fillable = [
         'id', 'sheet_lot_id', 'width', 'height', 'area',
         'transaction_id', 'user_id', 'cut_at',
+        // GLS·02
+        'result_kind', 'child_lot_id', 'reason',
     ];
 
     protected function casts(): array

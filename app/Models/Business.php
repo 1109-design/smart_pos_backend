@@ -2,8 +2,10 @@
 
 namespace App\Models;
 
+use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Storage;
 
 class Business extends Model
 {
@@ -20,6 +22,10 @@ class Business extends Model
         'bank_accounts_json',
         'currency_code',
         'logo_path',
+        'primary_color',
+        'letterhead_path',
+        'footer_path',
+        'footer_text',
         'metadata',
         'fiscalisation_enabled',
         'day_shift_start',
@@ -30,6 +36,7 @@ class Business extends Model
         'catalogue_reset_by_user_id',
         'workflow_settings',
         'accounting_go_live_date',
+        'client_gl_posting_enabled_at',
     ];
 
     protected function casts(): array
@@ -41,6 +48,7 @@ class Business extends Model
             'catalogue_reset_at' => 'datetime',
             'workflow_settings' => 'array',
             'accounting_go_live_date' => 'date',
+            'client_gl_posting_enabled_at' => 'datetime',
         ];
     }
 
@@ -51,6 +59,96 @@ class Business extends Model
     public function accountingIsLive(): bool
     {
         return $this->accounting_go_live_date !== null;
+    }
+
+    /**
+     * True once this business has been cut over to Flutter posting its own
+     * journals locally for the given transaction/receipt date — at which
+     * point SalePostingService/GrvPostingService stand down for anything
+     * on or after that date, deferring to whatever journal the client
+     * pushes up. See the client_gl_posting_enabled_at migration.
+     */
+    public function postsFromClientFor(string $transDate): bool
+    {
+        if ($this->client_gl_posting_enabled_at === null) {
+            return false;
+        }
+
+        return Carbon::parse($transDate)->greaterThanOrEqualTo($this->client_gl_posting_enabled_at);
+    }
+
+    /**
+     * The only two fields a device needs to know about accounting cutover
+     * state, published under their own narrow 'accounting_settings' sync
+     * table — deliberately NOT folded into the generic 'businesses' sync
+     * payload, whose apply-on-device case overwrites every unlisted field
+     * with a default (see sync_service.dart's case 'businesses' comment);
+     * a payload containing only these two fields would silently wipe the
+     * rest of a device's local business row.
+     */
+    public function publishAccountingSettingsSyncRecord(): void
+    {
+        SyncRecord::create([
+            'business_id' => $this->id,
+            'table_name' => 'accounting_settings',
+            'record_uuid' => $this->id,
+            'operation' => 'upsert',
+            'payload' => [
+                'business_id' => $this->id,
+                'accounting_go_live_date' => $this->accounting_go_live_date?->toDateString(),
+                'client_gl_posting_enabled_at' => $this->client_gl_posting_enabled_at?->toIso8601String(),
+            ],
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+        ]);
+    }
+
+    /** Public URL for the current logo, or null if none has been uploaded. */
+    public function logoUrl(): ?string
+    {
+        return $this->logo_path ? Storage::disk('public')->url($this->logo_path) : null;
+    }
+
+    /** Public URL for the current letterhead image, or null if none has been uploaded. */
+    public function letterheadUrl(): ?string
+    {
+        return $this->letterhead_path ? Storage::disk('public')->url($this->letterhead_path) : null;
+    }
+
+    /** Public URL for the current footer image, or null if none has been uploaded. */
+    public function footerUrl(): ?string
+    {
+        return $this->footer_path ? Storage::disk('public')->url($this->footer_path) : null;
+    }
+
+    /**
+     * Branding (logo, color, letterhead, footer) is delivered under its own
+     * narrow 'business_branding' sync table, same reasoning as
+     * publishAccountingSettingsSyncRecord() above — never fold logo_path,
+     * primary_color, letterhead_path or footer_path into the generic
+     * 'businesses' sync payload/apply case. This is also pull-only: only
+     * the server ever publishes it, a device never pushes its own value
+     * back (see sync_service.dart's _pullOnlyTables). footer_text is plain
+     * text data and syncs separately, bidirectionally, as an ordinary
+     * 'businesses' column.
+     */
+    public function publishBrandingSyncRecord(): void
+    {
+        SyncRecord::create([
+            'business_id' => $this->id,
+            'table_name' => 'business_branding',
+            'record_uuid' => $this->id,
+            'operation' => 'upsert',
+            'payload' => [
+                'business_id' => $this->id,
+                'primary_color' => $this->primary_color,
+                'logo_url' => $this->logoUrl(),
+                'letterhead_url' => $this->letterheadUrl(),
+                'footer_url' => $this->footerUrl(),
+            ],
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+        ]);
     }
 
     /**

@@ -39,6 +39,7 @@ class SyncController extends Controller
         $actingUser = $request->user();
         $accepted = [];
         $conflicts = [];
+        $autoResolved = [];
         $errors = [];
 
         foreach ($this->groupPushRecords($data['records']) as $groupRecords) {
@@ -66,21 +67,46 @@ class SyncController extends Controller
 
                 $existingVersion = $existing?->source_updated_at ?? $existing?->synced_at;
                 if ($existingVersion && $existingVersion->gt($incomingUpdatedAt)) {
+                    $autoResolve = $this->autoResolvesVersionConflict($record['table']);
+
                     $conflict = $this->recordConflict(
                         $device,
                         $record,
-                        'Newer version exists on server; manual review required.',
+                        $autoResolve
+                            ? 'Newer version exists on server; auto-resolved by keeping the server record.'
+                            : 'Newer version exists on server; manual review required.',
                         'version_conflict',
                         $existing?->payload
                     );
 
-                    // Left pending for manual review via the conflicts/resolve
-                    // endpoint — do not apply or accept the older record yet.
-                    $conflicts[] = [
-                        'id' => $conflict->id,
-                        'table' => $record['table'],
-                        'uuid' => $record['uuid'],
-                    ];
+                    if ($autoResolve) {
+                        // Last-write-wins: the server row is already newer than this
+                        // push, so there's nothing to apply — just record the decision
+                        // instead of leaving it pending for a human. Scoped to tables
+                        // where a stale full-row overwrite is the only failure mode
+                        // (see autoResolvesVersionConflict()); structural conflicts
+                        // (invalid transitions, ownership mismatches) are never
+                        // auto-resolved because they signal a real bug, not a race.
+                        $conflict->update([
+                            'status' => 'resolved',
+                            'resolution_action' => 'accept_server',
+                            'resolved_at' => now(),
+                        ]);
+
+                        $autoResolved[] = [
+                            'id' => $conflict->id,
+                            'table' => $record['table'],
+                            'uuid' => $record['uuid'],
+                        ];
+                    } else {
+                        // Left pending for manual review via the conflicts/resolve
+                        // endpoint — do not apply or accept the older record yet.
+                        $conflicts[] = [
+                            'id' => $conflict->id,
+                            'table' => $record['table'],
+                            'uuid' => $record['uuid'],
+                        ];
+                    }
 
                     continue;
                 }
@@ -175,6 +201,7 @@ class SyncController extends Controller
         return response()->json([
             'accepted' => $accepted,
             'conflicts' => $conflicts,
+            'auto_resolved' => $autoResolved,
             'errors' => $errors,
         ]);
     }
@@ -221,23 +248,42 @@ class SyncController extends Controller
                 }
             });
         } elseif ($device) {
-            $cursors = SyncCursor::where('device_id', $device->id)
+            $cursorsByTable = SyncCursor::where('device_id', $device->id)
                 ->when($tables, fn ($q) => $q->whereIn('table_name', $tables))
-                ->get(['last_pulled_at', 'last_pulled_id']);
+                ->get(['table_name', 'last_pulled_at', 'last_pulled_id'])
+                ->keyBy('table_name');
 
-            if ($cursors->isNotEmpty()) {
-                // The earliest cursor among the requested tables is the safe
-                // floor — same "over-fetch, never under-fetch" reasoning as
-                // the old min()-based filter, just tie-safe now too.
-                $floor = $cursors->sortBy('last_pulled_at')->first();
-                $query->where(function ($q) use ($floor) {
-                    $q->where('synced_at', '>', $floor->last_pulled_at);
-                    if ($floor->last_pulled_id !== null) {
-                        $q->orWhere(function ($q2) use ($floor) {
-                            $q2->where('synced_at', '=', $floor->last_pulled_at)
-                                ->where('id', '>', $floor->last_pulled_id);
+            if ($cursorsByTable->isNotEmpty()) {
+                // Per-table threshold, not a single global minimum — a
+                // realtime quickPullTables() call routinely requests several
+                // tables whose cursors have diverged (one advanced by
+                // frequent activity, another stale), and a single `synced_at
+                // > cursors->min()` bound made the whole query use the
+                // oldest one, re-fetching records for the already-current
+                // tables that were already pulled and applied. Idempotent
+                // (not data corruption) but wasted bandwidth/processing on
+                // every such call. A table with no cursor row yet (never
+                // pulled before) gets no lower bound, so its full history
+                // comes through on the first pull that asks for it.
+                //
+                // Each table's own threshold is applied tie-safely too, via
+                // last_pulled_id — same reasoning as the `since`/`after_id`
+                // branch above.
+                $query->where(function ($q) use ($cursorsByTable) {
+                    foreach ($cursorsByTable as $table => $cursor) {
+                        $q->orWhere(function ($qq) use ($table, $cursor) {
+                            $qq->where('table_name', $table)->where(function ($q2) use ($cursor) {
+                                $q2->where('synced_at', '>', $cursor->last_pulled_at);
+                                if ($cursor->last_pulled_id !== null) {
+                                    $q2->orWhere(function ($q3) use ($cursor) {
+                                        $q3->where('synced_at', '=', $cursor->last_pulled_at)
+                                            ->where('id', '>', $cursor->last_pulled_id);
+                                    });
+                                }
+                            });
                         });
                     }
+                    $q->orWhereNotIn('table_name', $cursorsByTable->keys()->all());
                 });
             }
         }
@@ -419,6 +465,26 @@ class SyncController extends Controller
             'message' => 'Conflict resolved',
             'conflict' => $conflict->fresh(),
         ]);
+    }
+
+    /**
+     * Tables whose version conflicts are safe to auto-resolve last-write-wins
+     * (keep the server's newer record, drop the stale local push) instead of
+     * waiting on manual review. Every 'products' upsert is a full-row replace
+     * of simple scalar fields with no cross-record side effects, so an older
+     * push losing to a newer server row is a plain race, not a data-loss risk.
+     *
+     * Deliberately excludes processing_error conflicts (invalid stock_take
+     * transitions, ownership mismatches) — those always indicate a real bug
+     * and must stay manual.
+     *
+     * @var list<string>
+     */
+    private const AUTO_RESOLVE_VERSION_CONFLICT_TABLES = ['products'];
+
+    private function autoResolvesVersionConflict(string $table): bool
+    {
+        return in_array($table, self::AUTO_RESOLVE_VERSION_CONFLICT_TABLES, true);
     }
 
     private function resolveIncomingUpdatedAt(array $record)

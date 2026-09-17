@@ -3,8 +3,10 @@
 namespace Tests\Feature;
 
 use App\Models\Device;
+use App\Models\StockTransfer;
 use App\Models\Tenant;
 use App\Models\User;
+use Database\Seeders\RolesAndPermissionsSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
@@ -140,5 +142,36 @@ class SyncStockTransferTransitionTest extends TestCase
             'id' => $transferId,
             'status' => 'cancelled',
         ]);
+    }
+
+    public function test_a_plain_cashier_cannot_self_approve_a_transfer(): void
+    {
+        $tenantId = 'tenant-transfer-5';
+        $token = $this->actingDeviceToken($tenantId);
+        $this->seed(RolesAndPermissionsSeeder::class);
+        User::where('id', '88888888-8888-4888-8888-888888888888')->first()->assignRole('cashier');
+        $transferId = (string) Str::uuid();
+
+        $this->pushTransfer($token, $tenantId, $transferId, 'pending')->assertOk();
+        $response = $this->pushTransfer($token, $tenantId, $transferId, 'approved');
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'errors');
+        $this->assertSame('pending', StockTransfer::find($transferId)->status);
+    }
+
+    public function test_a_manager_can_approve_a_transfer(): void
+    {
+        $tenantId = 'tenant-transfer-6';
+        $token = $this->actingDeviceToken($tenantId);
+        $this->seed(RolesAndPermissionsSeeder::class);
+        User::where('id', '88888888-8888-4888-8888-888888888888')->first()->assignRole('manager');
+        $transferId = (string) Str::uuid();
+
+        $this->pushTransfer($token, $tenantId, $transferId, 'pending')->assertOk();
+        $response = $this->pushTransfer($token, $tenantId, $transferId, 'approved');
+
+        $response->assertOk();
+        $this->assertSame('approved', StockTransfer::find($transferId)->status);
     }
 }

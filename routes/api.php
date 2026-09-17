@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\BackOfficeAccessController;
+use App\Http\Controllers\Api\BusinessBrandingController;
 use App\Http\Controllers\Api\DeviceAuthController;
 use App\Http\Controllers\Api\LocationController;
 use App\Http\Controllers\Api\StockResetController;
@@ -42,6 +43,13 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     // Device self-service rename (shown on the POS screen so cashiers can
     // confirm which till they're on)
     Route::put('device/name', [SubscriptionController::class, 'updateName']);
+
+    // Business branding — a device uploads its locally-picked logo so it
+    // fans out to every other device and the BackOffice web app
+    Route::post('business/logo', [BusinessBrandingController::class, 'uploadLogo']);
+    Route::post('business/letterhead', [BusinessBrandingController::class, 'uploadLetterhead']);
+    Route::post('business/footer-image', [BusinessBrandingController::class, 'uploadFooterImage']);
+    Route::put('business/footer-text', [BusinessBrandingController::class, 'updateFooterText']);
 
     // Reports back a location a cashier picked on-device (the fallback
     // prompt shown when no admin assignment exists) so the web portal's

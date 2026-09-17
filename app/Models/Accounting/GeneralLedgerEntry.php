@@ -19,6 +19,7 @@ class GeneralLedgerEntry extends Model
         'id', 'business_id', 'trans_date', 'journal_header_id', 'gl_account_id',
         'debit', 'credit', 'currency_code', 'exchange_rate', 'foreign_debit',
         'foreign_credit', 'party_type', 'party_id', 'description', 'status',
+        'reconciled_at', 'bank_reconciliation_id',
     ];
 
     protected function casts(): array
@@ -30,6 +31,7 @@ class GeneralLedgerEntry extends Model
             'exchange_rate' => 'decimal:8',
             'foreign_debit' => 'decimal:4',
             'foreign_credit' => 'decimal:4',
+            'reconciled_at' => 'datetime',
         ];
     }
 
@@ -46,15 +48,18 @@ class GeneralLedgerEntry extends Model
     /**
      * A posted general_ledger row is permanent. Correcting it means posting
      * a reversing journal (JournalService::reverse()), which is free to
-     * flip this row's status to 'reversed' for display purposes — anything
-     * else (changing an amount, deleting a row) would silently unbalance
-     * the books it's supposed to be an immutable record of.
+     * flip this row's status to 'reversed' for display purposes; separately,
+     * BankReconciliationService is free to tag/untag it as cleared via
+     * reconciled_at/bank_reconciliation_id. Anything else (changing an
+     * amount, deleting a row) would silently unbalance the books it's
+     * supposed to be an immutable record of.
      */
     protected static function booted(): void
     {
         static::updating(function (GeneralLedgerEntry $entry) {
-            if (! $entry->isDirty('status')) {
-                throw new RuntimeException('general_ledger rows are immutable except for the status tag set by a reversal.');
+            $mutableFields = ['status', 'reconciled_at', 'bank_reconciliation_id'];
+            if (! empty(array_diff(array_keys($entry->getDirty()), $mutableFields))) {
+                throw new RuntimeException('general_ledger rows are immutable except for the status/reconciliation tags.');
             }
         });
 

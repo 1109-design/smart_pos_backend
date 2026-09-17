@@ -16,6 +16,9 @@ class Product extends Model
         'price', 'min_price', 'discount_percent', 'cost_price', 'deposit_amount', 'unit',
         'track_stock', 'stock_quantity', 'low_stock_threshold',
         'sheet_width', 'sheet_height',
+        // GLS·02
+        'sheet_min_usable_width', 'sheet_min_usable_height', 'sheet_kerf_width',
+        'sheet_cutting_charge', 'sheet_allow_rotate',
         'image_path', 'expiry_date', 'is_active', 'is_taxable', 'merged_into_product_id',
     ];
 
@@ -42,6 +45,11 @@ class Product extends Model
             'low_stock_threshold' => 'decimal:4',
             'sheet_width' => 'decimal:4',
             'sheet_height' => 'decimal:4',
+            'sheet_min_usable_width' => 'decimal:4',
+            'sheet_min_usable_height' => 'decimal:4',
+            'sheet_kerf_width' => 'decimal:4',
+            'sheet_cutting_charge' => 'decimal:4',
+            'sheet_allow_rotate' => 'boolean',
             'track_stock' => 'boolean',
             'is_active' => 'boolean',
             'is_taxable' => 'boolean',

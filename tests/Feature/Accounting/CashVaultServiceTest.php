@@ -6,6 +6,7 @@ use App\Models\Accounting\GlAccount;
 use App\Models\Accounting\JournalHeader;
 use App\Models\Business;
 use App\Models\Tenant;
+use App\Services\Accounting\BankAccountService;
 use App\Services\Accounting\CashVaultService;
 use App\Services\Accounting\ChartOfAccountsSeeder;
 use App\Services\Accounting\JournalService;
@@ -65,6 +66,19 @@ class CashVaultServiceTest extends TestCase
 
         $this->assertSame(50.0, $this->vault->balance($this->businessId));
         $this->assertSame(250.0, $this->account('1010')->balance());
+    }
+
+    public function test_a_bank_deposit_tagged_with_a_bank_account_posts_against_that_accounts_own_gl_line(): void
+    {
+        $this->fundCash(500);
+        $this->vault->recordTillDrop($this->businessId, 300.0, '2026-06-05', null, 'user-1');
+        $bankAccount = app(BankAccountService::class)->create($this->businessId, 'CBZ Main Account');
+
+        $this->vault->recordBankDeposit($this->businessId, 250.0, '2026-06-06', null, 'user-1', $bankAccount->id);
+
+        $namedBankGl = GlAccount::find($bankAccount->gl_account_id);
+        $this->assertSame(0.0, $this->account('1010')->balance());
+        $this->assertSame(250.0, $namedBankGl->balance());
     }
 
     public function test_a_count_matching_the_ledger_posts_nothing(): void

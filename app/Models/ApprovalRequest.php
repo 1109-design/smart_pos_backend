@@ -15,6 +15,9 @@ class ApprovalRequest extends Model
         'id', 'business_id', 'subject_type', 'subject_id', 'action',
         'requested_by_user_id', 'status', 'approver_user_id', 'approved_at',
         'reason', 'payload_json',
+        'rule_set_id', 'current_level', 'max_level', 'sla_due_at',
+        'escalated_at', 'escalated_to_user_id', 'priority', 'estimated_value',
+        'branch_id', 'is_delegated', 'delegated_from_user_id', 'rejection_reason',
     ];
 
     protected static function booted(): void
@@ -43,6 +46,9 @@ class ApprovalRequest extends Model
         return [
             'approved_at' => 'datetime',
             'payload_json' => 'array',
+            'sla_due_at' => 'datetime',
+            'escalated_at' => 'datetime',
+            'is_delegated' => 'boolean',
         ];
     }
 
@@ -56,8 +62,70 @@ class ApprovalRequest extends Model
         return $this->belongsTo(User::class, 'approver_user_id');
     }
 
+    public function ruleSet(): BelongsTo
+    {
+        return $this->belongsTo(ApprovalRuleSet::class, 'rule_set_id');
+    }
+
     public function isPending(): bool
     {
         return $this->status === 'pending';
+    }
+
+    public function isOverdue(): bool
+    {
+        return $this->sla_due_at !== null
+            && now()->greaterThan($this->sla_due_at)
+            && $this->isPending();
+    }
+
+    public function isUrgent(): bool
+    {
+        return $this->sla_due_at !== null
+            && now()->greaterThan($this->sla_due_at->copy()->subHour())
+            && $this->isPending();
+    }
+
+    public function priorityLabel(): string
+    {
+        if (in_array($this->priority, ['critical', 'high', 'normal', 'low'])) {
+            return $this->priority;
+        }
+
+        return 'normal';
+    }
+
+    /**
+     * Raised on one device, resolved from another (BackOffice, or a
+     * manager's own device) — same multi-device shape as
+     * PurchaseOrder/Requisition. Without this guard, a device that raised
+     * a request and went offline could resync its own stale 'pending'
+     * creation payload after it was already resolved elsewhere, silently
+     * regressing the status back to 'pending' — which would then let
+     * ApprovalService::resolve() run applyApprovedAction() a second time.
+     * That's not idempotent for every action (e.g. change_exchange_rate
+     * closes out the previously-current rate and opens a new one on every
+     * call), so a second resolution would corrupt the FX rate history.
+     */
+    public const TERMINAL_STATUSES = ['approved', 'rejected'];
+
+    /**
+     * @var array<string, array<int, string>>
+     */
+    public const ALLOWED_TRANSITIONS = [
+        'pending' => ['approved', 'rejected'],
+    ];
+
+    public static function isValidTransition(?string $from, string $to): bool
+    {
+        if ($from === null || $from === $to) {
+            return true;
+        }
+
+        if (in_array($from, self::TERMINAL_STATUSES, true)) {
+            return false;
+        }
+
+        return in_array($to, self::ALLOWED_TRANSITIONS[$from] ?? [], true);
     }
 }

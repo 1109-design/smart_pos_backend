@@ -1,9 +1,12 @@
 <?php
 
 use App\Http\Controllers\ActivationCodeController;
+use App\Http\Controllers\BackOffice\AccountRoleMappingsController as BackOfficeAccountRoleMappings;
 use App\Http\Controllers\BackOffice\AgingReportsController as BackOfficeAgingReports;
 use App\Http\Controllers\BackOffice\ApprovalsController as BackOfficeApprovals;
 use App\Http\Controllers\BackOffice\AssetsController as BackOfficeAssets;
+use App\Http\Controllers\BackOffice\BankAccountsController as BackOfficeBankAccounts;
+use App\Http\Controllers\BackOffice\BankReconciliationController as BackOfficeBankReconciliation;
 use App\Http\Controllers\BackOffice\BundlesController as BackOfficeBundles;
 use App\Http\Controllers\BackOffice\CashVaultController as BackOfficeCashVault;
 use App\Http\Controllers\BackOffice\CategoriesController as BackOfficeCategories;
@@ -25,6 +28,7 @@ use App\Http\Controllers\BackOffice\SessionController as BackOfficeSession;
 use App\Http\Controllers\BackOffice\SettingsController as BackOfficeSettings;
 use App\Http\Controllers\BackOffice\SheetYieldController as BackOfficeSheetYield;
 use App\Http\Controllers\BackOffice\ShiftsController as BackOfficeShifts;
+use App\Http\Controllers\BackOffice\StockInventoryByLocationController as BackOfficeStockInventoryByLocation;
 use App\Http\Controllers\BackOffice\StockTakesController as BackOfficeStockTakes;
 use App\Http\Controllers\BackOffice\StoremanController as BackOfficeStoreman;
 use App\Http\Controllers\BackOffice\SupplierInvoicesController as BackOfficeSupplierInvoices;
@@ -123,12 +127,16 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::get('reports/trial-balance', [BackOfficeFinancialStatements::class, 'trialBalance'])->name('reports.trial-balance');
         Route::get('reports/income-statement', [BackOfficeFinancialStatements::class, 'incomeStatement'])->name('reports.income-statement');
         Route::get('reports/balance-sheet', [BackOfficeFinancialStatements::class, 'balanceSheet'])->name('reports.balance-sheet');
+        Route::get('reports/inventory-by-location', BackOfficeStockInventoryByLocation::class)->name('reports.inventory-by-location');
+        Route::get('reports/inventory-by-location/export', [BackOfficeStockInventoryByLocation::class, 'export'])->name('reports.inventory-by-location.export');
 
         Route::get('exchange-rates', [BackOfficeExchangeRates::class, 'index'])->name('exchange-rates.index');
         Route::get('exchange-rates/{fromCurrency}', [BackOfficeExchangeRates::class, 'show'])->name('exchange-rates.show');
         Route::get('journal-entries', [BackOfficeJournalEntries::class, 'index'])->name('journal-entries.index');
         Route::post('journal-entries', [BackOfficeJournalEntries::class, 'store'])->name('journal-entries.store');
         Route::post('journal-entries/{journalEntry}/reverse', [BackOfficeJournalEntries::class, 'reverse'])->name('journal-entries.reverse');
+        Route::get('account-mappings', [BackOfficeAccountRoleMappings::class, 'index'])->name('account-mappings.index');
+        Route::post('account-mappings', [BackOfficeAccountRoleMappings::class, 'update'])->name('account-mappings.update');
         Route::get('assets', [BackOfficeAssets::class, 'index'])->name('assets.index');
         Route::post('assets', [BackOfficeAssets::class, 'store'])->name('assets.store');
         Route::post('assets/{asset}/dispose', [BackOfficeAssets::class, 'dispose'])->name('assets.dispose');
@@ -136,6 +144,16 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::post('cash-vault/drop', [BackOfficeCashVault::class, 'drop'])->name('cash-vault.drop');
         Route::post('cash-vault/deposit', [BackOfficeCashVault::class, 'deposit'])->name('cash-vault.deposit');
         Route::post('cash-vault/count', [BackOfficeCashVault::class, 'count'])->name('cash-vault.count');
+        Route::get('bank-accounts', [BackOfficeBankAccounts::class, 'index'])->name('bank-accounts.index');
+        Route::post('bank-accounts', [BackOfficeBankAccounts::class, 'store'])->name('bank-accounts.store');
+        Route::post('bank-accounts/{bankAccount}/deactivate', [BackOfficeBankAccounts::class, 'deactivate'])->name('bank-accounts.deactivate');
+        Route::get('bank-accounts/{bankAccount}/cash-book', [BackOfficeBankAccounts::class, 'cashBook'])->name('bank-accounts.cash-book');
+        Route::get('bank-accounts/{bankAccount}/reconcile', [BackOfficeBankReconciliation::class, 'show'])->name('bank-accounts.reconcile');
+        Route::post('bank-accounts/{bankAccount}/reconcile/start', [BackOfficeBankReconciliation::class, 'start'])->name('bank-accounts.reconcile.start');
+        Route::post('bank-accounts/{bankAccount}/reconcile/toggle', [BackOfficeBankReconciliation::class, 'toggle'])->name('bank-accounts.reconcile.toggle');
+        Route::post('bank-accounts/{bankAccount}/reconcile/complete', [BackOfficeBankReconciliation::class, 'complete'])->name('bank-accounts.reconcile.complete');
+        Route::post('bank-accounts/{bankAccount}/reconcile/cancel', [BackOfficeBankReconciliation::class, 'cancel'])->name('bank-accounts.reconcile.cancel');
+        Route::get('bank-accounts/{bankAccount}/reconciliation-history', [BackOfficeBankReconciliation::class, 'history'])->name('bank-accounts.reconciliation-history');
         Route::get('transactions', BackOfficeTransactions::class)->name('transactions');
         Route::get('shifts', BackOfficeShifts::class)->name('shifts');
         Route::get('products', [BackOfficeProducts::class, 'index'])->name('products.index');
@@ -198,6 +216,12 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::post('settings/reset-stock', [BackOfficeSettings::class, 'resetStock'])->name('settings.reset-stock');
         Route::post('settings/reset-catalogue', [BackOfficeSettings::class, 'resetCatalogue'])->name('settings.reset-catalogue');
         Route::post('settings/workflows', [BackOfficeSettings::class, 'updateWorkflowSettings'])->name('settings.workflows');
+        Route::post('settings/branding', [BackOfficeSettings::class, 'updateBranding'])->name('settings.branding');
+        Route::post('settings/branding/logo', [BackOfficeSettings::class, 'uploadBrandingLogo'])->name('settings.branding.logo');
+        Route::post('settings/branding/letterhead', [BackOfficeSettings::class, 'uploadBrandingLetterhead'])->name('settings.branding.letterhead');
+        Route::post('settings/branding/footer-image', [BackOfficeSettings::class, 'uploadBrandingFooterImage'])->name('settings.branding.footer-image');
+        Route::post('settings/branding/footer-text', [BackOfficeSettings::class, 'updateFooterText'])->name('settings.branding.footer-text');
+        Route::post('settings/document-branding', [BackOfficeSettings::class, 'updateDocumentBrandingSettings'])->name('settings.document-branding');
 
         Route::get('suppliers', [BackOfficeSuppliers::class, 'index'])->name('suppliers.index');
         Route::get('suppliers/opening-balances/template', [BackOfficeSupplierOpeningBalances::class, 'template'])->name('suppliers.opening-balances.template');

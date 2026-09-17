@@ -7,6 +7,7 @@ use App\Models\Accounting\GeneralLedgerEntry;
 use App\Models\Accounting\GlAccount;
 use App\Models\Accounting\JournalHeader;
 use App\Models\Accounting\JournalLine;
+use App\Models\SyncRecord;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
@@ -138,7 +139,10 @@ class JournalService
                 'posted_by_user_id' => $userId,
             ]);
 
-            return $header->fresh();
+            $header = $header->fresh();
+            $this->publishJournal($header);
+
+            return $header;
         });
     }
 
@@ -194,9 +198,125 @@ class JournalService
                 'reversed_at' => now(),
                 'reversed_by_user_id' => $userId,
             ]);
+            // The reversal itself was already published by post() above;
+            // the original's status/reversed_* fields (and its
+            // general_ledger rows' status flip to 'reversed') just
+            // changed and need republishing too.
+            $this->publishJournal($original->fresh());
 
             return $reversal->fresh();
         });
+    }
+
+    /**
+     * Publishes a header (and, once posted/reversed, its lines and
+     * general_ledger rows) as SyncRecords so every device — including the
+     * one that didn't originate this journal — eventually sees it. This is
+     * the single choke point every posting service (SalePostingService,
+     * GrvPostingService, StockTakePostingService, manual BackOffice
+     * entries, reversals) passes through, so instrumenting it here once
+     * covers all of them.
+     */
+    private function publishJournal(JournalHeader $header): void
+    {
+        $this->publish('journal_headers', $header->business_id, $header->id, [
+            'id' => $header->id,
+            'business_id' => $header->business_id,
+            'journal_number' => $header->journal_number,
+            'trans_date' => $header->trans_date->toDateString(),
+            'description' => $header->description,
+            'source_type' => $header->source_type,
+            'source_id' => $header->source_id,
+            'status' => $header->status,
+            'posted_at' => $header->posted_at?->toIso8601String(),
+            'posted_by_user_id' => $header->posted_by_user_id,
+            'reversed_by_journal_id' => $header->reversed_by_journal_id,
+            'reversed_at' => $header->reversed_at?->toIso8601String(),
+            'reversed_by_user_id' => $header->reversed_by_user_id,
+            'reversal_of_journal_id' => $header->reversal_of_journal_id,
+        ]);
+
+        foreach ($header->lines()->get() as $line) {
+            $this->publish('journal_lines', $header->business_id, $line->id, [
+                'id' => $line->id,
+                'journal_header_id' => $line->journal_header_id,
+                'gl_account_id' => $line->gl_account_id,
+                'debit' => (float) $line->debit,
+                'credit' => (float) $line->credit,
+                'currency_code' => $line->currency_code,
+                'exchange_rate' => (float) $line->exchange_rate,
+                'foreign_debit' => (float) $line->foreign_debit,
+                'foreign_credit' => (float) $line->foreign_credit,
+                'party_type' => $line->party_type,
+                'party_id' => $line->party_id,
+                'description' => $line->description,
+            ]);
+        }
+
+        foreach (GeneralLedgerEntry::where('journal_header_id', $header->id)->get() as $entry) {
+            $this->publish('general_ledger', $header->business_id, $entry->id, $this->buildLedgerEntryPayload($entry));
+        }
+    }
+
+    /**
+     * The full, current field set for one general_ledger row — used both
+     * when a journal is first posted/reversed above, and by
+     * BankReconciliationService::toggleLine()/cancel() to republish an
+     * already-posted row after only its reconciliation tag changed. Every
+     * field must be listed here: general_ledger's sync case is a full-row
+     * upsert (no partial patching), so omitting one silently resets it on
+     * every other device — see this table's own sync-case doc comment in
+     * SyncProcessor.
+     *
+     * @return array<string, mixed>
+     */
+    public function buildLedgerEntryPayload(GeneralLedgerEntry $entry): array
+    {
+        return [
+            'id' => $entry->id,
+            'business_id' => $entry->business_id,
+            'trans_date' => $entry->trans_date->toDateString(),
+            'journal_header_id' => $entry->journal_header_id,
+            'gl_account_id' => $entry->gl_account_id,
+            'debit' => (float) $entry->debit,
+            'credit' => (float) $entry->credit,
+            'currency_code' => $entry->currency_code,
+            'exchange_rate' => (float) $entry->exchange_rate,
+            'foreign_debit' => (float) $entry->foreign_debit,
+            'foreign_credit' => (float) $entry->foreign_credit,
+            'party_type' => $entry->party_type,
+            'party_id' => $entry->party_id,
+            'description' => $entry->description,
+            'status' => $entry->status,
+            'reconciled_at' => $entry->reconciled_at?->toIso8601String(),
+            'bank_reconciliation_id' => $entry->bank_reconciliation_id,
+        ];
+    }
+
+    /**
+     * Republishes a single already-posted general_ledger row as-is — for
+     * when only its own metadata (reconciliation tag) changed, not the
+     * journal it belongs to.
+     */
+    public function republishLedgerEntry(GeneralLedgerEntry $entry): void
+    {
+        $this->publish('general_ledger', $entry->business_id, $entry->id, $this->buildLedgerEntryPayload($entry));
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    private function publish(string $table, string $businessId, string $uuid, array $payload): void
+    {
+        SyncRecord::create([
+            'business_id' => $businessId,
+            'table_name' => $table,
+            'record_uuid' => $uuid,
+            'operation' => 'upsert',
+            'payload' => $payload,
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+        ]);
     }
 
     /**

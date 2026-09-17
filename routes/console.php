@@ -38,6 +38,40 @@ Schedule::command('accounting:post-pending-sales')
     ->withoutOverlapping()
     ->onOneServer();
 
+// Catches any customer credit repayment CreditPaymentPostingService's
+// inline sync hook missed, and backfills history for businesses live
+// before this posting service existed — see PostPendingCreditPayments.
+Schedule::command('accounting:post-pending-credit-payments')
+    ->everyFifteenMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
+// Same as above, for invoice payments — see PostPendingInvoicePayments.
+Schedule::command('accounting:post-pending-invoice-payments')
+    ->everyFifteenMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
+// Same as above, for salary payments — see PostPendingSalaryPayments.
+Schedule::command('accounting:post-pending-salary-payments')
+    ->everyFifteenMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
+// Same as above, for supplier payments — see PostPendingSupplierPayments.
+Schedule::command('accounting:post-pending-supplier-payments')
+    ->everyFifteenMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
+// Same as above, for asset acquisitions/disposals (not monthly depreciation,
+// which stays its own separate daily sweep below) — see
+// PostPendingAssetTransactions.
+Schedule::command('accounting:post-pending-asset-transactions')
+    ->everyFifteenMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
 // Phase 9 / 11d — catches up straight-line depreciation for every active
 // asset. Daily is more than enough cadence for a monthly charge; idempotent
 // either way.

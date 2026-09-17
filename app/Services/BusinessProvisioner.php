@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Services\Accounting\ChartOfAccountsSeeder;
+use Database\Seeders\DefaultApprovalRulesSeeder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
@@ -70,6 +71,16 @@ class BusinessProvisioner
                 $owner->assignRole('business_owner');
 
                 (new ChartOfAccountsSeeder)->seedForBusiness($tenant->id);
+
+                // Enterprise approval-rule-engine audit follow-up:
+                // DefaultApprovalRulesSeeder::seedForBusiness() existed with
+                // no caller anywhere in the app, so no business — new or
+                // existing — ever actually got a configured approval rule
+                // set. Wired in alongside the chart of accounts, the same
+                // per-business bootstrap step it belongs next to. Existing
+                // businesses provisioned before this landed still have none;
+                // that's a separate backfill, not this constructor's job.
+                DefaultApprovalRulesSeeder::seedForBusiness($tenant->id);
             } finally {
                 tenancy()->end();
             }

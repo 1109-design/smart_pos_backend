@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\Accounting\GlAccount;
+use App\Models\ApprovalRuleSet;
 use App\Models\User;
 use App\Services\BusinessProvisioner;
 use Database\Seeders\RolesAndPermissionsSeeder;
@@ -66,6 +67,25 @@ class BusinessProvisionerTest extends TestCase
 
         $this->assertGreaterThan(0, GlAccount::where('business_id', $tenant->id)->count());
         $this->assertDatabaseHas('gl_accounts', ['business_id' => $tenant->id, 'code' => '1000', 'name' => 'Cash']);
+    }
+
+    /**
+     * Enterprise approval-rule-engine audit follow-up:
+     * DefaultApprovalRulesSeeder::seedForBusiness() existed with no caller
+     * anywhere in the app, so no business ever actually got a configured
+     * approval rule set — every process ran with no rule-based routing at
+     * all. Wired in alongside the chart of accounts seeder.
+     */
+    public function test_provision_seeds_default_approval_rules_for_the_new_business(): void
+    {
+        $tenant = $this->provision();
+
+        $this->assertGreaterThan(0, ApprovalRuleSet::where('business_id', $tenant->id)->count());
+        $this->assertDatabaseHas('approval_rule_sets', [
+            'business_id' => $tenant->id,
+            'process' => 'purchase_order',
+            'is_enabled' => true,
+        ]);
     }
 
     public function test_duplicate_business_names_receive_unique_domains(): void

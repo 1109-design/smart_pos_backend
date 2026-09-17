@@ -167,6 +167,7 @@ export default function BackOfficeReports({ summary, daily_breakdown, payment_me
 
             <div className="flex flex-wrap items-center gap-2 mb-8">
                 {[
+                    { label: 'Stock Inventory by Location', href: '/office/reports/inventory-by-location' },
                     { label: 'Debtor Age Analysis', href: '/office/reports/debtors' },
                     { label: 'Creditor Age Analysis', href: '/office/reports/creditors' },
                     { label: 'Quoted vs In-Stock', href: '/office/reports/quoted-vs-stock' },

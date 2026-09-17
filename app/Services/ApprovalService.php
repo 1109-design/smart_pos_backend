@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\ApprovalRequest;
+use App\Models\ApprovalRule;
 use App\Models\ExchangeRate;
 use App\Models\SyncRecord;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
@@ -19,10 +20,20 @@ use Illuminate\Support\Str;
  */
 class ApprovalService
 {
-    public function __construct(private readonly SyncProcessor $processor) {}
+    public function __construct(
+        private readonly SyncProcessor $processor,
+        private readonly ApprovalRuleEngine $ruleEngine,
+    ) {}
 
     /**
      * @param  array<string, mixed>  $payload  Context needed to review/apply the action later.
+     * @param  string|null  $process  ApprovalRuleSet::process key (e.g. 'purchase_order') to
+     *                                route this request through the enterprise rule engine.
+     *                                Optional and backward compatible — omitted, this behaves
+     *                                exactly as before (no rule_set_id/SLA/required-role
+     *                                attached, same as every caller until each is migrated).
+     * @param  array<string, mixed>  $context  amount/percentage/quantity for condition
+     *                                         evaluation — see ApprovalRuleEngine::evaluateCondition().
      */
     public function request(
         string $businessId,
@@ -31,8 +42,12 @@ class ApprovalService
         string $action,
         string $requestedByUserId,
         array $payload = [],
+        ?string $process = null,
+        array $context = [],
     ): ApprovalRequest {
         $id = (string) Str::uuid();
+
+        $ruleFields = $process ? $this->resolveRuleFieldsForLevel($businessId, $process, $context, level: 1) : [];
 
         $this->syncUpsert($id, [
             'business_id' => $businessId,
@@ -45,9 +60,44 @@ class ApprovalService
             'approved_at' => null,
             'reason' => null,
             'payload_json' => $payload,
+            ...$ruleFields,
         ]);
 
         return ApprovalRequest::findOrFail($id);
+    }
+
+    /**
+     * Finds the rule governing $level for $process (if any) and returns the
+     * ApprovalRequest columns it drives — rule_set_id, current_level,
+     * max_level, sla_due_at, estimated_value. Empty array when no enabled
+     * rule set exists for the process, or no rule at that level matches the
+     * given context (same "no rule = no gate" fallback the rest of this
+     * class already assumes for every process not yet rule-driven).
+     *
+     * @param  array<string, mixed>  $context
+     * @return array<string, mixed>
+     */
+    private function resolveRuleFieldsForLevel(string $businessId, string $process, array $context, int $level): array
+    {
+        $ruleSet = $this->ruleEngine->resolveRuleSet($businessId, $process);
+
+        if (! $ruleSet) {
+            return [];
+        }
+
+        $rule = $this->ruleEngine->findApplicableRule($ruleSet, $context, $level);
+
+        if (! $rule) {
+            return [];
+        }
+
+        return [
+            'rule_set_id' => $ruleSet->id,
+            'current_level' => $level,
+            'max_level' => (int) ApprovalRule::where('rule_set_id', $ruleSet->id)->max('level'),
+            'sla_due_at' => now()->addHours($rule->sla_hours)->toIso8601String(),
+            'estimated_value' => $context['amount'] ?? null,
+        ];
     }
 
     public function resolve(string $id, string $approverUserId, string $decision, ?string $reason = null): ApprovalRequest
@@ -60,6 +110,34 @@ class ApprovalService
 
         if (! in_array($decision, ['approved', 'rejected'], true)) {
             throw new \RuntimeException("Invalid decision: {$decision}");
+        }
+
+        // Separation of duties (always) + role-based authority (only when
+        // request() attached a rule_set_id — see resolveRuleFieldsForLevel()).
+        // ApprovalsController::approve()/reject() only ever checked the
+        // coarse MANAGE_APPROVALS permission ("can this person decide
+        // approvals at all"), never whether *this* person is an eligible
+        // decider for *this specific* request — so any manager with that
+        // permission could both resolve a request they themselves raised,
+        // and clear a request a rule says needs a more senior role than
+        // theirs. A request with no rule_set_id (every process not yet
+        // routed through request()'s optional $process param) keeps
+        // today's exact behaviour: any MANAGE_APPROVALS holder who isn't
+        // the requester.
+        $requiredRole = $request->rule_set_id
+            ? $this->ruleEngine->findApplicableRule(
+                $request->ruleSet,
+                ['amount' => (float) ($request->estimated_value ?? 0)],
+                $request->current_level,
+            )?->required_role
+            : null;
+
+        if (! $this->ruleEngine->canApprove($request->business_id, $approverUserId, $request, $requiredRole)) {
+            throw new \RuntimeException(
+                $requiredRole
+                    ? "This request requires {$requiredRole} authority or higher to decide."
+                    : 'You cannot approve or reject your own request.'
+            );
         }
 
         $this->syncUpsert($request->id, [

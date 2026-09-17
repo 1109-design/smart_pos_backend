@@ -4,6 +4,7 @@ namespace App\Services\Accounting;
 
 use App\Models\Accounting\GlAccount;
 use App\Models\Accounting\JournalHeader;
+use App\Models\BankAccount;
 use App\Models\Business;
 use App\Models\Payment;
 use App\Models\StockMovement;
@@ -31,7 +32,17 @@ class SalePostingService
 {
     public function __construct(private readonly JournalService $journals) {}
 
-    public function postIfReady(Transaction $transaction): void
+    /**
+     * @param  bool  $viaSweep  True only when called from the
+     *                          accounting:post-pending-sales grace-period
+     *                          fallback for a client_gl_posting_enabled_at
+     *                          business — see the cutover check below.
+     *                          Every other call site (SyncProcessor's
+     *                          inline hooks) leaves this false, since those
+     *                          should always defer to the client once cut
+     *                          over, never race it.
+     */
+    public function postIfReady(Transaction $transaction, bool $viaSweep = false): void
     {
         $business = Business::find($transaction->business_id);
 
@@ -42,6 +53,17 @@ class SalePostingService
         $transDate = ($transaction->created_at ?? now())->toDateString();
         if ($transDate < $business->accounting_go_live_date->toDateString()) {
             return; // pre-dates the cutover — covered by opening balances instead, not auto-posted
+        }
+
+        // Once a business is cut over to client-side posting, the server
+        // stands down for anything dated on/after the cutover and waits
+        // for the client's own journal to arrive via sync — UNLESS this is
+        // the pending-sales sweep checking in after its grace period, in
+        // which case an old-app-version straggler that never posted its
+        // own journal gets posted here instead. See
+        // Business::postsFromClientFor() and PostPendingSales.
+        if (! $viaSweep && $business->postsFromClientFor($transDate)) {
+            return;
         }
 
         if ($transaction->status === 'voided') {
@@ -206,9 +228,30 @@ class SalePostingService
         return match (true) {
             str_contains($method, 'credit') => $accounts['receivable'],
             str_contains($method, 'mobile'), str_contains($method, 'ecocash') => $accounts['mobile'],
-            str_contains($method, 'card'), str_contains($method, 'bank'), str_contains($method, 'swipe') => $accounts['bank'],
+            str_contains($method, 'card'), str_contains($method, 'bank'), str_contains($method, 'swipe') => $this->resolveBankAccount($payment->bank_account_id, $accounts['bank']),
             default => $accounts['cash'],
         };
+    }
+
+    /**
+     * When a specific bank account was chosen for a bank-transfer tender,
+     * post against that account's own GL line instead of the single
+     * generic Bank (1010) account — see BankAccountService. Falls back to
+     * $default (1010) when no bank account was specified, or it can't be
+     * resolved (e.g. hasn't synced down to this device yet), so this is
+     * purely additive — every existing sale keeps posting exactly as
+     * before.
+     */
+    private function resolveBankAccount(?string $bankAccountId, GlAccount $default): GlAccount
+    {
+        if (! $bankAccountId) {
+            return $default;
+        }
+
+        $bankAccount = BankAccount::find($bankAccountId);
+        $glAccount = $bankAccount ? GlAccount::find($bankAccount->gl_account_id) : null;
+
+        return $glAccount ?? $default;
     }
 
     private function existingJournal(Transaction $transaction): ?JournalHeader

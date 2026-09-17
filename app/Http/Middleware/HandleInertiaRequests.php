@@ -53,6 +53,8 @@ class HandleInertiaRequests extends Middleware
                 'role' => $backoffice['role'],
                 'business_name' => $backoffice['business_name'],
                 'currency_code' => $backoffice['currency_code'],
+                'primary_color' => $backoffice['primary_color'] ?? null,
+                'logo_url' => $backoffice['logo_url'] ?? null,
             ] : null,
         ];
     }

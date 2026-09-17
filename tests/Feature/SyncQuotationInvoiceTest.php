@@ -10,6 +10,7 @@ use App\Models\Quotation;
 use App\Models\RecurringInvoiceSchedule;
 use App\Models\Tenant;
 use App\Models\User;
+use Database\Seeders\RolesAndPermissionsSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
@@ -166,10 +167,53 @@ class SyncQuotationInvoiceTest extends TestCase
         $this->assertDatabaseHas('invoice_payments', ['id' => $paymentId]);
     }
 
+    public function test_a_partial_invoice_payload_does_not_reset_omitted_financial_fields(): void
+    {
+        $tenantId = 'tenant-inv-partial';
+        $token = $this->actingDeviceToken($tenantId);
+        $customer = Customer::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Gamma Traders']);
+
+        $invoiceId = (string) Str::uuid();
+        $this->push($token, 'invoices', $invoiceId, [
+            'business_id' => $tenantId,
+            'customer_id' => $customer->id,
+            'invoice_number' => 'INV-202609-777',
+            'status' => 'sent',
+            'issue_date' => now()->toDateString(),
+            'subtotal' => 900,
+            'discount_total' => 50,
+            'tax_total' => 150,
+            'total' => 1000,
+            'notes' => 'Original notes',
+            'created_by_user_id' => (string) Str::uuid(),
+        ])->assertOk();
+
+        // A later resend that only changes notes — e.g. an older/partial
+        // client — must not wipe subtotal/discount_total/tax_total/total.
+        $this->push($token, 'invoices', $invoiceId, [
+            'notes' => 'Updated notes only',
+        ])->assertOk();
+
+        $this->assertDatabaseHas('invoices', [
+            'id' => $invoiceId,
+            'invoice_number' => 'INV-202609-777',
+            'status' => 'sent',
+            'subtotal' => 900,
+            'discount_total' => 50,
+            'tax_total' => 150,
+            'total' => 1000,
+            'notes' => 'Updated notes only',
+        ]);
+    }
+
     public function test_credit_note_can_be_pushed_and_posts_against_an_invoice(): void
     {
         $tenantId = 'tenant-cn-1';
         $token = $this->actingDeviceToken($tenantId);
+        // credit_notes creation requires finance.credit_note.create —
+        // business_owner always passes BackOfficeAuthorizer::can().
+        $this->seed(RolesAndPermissionsSeeder::class);
+        User::where('email', $tenantId.'-owner@example.com')->first()->assignRole('business_owner');
         $customer = Customer::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Gamma Traders']);
         $invoice = Invoice::create([
             'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'customer_id' => $customer->id,
@@ -189,6 +233,35 @@ class SyncQuotationInvoiceTest extends TestCase
         ]);
         $response->assertOk();
         $this->assertDatabaseHas('credit_notes', ['id' => $creditNoteId, 'invoice_id' => $invoice->id]);
+    }
+
+    public function test_a_plain_cashier_cannot_create_a_credit_note(): void
+    {
+        $tenantId = 'tenant-cn-2';
+        $token = $this->actingDeviceToken($tenantId);
+        $this->seed(RolesAndPermissionsSeeder::class);
+        User::where('email', $tenantId.'-owner@example.com')->first()->assignRole('cashier');
+        $customer = Customer::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Delta Traders']);
+        $invoice = Invoice::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'customer_id' => $customer->id,
+            'invoice_number' => 'INV-202608-003', 'status' => 'paid', 'issue_date' => now(), 'total' => 200,
+            'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        $creditNoteId = (string) Str::uuid();
+        $response = $this->push($token, 'credit_notes', $creditNoteId, [
+            'business_id' => $tenantId,
+            'invoice_id' => $invoice->id,
+            'customer_id' => $customer->id,
+            'credit_note_number' => 'CN-202608-002',
+            'reason' => 'Attempted unauthorized credit',
+            'total' => 50,
+            'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'errors');
+        $this->assertDatabaseMissing('credit_notes', ['id' => $creditNoteId]);
     }
 
     public function test_recurring_invoice_schedule_can_be_pushed(): void

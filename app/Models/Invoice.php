@@ -16,6 +16,7 @@ class Invoice extends Model
         'invoice_number', 'type', 'status', 'issue_date', 'due_date', 'payment_terms_days',
         'subtotal', 'discount_total', 'tax_total', 'deposit_required', 'total', 'amount_paid',
         'recurring_schedule_id', 'notes', 'created_by_user_id',
+        'currency_code', 'exchange_rate',
     ];
 
     protected function casts(): array

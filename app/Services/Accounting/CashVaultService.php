@@ -2,8 +2,8 @@
 
 namespace App\Services\Accounting;
 
-use App\Models\Accounting\GeneralLedgerEntry;
 use App\Models\Accounting\GlAccount;
+use App\Models\BankAccount;
 use App\Models\Business;
 use RuntimeException;
 
@@ -32,6 +32,7 @@ class CashVaultService
     public function __construct(
         private readonly JournalService $journals,
         private readonly ChartOfAccountsSeeder $chartSeeder,
+        private readonly AccountActivityService $activityService,
     ) {}
 
     public function balance(string $businessId): float
@@ -40,38 +41,15 @@ class CashVaultService
     }
 
     /**
-     * A chronological activity list with a running balance — the vault's
-     * own equivalent of PartyLedgerService::statement(), but for a plain GL
-     * account rather than a customer/supplier (no aging concept applies to
-     * cash).
+     * The vault's own equivalent of PartyLedgerService::statement(), but
+     * for a plain GL account rather than a customer/supplier — see
+     * AccountActivityService, which this just points at the vault account.
      *
      * @return array<int, array{date: string, description: ?string, debit: float, credit: float, running_balance: float}>
      */
     public function activity(string $businessId): array
     {
-        $vault = $this->vaultAccount($businessId);
-        $running = 0.0;
-        $rows = [];
-
-        $lines = GeneralLedgerEntry::with('header')
-            ->where('business_id', $businessId)
-            ->where('gl_account_id', $vault->id)
-            ->orderBy('trans_date')
-            ->orderBy('created_at')
-            ->get();
-
-        foreach ($lines as $line) {
-            $running += (float) $line->debit - (float) $line->credit;
-            $rows[] = [
-                'date' => $line->trans_date->toDateString(),
-                'description' => $line->description ?? $line->header?->description,
-                'debit' => (float) $line->debit,
-                'credit' => (float) $line->credit,
-                'running_balance' => round($running, 4),
-            ];
-        }
-
-        return $rows;
+        return $this->activityService->activity($businessId, $this->vaultAccount($businessId));
     }
 
     public function recordTillDrop(string $businessId, float $amount, string $date, ?string $note, ?string $userId): void
@@ -87,17 +65,35 @@ class CashVaultService
         $this->journals->post($header, $userId);
     }
 
-    public function recordBankDeposit(string $businessId, float $amount, string $date, ?string $note, ?string $userId): void
+    public function recordBankDeposit(string $businessId, float $amount, string $date, ?string $note, ?string $userId, ?string $bankAccountId = null): void
     {
         $this->assertLive($businessId);
 
         $vault = $this->vaultAccount($businessId);
-        $bank = $this->requireAccount($businessId, '1010', 'Bank');
+        $bank = $this->resolveBankAccount($bankAccountId, $this->requireAccount($businessId, '1010', 'Bank'));
 
         $header = $this->journals->createDraft($businessId, $date, 'cash_vault_deposit', null, $note ?: 'Vault banked');
         $this->journals->addLine($header, ['gl_account_id' => $bank->id, 'debit' => $amount]);
         $this->journals->addLine($header, ['gl_account_id' => $vault->id, 'credit' => $amount]);
         $this->journals->post($header, $userId);
+    }
+
+    /**
+     * When a specific bank account was chosen for the deposit, post against
+     * that account's own GL line instead of the single generic Bank (1010)
+     * account — see BankAccountService. Falls back to $default when no bank
+     * account was specified, or it can't be resolved.
+     */
+    private function resolveBankAccount(?string $bankAccountId, GlAccount $default): GlAccount
+    {
+        if (! $bankAccountId) {
+            return $default;
+        }
+
+        $bankAccount = BankAccount::find($bankAccountId);
+        $glAccount = $bankAccount ? GlAccount::find($bankAccount->gl_account_id) : null;
+
+        return $glAccount ?? $default;
     }
 
     /**

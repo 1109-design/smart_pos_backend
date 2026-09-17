@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\BackOffice;
 
+use App\Models\BankAccount;
 use App\Services\Accounting\CashVaultService;
 use App\Services\BackOfficeAuthorizer;
 use App\Support\BackOfficePermission;
@@ -33,6 +34,7 @@ class CashVaultController extends BackOfficeController
         return Inertia::render('BackOffice/CashVault', [
             'balance' => $this->vault->balance($tenantId),
             'activity' => $this->vault->activity($tenantId),
+            'bankAccounts' => BankAccount::where('business_id', $tenantId)->where('is_active', true)->orderBy('name')->get(['id', 'name']),
         ]);
     }
 
@@ -59,10 +61,11 @@ class CashVaultController extends BackOfficeController
             'amount' => ['required', 'numeric', 'min:0.01'],
             'date' => ['required', 'date'],
             'note' => ['nullable', 'string', 'max:255'],
+            'bank_account_id' => ['nullable', 'uuid'],
         ]);
 
         return $this->attempt(fn () => $this->vault->recordBankDeposit(
-            $this->tenantId(), (float) $data['amount'], $data['date'], $data['note'] ?? null, $this->userId(),
+            $this->tenantId(), (float) $data['amount'], $data['date'], $data['note'] ?? null, $this->userId(), $data['bank_account_id'] ?? null,
         ), 'Bank deposit recorded.');
     }
 

@@ -1174,6 +1174,7 @@ class ProductsController extends BackOfficeController
             'product_id' => $product->id,
             'type' => 'opening_stock',
             'quantity_change' => $variance,
+            'unit_cost' => $product->cost_price,
             'reason' => 'Opening balance set via BackOffice',
             'user_id' => $this->userId(),
         ];
