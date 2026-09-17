@@ -56,4 +56,9 @@ class PurchaseOrder extends Model
     {
         return $this->hasMany(PurchaseOrderItem::class);
     }
+
+    public function variances(): HasMany
+    {
+        return $this->hasMany(PoReceiptVariance::class);
+    }
 }

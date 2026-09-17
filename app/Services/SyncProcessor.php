@@ -26,6 +26,7 @@ use App\Models\LoyaltyTransaction;
 use App\Models\MilestoneTask;
 use App\Models\Payment;
 use App\Models\PoAuditLog;
+use App\Models\PoReceiptVariance;
 use App\Models\ProcurementBudget;
 use App\Models\Product;
 use App\Models\ProductContainerLink;
@@ -151,6 +152,7 @@ class SyncProcessor
         'purchase_order_items' => [PurchaseOrderItem::class, 'purchase_order_id'],
         'stock_take_items' => [StockTakeItem::class, 'stock_take_id'],
         'po_audit_logs' => [PoAuditLog::class, 'po_id'],
+        'po_receipt_variances' => [PoReceiptVariance::class, 'purchase_order_id'],
         'quotation_items' => [QuotationItem::class, 'quotation_id'],
         'invoice_items' => [InvoiceItem::class, 'invoice_id'],
         'invoice_payments' => [InvoicePayment::class, 'invoice_id'],
@@ -283,7 +285,7 @@ class SyncProcessor
             'product_container_links' => Product::where('id', $parentId)->value('business_id'),
             'transaction_items', 'transaction_taxes', 'payments' => Transaction::where('id', $parentId)->value('business_id'),
             'loyalty_transactions', 'credit_transactions' => Customer::where('id', $parentId)->value('business_id'),
-            'purchase_order_items', 'po_audit_logs' => PurchaseOrder::where('id', $parentId)->value('business_id'),
+            'purchase_order_items', 'po_audit_logs', 'po_receipt_variances' => PurchaseOrder::where('id', $parentId)->value('business_id'),
             'stock_take_items' => StockTake::where('id', $parentId)->value('business_id'),
             'quotation_items' => Quotation::where('id', $parentId)->value('business_id'),
             'invoice_items', 'invoice_payments' => Invoice::where('id', $parentId)->value('business_id'),
@@ -1299,6 +1301,29 @@ class SyncProcessor
                 }
                 break;
 
+            case 'po_receipt_variances':
+                // Keyed by (purchase_order_id, product_id) on the till, so the
+                // same uuid is re-sent (upsert) as later receiving sessions
+                // change the variance, and deleted outright once it reconciles
+                // — see receive_stock_screen.dart's _upsertVariance.
+                PoReceiptVariance::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'purchase_order_id' => $payload['purchase_order_id'] ?? null,
+                        'purchase_order_item_id' => $payload['purchase_order_item_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'product_name' => $payload['product_name'] ?? '',
+                        'ordered_qty' => $payload['ordered_qty'] ?? 0,
+                        'received_qty' => $payload['received_qty'] ?? 0,
+                        'rejected_qty' => $payload['rejected_qty'] ?? 0,
+                        'variance_qty' => $payload['variance_qty'] ?? 0,
+                        'status' => $payload['status'] ?? 'short',
+                        'rejection_reason' => $payload['rejection_reason'] ?? null,
+                    ]
+                );
+                break;
+
             case 'coupons':
                 // Non-numeric fields: safe to overwrite.
                 // uses_count: take the MAX of what's on the server vs what's incoming
@@ -2285,6 +2310,7 @@ class SyncProcessor
             'product_price_tiers' => ProductPriceTier::class,
             'procurement_budgets' => ProcurementBudget::class,
             'milestone_tasks' => MilestoneTask::class,
+            'po_receipt_variances' => PoReceiptVariance::class,
         ];
 
         $softDeleteIsActive = ['locations', 'categories', 'units_of_measure', 'tax_rates', 'products', 'product_variants', 'suppliers', 'coupons', 'tills'];

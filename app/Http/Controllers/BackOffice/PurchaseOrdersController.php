@@ -102,10 +102,25 @@ class PurchaseOrdersController extends BackOfficeController
                 ];
             });
 
+        // Short/over/unordered/rejected lines from receiving against this PO
+        // — see PoReceiptVariance's migration doc comment. Independent of the
+        // GRV/GL pipeline above, so it's populated even when accounting isn't
+        // live for this business yet.
+        $variances = $order->variances()->orderBy('product_name')->get()->map(fn (\App\Models\PoReceiptVariance $v) => [
+            'product_name' => $v->product_name,
+            'ordered_qty' => (float) $v->ordered_qty,
+            'received_qty' => (float) $v->received_qty,
+            'rejected_qty' => (float) $v->rejected_qty,
+            'variance_qty' => (float) $v->variance_qty,
+            'status' => $v->status,
+            'rejection_reason' => $v->rejection_reason,
+        ]);
+
         return Inertia::render('BackOffice/PurchaseOrderShow', [
             'order' => $order,
             'audit' => $audit,
             'grvs' => $grvs,
+            'variances' => $variances,
         ]);
     }
 
