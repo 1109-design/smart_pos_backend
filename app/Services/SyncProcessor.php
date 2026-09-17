@@ -3192,7 +3192,7 @@ class SyncProcessor
             $amount = (float) $payment->base_equivalent;
             if (str_contains($method, 'cash')) {
                 $cashSales += $amount;
-            } elseif (str_contains($method, 'card')) {
+            } elseif (str_contains($method, 'card') || str_contains($method, 'swipe')) {
                 $cardSales += $amount;
             } elseif (str_contains($method, 'mobile') || str_contains($method, 'ecocash')
                 || str_contains($method, 'm-pesa') || str_contains($method, 'mpesa')) {
