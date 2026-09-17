@@ -2,18 +2,22 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\MissingParentRecordException;
 use App\Http\Controllers\Controller;
 use App\Models\Device;
+use App\Models\PendingSyncRecord;
 use App\Models\StockOversell;
 use App\Models\SyncConflict;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
+use App\Models\User;
 use App\Services\DeviceResolver;
 use App\Services\SyncProcessor;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class SyncController extends Controller
 {
@@ -42,6 +46,7 @@ class SyncController extends Controller
         $conflicts = [];
         $autoResolved = [];
         $errors = [];
+        $deferred = [];
 
         foreach ($this->groupPushRecords($data['records']) as $groupRecords) {
             // Version-conflict detection runs first and is recorded independently
@@ -65,6 +70,33 @@ class SyncController extends Controller
                     ->where('record_uuid', $record['uuid'])
                     ->latest('synced_at')
                     ->first();
+
+                // Tombstone precedence: once a delete for this uuid has been
+                // recorded, no later-arriving edit may resurrect it —
+                // regardless of what timestamp the edit claims. Client clocks
+                // aren't trusted for this: an offline device's edit can
+                // easily carry a timestamp that *looks* newer than a delete
+                // that actually happened after it on another device (see the
+                // sync audit's clock-skew section). Deletes/voids are a
+                // Category-C conflict — always routed to a human, never
+                // silently applied OR silently discarded either direction.
+                if ($existing?->operation === 'delete' && $record['operation'] !== 'delete') {
+                    $conflict = $this->recordConflict(
+                        $device,
+                        $record,
+                        'This record was deleted on another device; the incoming edit was not applied automatically and requires manual review.',
+                        'edit_after_delete',
+                        $existing->payload
+                    );
+
+                    $conflicts[] = [
+                        'id' => $conflict->id,
+                        'table' => $record['table'],
+                        'uuid' => $record['uuid'],
+                    ];
+
+                    continue;
+                }
 
                 $existingVersion = $existing?->source_updated_at ?? $existing?->synced_at;
                 if ($existingVersion && $existingVersion->gt($incomingUpdatedAt)) {
@@ -234,6 +266,33 @@ class SyncController extends Controller
                 });
 
                 $accepted = [...$accepted, ...$acceptedInGroup];
+            } catch (MissingParentRecordException $e) {
+                // The parent this group depends on hasn't arrived on the
+                // server yet — a genuine out-of-order push, not a rejection.
+                // Queue the whole group (it was one atomic unit) rather than
+                // failing it, so it can be replayed automatically the moment
+                // its dependency lands (see resolvePendingRecords()), without
+                // requiring the client to notice the failure and retry.
+                foreach ($recordsToProcess as $item) {
+                    $pending = PendingSyncRecord::create([
+                        'business_id' => $device?->tenant_id,
+                        'device_id' => $device?->id,
+                        'acting_user_id' => $actingUser?->id,
+                        'table_name' => $item['record']['table'],
+                        'record_uuid' => $item['record']['uuid'],
+                        'operation' => $item['record']['operation'],
+                        'payload' => $item['record']['payload'] ?? [],
+                        'source_updated_at' => $item['incomingUpdatedAt'],
+                        'last_error' => $e->getMessage(),
+                        'last_attempt_at' => now(),
+                    ]);
+                    $deferred[] = [
+                        'id' => $pending->id,
+                        'table' => $item['record']['table'],
+                        'uuid' => $item['record']['uuid'],
+                        'reason' => $e->getMessage(),
+                    ];
+                }
             } catch (\Throwable $e) {
                 foreach ($recordsToProcess as $item) {
                     $conflict = $this->recordConflict(
@@ -256,12 +315,107 @@ class SyncController extends Controller
             $device->update(['last_seen_at' => now()]);
         }
 
+        // A dependency this business's pending records were waiting on may
+        // have just landed above (in this very push, or an earlier one) —
+        // give them a chance to apply now, so a device that later retries a
+        // previously-failed push isn't the only path to convergence.
+        $resolvedPending = $this->resolvePendingRecords($device?->tenant_id, $processor);
+
         return response()->json([
             'accepted' => $accepted,
             'conflicts' => $conflicts,
             'auto_resolved' => $autoResolved,
             'errors' => $errors,
+            'deferred' => $deferred,
+            'resolved_pending' => $resolvedPending,
         ]);
+    }
+
+    /**
+     * Replays business's queued pending_sync_records (deferred because their
+     * parent hadn't arrived yet) now that this push may have just created
+     * one. Runs a fixed-point loop — not a single pass — so a chain (e.g. B
+     * depends on A, C depends on B) resolves fully in one call once its root
+     * dependency lands, rather than needing one push per link in the chain.
+     *
+     * @return array<int, array{id:int, table:string, uuid:string}>
+     */
+    private function resolvePendingRecords(?string $businessId, SyncProcessor $processor): array
+    {
+        if ($businessId === null) {
+            return [];
+        }
+
+        $resolved = [];
+        $maxAttempts = 10;
+
+        do {
+            $progressed = false;
+
+            $pending = PendingSyncRecord::where('business_id', $businessId)
+                ->where('failed_permanently', false)
+                ->orderBy('id')
+                ->get();
+
+            foreach ($pending as $row) {
+                $actingUser = $row->acting_user_id
+                    ? User::find($row->acting_user_id)
+                    : null;
+
+                try {
+                    DB::transaction(function () use ($row, $processor, $actingUser) {
+                        $enrichedPayload = array_merge(['business_id' => $row->business_id], $row->payload ?? []);
+
+                        $processor->process(
+                            $row->table_name,
+                            $row->record_uuid,
+                            $row->operation,
+                            $enrichedPayload,
+                            trusted: false,
+                            actingUser: $actingUser,
+                        );
+
+                        SyncRecord::create([
+                            'business_id' => $row->business_id,
+                            'table_name' => $row->table_name,
+                            'record_uuid' => $row->record_uuid,
+                            'operation' => $row->operation,
+                            'payload' => $row->payload ?? [],
+                            'source_updated_at' => $row->source_updated_at ?? now(),
+                            'synced_at' => now(),
+                            'device_id' => $row->device_id,
+                        ]);
+                    });
+
+                    $resolved[] = [
+                        'id' => $row->id,
+                        'table' => $row->table_name,
+                        'uuid' => $row->record_uuid,
+                    ];
+                    $row->delete();
+                    $progressed = true;
+                } catch (\Throwable $e) {
+                    $attempts = $row->attempts + 1;
+                    $row->update([
+                        'attempts' => $attempts,
+                        'last_error' => $e->getMessage(),
+                        'last_attempt_at' => now(),
+                        'failed_permanently' => $attempts >= $maxAttempts,
+                    ]);
+
+                    if ($attempts >= $maxAttempts) {
+                        Log::warning('pending_sync_record permanently failed', [
+                            'id' => $row->id,
+                            'table' => $row->table_name,
+                            'uuid' => $row->record_uuid,
+                            'reason' => $e->getMessage(),
+                        ]);
+                    }
+                }
+            }
+        } while ($progressed);
+
+        return $resolved;
     }
 
     /** Server → Flutter POS: send changes since device's last pull */

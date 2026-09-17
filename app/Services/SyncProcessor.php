@@ -2879,6 +2879,19 @@ class SyncProcessor
      */
     protected function recomputeProductStock(string $productId): void
     {
+        // Lock the product row for the lifetime of this recompute — without
+        // it, two concurrent pushes recomputing the same product (e.g. two
+        // stock_movements landing in overlapping transactions) can each read
+        // the ledger sum, then both write, with the second write's SUM()
+        // already stale relative to the first's own insert. The recompute is
+        // idempotent/self-healing either way (a later recompute always
+        // re-derives from the full ledger), so this closes a narrow
+        // transient-staleness window rather than a correctness bug — see the
+        // sync audit's stock-concurrency gap. No-op on drivers without row
+        // locking (e.g. sqlite in tests), same as the rest of this codebase's
+        // lockForUpdate() usage.
+        Product::where('id', $productId)->lockForUpdate()->first();
+
         $computed = StockMovement::where('product_id', $productId)->sum('quantity_change');
         $updated = Product::where('id', $productId)
             ->whereExists(function ($q) use ($productId) {
@@ -2905,6 +2918,12 @@ class SyncProcessor
      */
     protected function recomputeLocationStock(string $productId, string $locationId): void
     {
+        // Same rationale as recomputeProductStock()'s lock above — locked on
+        // the parent product row since a not-yet-existing product_stock row
+        // (first movement for this product+location) has nothing to lock on
+        // yet.
+        Product::where('id', $productId)->lockForUpdate()->first();
+
         $computed = (float) DB::table('stock_movements')
             ->where('product_id', $productId)
             ->where('location_id', $locationId)
