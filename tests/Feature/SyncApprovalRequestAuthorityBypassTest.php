@@ -13,6 +13,7 @@ use App\Services\Accounting\ChartOfAccountsSeeder;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use App\Services\ApprovalService;
 use App\Services\BusinessProvisioner;
+use Database\Seeders\DefaultApprovalRulesSeeder;
 use Database\Seeders\RolesAndPermissionsSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
@@ -147,6 +148,12 @@ class SyncApprovalRequestAuthorityBypassTest extends TestCase
             'admin_name' => 'Ada Owner',
             'admin_pin' => '4321',
         ]);
+
+        // Central Approval Stage Engine: a process with zero configured
+        // stages is ungated by design (see BusinessProvisioner), so
+        // provisioning alone no longer implies PO approval is required —
+        // seed it explicitly to keep testing the authority check itself.
+        DefaultApprovalRulesSeeder::seedForBusiness($tenant->id);
 
         $requester = User::factory()->create(['business_id' => $tenant->id, 'email' => Str::random(8).'@x.com']);
         $supplier = Supplier::create(['id' => (string) Str::uuid(), 'business_id' => $tenant->id, 'name' => 'Acme Supplies']);

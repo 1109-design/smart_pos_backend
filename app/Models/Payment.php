@@ -14,7 +14,7 @@ class Payment extends Model
     protected $fillable = [
         'id', 'transaction_id', 'method', 'amount', 'currency_code',
         'exchange_rate_used', 'base_equivalent', 'change_given', 'reference',
-        'rounding_adjustment', 'bank_account_id',
+        'rounding_adjustment', 'bank_account_id', 'pop_attachment_path',
     ];
 
     protected function casts(): array

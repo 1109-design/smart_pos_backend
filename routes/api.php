@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\StockResetController;
 use App\Http\Controllers\Api\StockTransferController;
 use App\Http\Controllers\Api\SubscriptionController;
 use App\Http\Controllers\Api\SyncController;
+use App\Http\Controllers\Api\SyncHealthController;
 use App\Http\Controllers\Api\TillController;
 use App\Http\Controllers\Api\WebhookController;
 use Illuminate\Support\Facades\Route;
@@ -31,6 +32,8 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::get('sync/status', [SyncController::class, 'status']);
     Route::get('sync/conflicts', [SyncController::class, 'conflicts']);
     Route::post('sync/conflicts/{id}/resolve', [SyncController::class, 'resolveConflict']);
+    Route::get('sync/oversells', [SyncController::class, 'oversells']);
+    Route::get('sync/health', [SyncHealthController::class, 'index']);
 
     // Back Office access — portal details + owner/manager password set/reset
     Route::get('backoffice/info', [BackOfficeAccessController::class, 'info']);

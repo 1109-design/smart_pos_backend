@@ -73,6 +73,10 @@ class OpeningBalanceService
             $notes ?? 'Customer opening balance',
         );
 
+        if (! $header->canEdit()) {
+            return; // lost a race against a concurrent call — same no-op as the alreadyPosted() check above
+        }
+
         $this->journals->addLine($header, [
             'gl_account_id' => $receivable->id,
             'debit' => max(0, $amount),
@@ -129,6 +133,12 @@ class OpeningBalanceService
             $supplierId,
             $notes ?? 'Supplier opening balance',
         );
+
+        if (! $header->canEdit()) {
+            // Lost a race against a concurrent call — same thrown error the
+            // alreadyPosted() pre-check above would have given.
+            throw new RuntimeException('An opening balance has already been recorded for this supplier.');
+        }
 
         $this->journals->addLine($header, [
             'gl_account_id' => $equity->id,

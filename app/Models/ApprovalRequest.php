@@ -33,7 +33,11 @@ class ApprovalRequest extends Model
         static::created($dispatch);
 
         static::updated(function (ApprovalRequest $request) use ($dispatch): void {
-            if (! $request->wasChanged('status')) {
+            // current_level changes on its own when a stage advances but the
+            // request stays 'pending' overall — that transition still needs
+            // to notify whoever's now up next, so it can't be gated on
+            // wasChanged('status') alone.
+            if (! $request->wasChanged('status') && ! $request->wasChanged('current_level')) {
                 return;
             }
 

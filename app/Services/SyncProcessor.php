@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Exceptions\MissingParentRecordException;
 use App\Models\Accounting\AccountingPeriod;
 use App\Models\Accounting\AccountSubCategory;
 use App\Models\Accounting\GeneralLedgerEntry;
@@ -10,7 +11,10 @@ use App\Models\Accounting\JournalHeader;
 use App\Models\Accounting\JournalLine;
 use App\Models\AccountRoleMapping;
 use App\Models\ApprovalDelegation;
+use App\Models\ApprovalGroup;
+use App\Models\ApprovalGroupMember;
 use App\Models\ApprovalRequest;
+use App\Models\ApprovalRequestStageDecision;
 use App\Models\ApprovalRule;
 use App\Models\ApprovalRuleSet;
 use App\Models\Asset;
@@ -66,6 +70,7 @@ use App\Models\SheetLossRecord;
 use App\Models\SheetLot;
 use App\Models\Shift;
 use App\Models\StockMovement;
+use App\Models\StockOversell;
 use App\Models\StockTake;
 use App\Models\StockTakeItem;
 use App\Models\StockTransfer;
@@ -131,6 +136,9 @@ class SyncProcessor
         // An asset is disposed (status: disposed), never deleted — see
         // AssetPostingService::recordDisposal().
         'assets',
+        // Central Approval Stage Engine's append-only audit trail — a
+        // decision, once recorded, is never removed.
+        'approval_request_stage_decisions',
     ];
 
     // Tables with their own business_id column, guarded in assertOwnership().
@@ -185,6 +193,9 @@ class SyncProcessor
         'approval_rule_sets' => ApprovalRuleSet::class,
         'approval_rules' => ApprovalRule::class,
         'approval_delegations' => ApprovalDelegation::class,
+        'approval_groups' => ApprovalGroup::class,
+        'approval_group_members' => ApprovalGroupMember::class,
+        'approval_request_stage_decisions' => ApprovalRequestStageDecision::class,
         // Chart of accounts is normally seeded and managed server-side only
         // (see sync_service.dart's `_pullOnlyTables` doc comment) — these two
         // become bidirectional for exactly one narrow case: a bank account
@@ -330,7 +341,16 @@ class SyncProcessor
         $incomingParentId = $payload[$fkColumn] ?? null;
         if ($incomingParentId) {
             $targetOwner = $this->resolveParentOwner($table, $incomingParentId);
-            if ($targetOwner === null || (string) $targetOwner !== (string) $businessId) {
+            if ($targetOwner === null) {
+                // Distinguished from the ownership-mismatch case below: the
+                // parent simply hasn't arrived on the server yet (a real
+                // out-of-order push, not a security violation) — the caller
+                // (SyncController::push) catches this specific type to defer
+                // the record into pending_sync_records instead of rejecting
+                // it outright. See resolvePendingRecords().
+                throw new MissingParentRecordException($table);
+            }
+            if ((string) $targetOwner !== (string) $businessId) {
                 throw new \RuntimeException("{$table}: referenced parent does not belong to this business.");
             }
         }
@@ -596,19 +616,21 @@ class SyncProcessor
                 // (the device's own authenticated identity), never a
                 // payload-claimed approver_user_id, decides who's deciding.
                 if (! $trusted && $currentApprovalStatus === 'pending' && in_array($incomingApprovalStatus, ['approved', 'rejected'], true)) {
-                    $requiredRole = $existingApprovalRequest->rule_set_id
+                    $applicableRule = $existingApprovalRequest->rule_set_id
                         ? app(ApprovalRuleEngine::class)->findApplicableRule(
                             ApprovalRuleSet::find($existingApprovalRequest->rule_set_id),
                             ['amount' => (float) ($existingApprovalRequest->estimated_value ?? 0)],
                             $existingApprovalRequest->current_level ?? 1,
-                        )?->required_role
+                        )
                         : null;
 
-                    if (! $actingUser || ! app(ApprovalRuleEngine::class)->canApprove($existingApprovalRequest->business_id, $actingUser->id, $existingApprovalRequest, $requiredRole)) {
+                    if (! $actingUser || ! app(ApprovalRuleEngine::class)->canApprove($existingApprovalRequest->business_id, $actingUser->id, $existingApprovalRequest, $applicableRule)) {
                         throw new \RuntimeException(
-                            $requiredRole
-                                ? "approval_requests: deciding this request requires {$requiredRole} authority or higher."
-                                : 'approval_requests: you cannot approve or reject your own request.'
+                            match (true) {
+                                $applicableRule?->approval_group_id !== null => 'approval_requests: deciding this stage requires a member of the assigned approver group.',
+                                $applicableRule?->required_role !== null => "approval_requests: deciding this request requires {$applicableRule->required_role} authority or higher.",
+                                default => 'approval_requests: you cannot approve or reject your own request.',
+                            }
                         );
                     }
                 }
@@ -890,13 +912,6 @@ class SyncProcessor
                         'email' => $preserve('email'),
                         'tax_number' => $payload['vat_number'] ?? $payload['tax_number'] ?? $existingBusiness?->tax_number,
                         'tin' => $preserve('tin'),
-                        // Passed through verbatim, opaque to the backend —
-                        // only Flutter's BankAccount.decodeList() gives this
-                        // string meaning. Already JSON-encoded by the device
-                        // (businessSyncPayload()), so no array cast on the
-                        // model — one would double-encode an already-string
-                        // value on every write.
-                        'bank_accounts_json' => $preserve('bank_accounts_json'),
                         'currency_code' => $payload['base_currency_code'] ?? $existingBusiness?->currency_code ?? 'USD',
                         // logo_path/primary_color/letterhead_path/footer_path are
                         // deliberately absent here: they're owned by the
@@ -1344,6 +1359,7 @@ class SyncProcessor
                         'reference' => $payload['reference'] ?? null,
                         'rounding_adjustment' => $payload['rounding_adjustment'] ?? 0,
                         'bank_account_id' => $payload['bank_account_id'] ?? null,
+                        'pop_attachment_path' => $payload['pop_attachment_path'] ?? null,
                     ]
                 );
 
@@ -2447,6 +2463,7 @@ class SyncProcessor
                         'gl_account_id' => $incomingBankAccountGlId,
                         'is_active' => $payload['is_active'] ?? true,
                         'accepts_card_swipe' => $payload['accepts_card_swipe'] ?? true,
+                        'show_on_documents' => $payload['show_on_documents'] ?? true,
                     ]
                 );
                 break;
@@ -2691,10 +2708,82 @@ class SyncProcessor
                         'business_id' => $payload['business_id'] ?? null,
                         'delegator_user_id' => $delegatorUserId,
                         'delegate_user_id' => $payload['delegate_user_id'] ?? null,
+                        // Scopes this delegation to one process/stage — null
+                        // on either means "every process"/"every level" for
+                        // this delegator, kept for the handful of pre-v76
+                        // rows created before the self-service screen existed.
+                        'process' => $payload['process'] ?? null,
+                        'level' => $payload['level'] ?? null,
                         'reason' => $payload['reason'] ?? null,
                         'starts_at' => $payload['starts_at'] ?? null,
                         'ends_at' => $payload['ends_at'] ?? null,
                         'is_active' => $payload['is_active'] ?? true,
+                    ]
+                );
+                break;
+
+            case 'approval_groups':
+                // Same fraud class as 'approval_rule_sets' above — a group's
+                // membership (via approval_group_members below) IS who can
+                // clear a stage, so creating/renaming a group is owner-only.
+                if (! $trusted && ! ($actingUser?->hasRole('business_owner') ?? false)) {
+                    throw new \RuntimeException('approval_groups: only the business owner can manage approver groups.');
+                }
+
+                ApprovalGroup::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'name' => $payload['name'] ?? '',
+                        'description' => $payload['description'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'approval_group_members':
+                // Adding/removing a named member IS granting/revoking that
+                // person's authority to clear whatever stages the group is
+                // assigned to — owner-only, same as the group itself.
+                if (! $trusted && ! ($actingUser?->hasRole('business_owner') ?? false)) {
+                    throw new \RuntimeException('approval_group_members: only the business owner can manage approver group membership.');
+                }
+
+                ApprovalGroupMember::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'group_id' => $payload['group_id'] ?? null,
+                        'user_id' => $payload['user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'approval_request_stage_decisions':
+                // Append-only audit trail — never mutated once written, and
+                // the device pushing it must be reporting its own action
+                // (acted_by_user_id), never fabricating a decision on behalf
+                // of someone else. The authority check for the decision
+                // itself already happened in the 'approval_requests' case
+                // above (both are pushed in the same sync batch); this case
+                // only guards against forging *who* made it.
+                $actedByUserId = $payload['acted_by_user_id'] ?? null;
+                if (! $trusted && $actingUser?->id !== $actedByUserId) {
+                    throw new \RuntimeException('approval_request_stage_decisions: you may only record a decision as yourself.');
+                }
+
+                ApprovalRequestStageDecision::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'approval_request_id' => $payload['approval_request_id'] ?? null,
+                        'level' => $payload['level'] ?? 1,
+                        'decision' => $payload['decision'] ?? '',
+                        'acted_by_user_id' => $actedByUserId,
+                        'acted_as_delegate_for_user_id' => $payload['acted_as_delegate_for_user_id'] ?? null,
+                        'reason' => $payload['reason'] ?? null,
+                        'sla_breached' => $payload['sla_breached'] ?? false,
+                        'same_approver_as_prior_stage' => $payload['same_approver_as_prior_stage'] ?? false,
+                        'acted_at' => $payload['acted_at'] ?? now()->toIso8601String(),
                     ]
                 );
                 break;
@@ -2805,6 +2894,7 @@ class SyncProcessor
             $product = Product::find($productId);
             if ($product) {
                 $this->emitBroadcastSyncRecord('products', $product->id, $product->business_id, $this->productSyncPayload($product));
+                $this->recordOversellIfNegative($product->business_id, $productId, null, (float) $computed);
             }
         }
     }
@@ -2842,7 +2932,54 @@ class SyncProcessor
                 'price_override' => $stock->price_override !== null ? (float) $stock->price_override : null,
                 'updated_at' => $stock->updated_at?->toIso8601String(),
             ]);
+            $this->recordOversellIfNegative($product->business_id, $productId, $locationId, $computed);
         }
+    }
+
+    /**
+     * A movement-ledger recompute that sums below zero means two (or more)
+     * devices oversold this product while offline — the stored/broadcast
+     * quantity is still clamped to 0 by the callers above (so no device ever
+     * displays or transacts against a negative number), but the shortfall
+     * itself must not vanish silently. Flags it in stock_oversells for
+     * manager review instead. Idempotent per open shortfall: a second
+     * negative recompute against the same still-unresolved row updates it
+     * in place rather than piling up duplicate rows for the same incident.
+     */
+    private function recordOversellIfNegative(?string $businessId, string $productId, ?string $locationId, float $computed): void
+    {
+        if ($computed >= 0 || ! $businessId) {
+            return;
+        }
+
+        // Keyed on (business, product) only, not location — a single sale
+        // spanning a location-aware movement fires BOTH recomputeLocationStock
+        // and recomputeProductStock for the same underlying shortfall, and
+        // those must collapse to one open incident, not two.
+        $existing = StockOversell::where('business_id', $businessId)
+            ->where('product_id', $productId)
+            ->whereNull('resolved_at')
+            ->first();
+
+        if ($existing) {
+            $existing->update([
+                'location_id' => $existing->location_id ?? $locationId,
+                'computed_quantity' => $computed,
+                'shortfall' => abs($computed),
+                'detected_at' => now(),
+            ]);
+
+            return;
+        }
+
+        StockOversell::create([
+            'business_id' => $businessId,
+            'product_id' => $productId,
+            'location_id' => $locationId,
+            'computed_quantity' => $computed,
+            'shortfall' => abs($computed),
+            'detected_at' => now(),
+        ]);
     }
 
     /**
@@ -3291,6 +3428,11 @@ class SyncProcessor
             'product_price_tiers' => ProductPriceTier::class,
             'procurement_budgets' => ProcurementBudget::class,
             'milestone_tasks' => MilestoneTask::class,
+            'approval_rule_sets' => ApprovalRuleSet::class,
+            'approval_rules' => ApprovalRule::class,
+            'approval_groups' => ApprovalGroup::class,
+            'approval_group_members' => ApprovalGroupMember::class,
+            'approval_delegations' => ApprovalDelegation::class,
         ];
 
         $softDeleteIsActive = ['locations', 'categories', 'units_of_measure', 'tax_rates', 'products', 'product_variants', 'suppliers', 'coupons', 'tills'];

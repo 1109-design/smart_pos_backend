@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Device;
+use App\Models\StockOversell;
 use App\Models\SyncConflict;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
@@ -67,6 +68,63 @@ class SyncController extends Controller
 
                 $existingVersion = $existing?->source_updated_at ?? $existing?->synced_at;
                 if ($existingVersion && $existingVersion->gt($incomingUpdatedAt)) {
+                    $merged = $this->attemptFieldLevelMerge($record, $existing);
+
+                    if ($merged !== null) {
+                        try {
+                            DB::transaction(function () use ($record, $device, $actingUser, $processor, $merged, $incomingUpdatedAt) {
+                                $enrichedMerge = array_merge([
+                                    'business_id' => $device?->tenant_id,
+                                ], $merged);
+                                if ($device?->tenant_id) {
+                                    $enrichedMerge['business_id'] = $device->tenant_id;
+                                }
+
+                                $processor->process($record['table'], $record['uuid'], 'upsert', $enrichedMerge, trusted: false, actingUser: $actingUser);
+
+                                SyncRecord::create([
+                                    'business_id' => $device?->tenant_id,
+                                    'table_name' => $record['table'],
+                                    'record_uuid' => $record['uuid'],
+                                    'operation' => 'upsert',
+                                    'payload' => $merged,
+                                    'source_updated_at' => $incomingUpdatedAt,
+                                    'synced_at' => now(),
+                                    'device_id' => $device?->id,
+                                ]);
+                            });
+
+                            $conflict = $this->recordConflict(
+                                $device,
+                                $record,
+                                'Disjoint field-level changes merged automatically (fields: '.implode(', ', $record['payload']['_dirty_fields'] ?? []).' vs. '.implode(', ', $existing?->payload['_dirty_fields'] ?? []).').',
+                                'version_conflict',
+                                $existing?->payload
+                            );
+                            $conflict->update([
+                                'status' => 'resolved',
+                                'resolution_action' => 'merged',
+                                'resolved_at' => now(),
+                            ]);
+
+                            $autoResolved[] = [
+                                'id' => $conflict->id,
+                                'table' => $record['table'],
+                                'uuid' => $record['uuid'],
+                            ];
+                        } catch (\Throwable $e) {
+                            $conflict = $this->recordConflict($device, $record, $e->getMessage(), 'processing_error');
+                            $errors[] = [
+                                'id' => $conflict->id,
+                                'table' => $record['table'],
+                                'uuid' => $record['uuid'],
+                                'reason' => $e->getMessage(),
+                            ];
+                        }
+
+                        continue;
+                    }
+
                     $autoResolve = $this->autoResolvesVersionConflict($record['table']);
 
                     $conflict = $this->recordConflict(
@@ -354,6 +412,36 @@ class SyncController extends Controller
         ]);
     }
 
+    /**
+     * Unresolved stock shortfalls detected when a movement-ledger recompute
+     * (SyncProcessor::recomputeProductStock/recomputeLocationStock) summed
+     * below zero — i.e. two or more devices oversold the same product while
+     * offline. Read-only visibility for now; resolving one (adjusting stock,
+     * cancelling a sale, or accepting the negative) is a manual DB/BackOffice
+     * action until a dedicated resolution workflow exists.
+     */
+    public function oversells(Request $request): JsonResponse
+    {
+        $device = $this->deviceResolver->fromRequest($request);
+        $status = $request->query('status', 'unresolved');
+        $limit = max(1, min(200, (int) $request->query('limit', 100)));
+
+        $query = StockOversell::query()
+            ->when($device?->tenant_id, fn ($q, $tenantId) => $q->where('business_id', $tenantId))
+            ->orderByDesc('detected_at')
+            ->limit($limit);
+
+        if ($status === 'unresolved') {
+            $query->whereNull('resolved_at');
+        } elseif ($status === 'resolved') {
+            $query->whereNotNull('resolved_at');
+        }
+
+        return response()->json([
+            'oversells' => $query->get(),
+        ]);
+    }
+
     public function conflicts(Request $request): JsonResponse
     {
         $device = $this->deviceResolver->fromRequest($request);
@@ -485,6 +573,94 @@ class SyncController extends Controller
     private function autoResolvesVersionConflict(string $table): bool
     {
         return in_array($table, self::AUTO_RESOLVE_VERSION_CONFLICT_TABLES, true);
+    }
+
+    /**
+     * Tables where a version conflict MAY be auto-merged at the field level
+     * instead of colliding as a whole-record conflict, when both the losing
+     * push and the server's winning push can prove which fields they
+     * actually intended to change (see attemptFieldLevelMerge()).
+     *
+     * Deliberately excludes every financial/stock/approval/void table per
+     * the sync audit's conflict classification — those must never be
+     * silently auto-merged even if the fields look disjoint.
+     *
+     * @var list<string>
+     */
+    private const FIELD_LEVEL_MERGE_TABLES = ['customers'];
+
+    /**
+     * Attempts a safe field-level merge of a losing (older) push against the
+     * server's current winning version, returning the merged payload to
+     * apply, or null if a merge cannot be safely proven.
+     *
+     * Why this needs an explicit `_dirty_fields` marker rather than diffing
+     * the two payloads directly: every domain-table push from the Flutter
+     * client today is a full-row snapshot built from whatever the device
+     * last had cached locally (see e.g. customer_form.dart), not a partial
+     * patch of only the fields the user actually edited. Two payloads can
+     * therefore differ on a field neither side "intended" to change —
+     * simply because one device's local cache was stale relative to the
+     * other's — and a blind diff would misidentify that as a real edit,
+     * either wrongly blocking a safe merge or, worse, wrongly applying one.
+     * `_dirty_fields` is an optional array the client can send alongside the
+     * full snapshot naming exactly which fields the user touched in this
+     * edit; only when BOTH the incoming push and the server's currently
+     * recorded winning push carry that marker do we have a real basis for
+     * "these two edits touched disjoint fields." No current Flutter code
+     * sends `_dirty_fields` yet, so this path is inert (always returns
+     * null, falling through to today's whole-record conflict behavior)
+     * until the client is updated to track and send it — see the sync
+     * audit's gap report for the specific Flutter-side follow-up.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function attemptFieldLevelMerge(array $record, ?SyncRecord $existing): ?array
+    {
+        if (! in_array($record['table'], self::FIELD_LEVEL_MERGE_TABLES, true)) {
+            return null;
+        }
+
+        if ($existing === null) {
+            return null;
+        }
+
+        $incomingDirty = $record['payload']['_dirty_fields'] ?? null;
+        $serverDirty = $existing->payload['_dirty_fields'] ?? null;
+
+        if (! is_array($incomingDirty) || empty($incomingDirty)
+            || ! is_array($serverDirty) || empty($serverDirty)) {
+            // Either side is a legacy/untracked full snapshot — we cannot
+            // prove which fields it actually intended to change, so we
+            // cannot safely tell "disjoint edit" apart from "stale copy".
+            return null;
+        }
+
+        $incomingDirty = array_values(array_unique($incomingDirty));
+        $serverDirty = array_values(array_unique($serverDirty));
+
+        if (array_intersect($incomingDirty, $serverDirty) !== []) {
+            // Same field changed on both sides — a real conflict, not a
+            // safe merge. Fall through to the existing manual/auto-resolve
+            // path unchanged.
+            return null;
+        }
+
+        // Server's current payload is the base (it already reflects the
+        // winning push's own dirty fields); overlay only the fields the
+        // losing push explicitly marked as its own intentional edits.
+        $merged = $existing->payload ?? [];
+        foreach ($incomingDirty as $field) {
+            if (array_key_exists($field, $record['payload'])) {
+                $merged[$field] = $record['payload'][$field];
+            }
+        }
+
+        // Union the dirty-field markers so a THIRD conflicting push can
+        // still correctly tell which fields are already spoken for.
+        $merged['_dirty_fields'] = array_values(array_unique([...$incomingDirty, ...$serverDirty]));
+
+        return $merged;
     }
 
     private function resolveIncomingUpdatedAt(array $record)

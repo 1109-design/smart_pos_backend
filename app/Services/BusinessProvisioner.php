@@ -5,7 +5,6 @@ namespace App\Services;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Services\Accounting\ChartOfAccountsSeeder;
-use Database\Seeders\DefaultApprovalRulesSeeder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
@@ -72,15 +71,16 @@ class BusinessProvisioner
 
                 (new ChartOfAccountsSeeder)->seedForBusiness($tenant->id);
 
-                // Enterprise approval-rule-engine audit follow-up:
-                // DefaultApprovalRulesSeeder::seedForBusiness() existed with
-                // no caller anywhere in the app, so no business — new or
-                // existing — ever actually got a configured approval rule
-                // set. Wired in alongside the chart of accounts, the same
-                // per-business bootstrap step it belongs next to. Existing
-                // businesses provisioned before this landed still have none;
-                // that's a separate backfill, not this constructor's job.
-                DefaultApprovalRulesSeeder::seedForBusiness($tenant->id);
+                // Central Approval Stage Engine: intentionally NOT calling
+                // DefaultApprovalRulesSeeder::seedForBusiness() here anymore.
+                // A process with zero configured ApprovalRule rows is meant
+                // to behave as if approval doesn't exist for it — no PIN
+                // prompt, no gate — until the owner opts in via the till's
+                // approval-config screen and assigns named approver groups
+                // to stages. Auto-seeding role-based rules here would leave
+                // every new business silently gated on processes nobody
+                // configured. DefaultApprovalRulesSeeder itself is left in
+                // place for manual/test use, just no longer auto-invoked.
             } finally {
                 tenancy()->end();
             }

@@ -3,6 +3,8 @@
 namespace Tests\Feature\Enterprise;
 
 use App\Models\ApprovalDelegation;
+use App\Models\ApprovalGroup;
+use App\Models\ApprovalGroupMember;
 use App\Models\ApprovalRequest;
 use App\Models\ApprovalRule;
 use App\Models\ApprovalRuleSet;
@@ -178,6 +180,17 @@ class ApprovalRuleEngineTest extends TestCase
         $this->assertTrue($this->engine->checkSeparationOfDuties($request, 'user-1'));
     }
 
+    private function roleRule(string $businessId, string $requiredRole, int $level = 1): ApprovalRule
+    {
+        return ApprovalRule::forceCreate([
+            'id' => Str::uuid(),
+            'business_id' => $businessId,
+            'rule_set_id' => Str::uuid(), // dummy — no matching ApprovalRuleSet needed for these unit checks
+            'level' => $level,
+            'required_role' => $requiredRole,
+        ]);
+    }
+
     public function test_can_approve_checks_role_hierarchy()
     {
         $businessId = Str::uuid()->toString();
@@ -199,8 +212,8 @@ class ApprovalRuleEngineTest extends TestCase
             'status' => 'pending',
         ]);
 
-        $this->assertTrue($this->engine->canApprove($businessId, $user->id, $request, 'sales_supervisor'));
-        $this->assertTrue($this->engine->canApprove($businessId, $user->id, $request, 'finance_manager'));
+        $this->assertTrue($this->engine->canApprove($businessId, $user->id, $request, $this->roleRule($businessId, 'sales_supervisor')));
+        $this->assertTrue($this->engine->canApprove($businessId, $user->id, $request, $this->roleRule($businessId, 'finance_manager')));
     }
 
     public function test_can_approve_blocks_lower_role()
@@ -224,7 +237,7 @@ class ApprovalRuleEngineTest extends TestCase
             'status' => 'pending',
         ]);
 
-        $this->assertFalse($this->engine->canApprove($businessId, $user->id, $request, 'branch_manager'));
+        $this->assertFalse($this->engine->canApprove($businessId, $user->id, $request, $this->roleRule($businessId, 'branch_manager')));
     }
 
     public function test_can_approve_with_active_delegation()
@@ -264,7 +277,7 @@ class ApprovalRuleEngineTest extends TestCase
             'status' => 'pending',
         ]);
 
-        $this->assertTrue($this->engine->canApprove($businessId, $cashier->id, $request, 'branch_manager'));
+        $this->assertTrue($this->engine->canApprove($businessId, $cashier->id, $request, $this->roleRule($businessId, 'branch_manager')));
     }
 
     public function test_can_approve_blocks_expired_delegation()
@@ -305,7 +318,7 @@ class ApprovalRuleEngineTest extends TestCase
             'status' => 'pending',
         ]);
 
-        $this->assertFalse($this->engine->canApprove($businessId, $cashier->id, $request, 'branch_manager'));
+        $this->assertFalse($this->engine->canApprove($businessId, $cashier->id, $request, $this->roleRule($businessId, 'branch_manager')));
     }
 
     public function test_can_approve_blocks_self_even_with_right_role()
@@ -329,6 +342,91 @@ class ApprovalRuleEngineTest extends TestCase
             'status' => 'pending',
         ]);
 
-        $this->assertFalse($this->engine->canApprove($businessId, $manager->id, $request, 'sales_supervisor'));
+        $this->assertFalse($this->engine->canApprove($businessId, $manager->id, $request, $this->roleRule($businessId, 'sales_supervisor')));
+    }
+
+    public function test_can_approve_checks_group_membership()
+    {
+        $businessId = Str::uuid()->toString();
+        $groupId = (string) Str::uuid();
+
+        $member = User::factory()->create(['business_id' => $businessId]);
+        $nonMember = User::factory()->create(['business_id' => $businessId]);
+
+        ApprovalGroup::forceCreate(['id' => $groupId, 'business_id' => $businessId, 'name' => 'Regional Managers']);
+        ApprovalGroupMember::forceCreate(['id' => Str::uuid(), 'business_id' => $businessId, 'group_id' => $groupId, 'user_id' => $member->id]);
+
+        $rule = ApprovalRule::forceCreate([
+            'id' => Str::uuid(),
+            'business_id' => $businessId,
+            'rule_set_id' => Str::uuid(),
+            'level' => 1,
+            'approval_group_id' => $groupId,
+        ]);
+
+        $request = ApprovalRequest::forceCreate([
+            'id' => Str::uuid(),
+            'business_id' => $businessId,
+            'subject_type' => 'test',
+            'subject_id' => 'test',
+            'action' => 'test',
+            'requested_by_user_id' => Str::uuid(),
+            'status' => 'pending',
+        ]);
+
+        $this->assertTrue($this->engine->canApprove($businessId, $member->id, $request, $rule));
+        $this->assertFalse($this->engine->canApprove($businessId, $nonMember->id, $request, $rule));
+    }
+
+    public function test_can_approve_via_delegation_into_a_group()
+    {
+        $businessId = Str::uuid()->toString();
+        $groupId = (string) Str::uuid();
+
+        $groupMember = User::factory()->create(['business_id' => $businessId]);
+        $delegate = User::factory()->create(['business_id' => $businessId]);
+
+        ApprovalGroup::forceCreate(['id' => $groupId, 'business_id' => $businessId, 'name' => 'Regional Managers']);
+        ApprovalGroupMember::forceCreate(['id' => Str::uuid(), 'business_id' => $businessId, 'group_id' => $groupId, 'user_id' => $groupMember->id]);
+
+        ApprovalDelegation::forceCreate([
+            'id' => Str::uuid(),
+            'business_id' => $businessId,
+            'delegator_user_id' => $groupMember->id,
+            'delegate_user_id' => $delegate->id,
+            'process' => 'refund',
+            'level' => 1,
+            'starts_at' => now()->subDay(),
+            'ends_at' => now()->addDay(),
+            'is_active' => true,
+        ]);
+
+        $ruleSet = ApprovalRuleSet::forceCreate([
+            'id' => Str::uuid(),
+            'business_id' => $businessId,
+            'process' => 'refund',
+            'name' => 'Refund',
+        ]);
+        $rule = ApprovalRule::forceCreate([
+            'id' => Str::uuid(),
+            'business_id' => $businessId,
+            'rule_set_id' => $ruleSet->id,
+            'level' => 1,
+            'approval_group_id' => $groupId,
+        ]);
+
+        $request = ApprovalRequest::forceCreate([
+            'id' => Str::uuid(),
+            'business_id' => $businessId,
+            'subject_type' => 'test',
+            'subject_id' => 'test',
+            'action' => 'refund',
+            'requested_by_user_id' => Str::uuid(),
+            'status' => 'pending',
+        ]);
+
+        $this->assertTrue($this->engine->canApprove($businessId, $delegate->id, $request, $rule));
+        $this->assertSame($groupMember->id, $this->engine->resolveDelegationSource($businessId, $delegate->id, $rule));
+        $this->assertNull($this->engine->resolveDelegationSource($businessId, $groupMember->id, $rule));
     }
 }
