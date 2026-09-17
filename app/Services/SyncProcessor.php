@@ -85,6 +85,7 @@ use App\Models\User;
 use App\Models\WarehouseBin;
 use App\Services\Accounting\AssetPostingService;
 use App\Services\Accounting\CreditPaymentPostingService;
+use App\Services\Accounting\ExpensePostingService;
 use App\Services\Accounting\GrvPostingService;
 use App\Services\Accounting\InvoicePaymentPostingService;
 use App\Services\Accounting\OpeningBalanceService;
@@ -1787,7 +1788,7 @@ class SyncProcessor
                     );
                 }
 
-                Expense::updateOrCreate(
+                $expense = Expense::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'business_id' => $payload['business_id'] ?? null,
@@ -1802,12 +1803,15 @@ class SyncProcessor
                         'payment_method' => $payload['payment_method'] ?? 'cash',
                         'mobile_provider' => $payload['mobile_provider'] ?? null,
                         'payment_reference' => $payload['payment_reference'] ?? null,
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
                         'receipt_path' => $payload['receipt_path'] ?? null,
                         'notes' => $payload['notes'] ?? null,
                         'expense_date' => $payload['expense_date'] ?? now(),
                         'deleted_at' => $payload['deleted_at'] ?? null,
                     ]
                 );
+
+                app(ExpensePostingService::class)->postIfReady($expense);
                 break;
 
             case 'stock_takes':

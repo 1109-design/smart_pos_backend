@@ -24,7 +24,7 @@ interface Props {
 const fmt = (n: number) => n.toFixed(2);
 const today = () => new Date().toISOString().slice(0, 10);
 
-type Tab = 'drop' | 'deposit' | 'count';
+type Tab = 'drop' | 'deposit' | 'withdraw' | 'count';
 
 export default function BackOfficeCashVault({ balance, activity, bankAccounts }: Props) {
     const [tab, setTab] = useState<Tab>('drop');
@@ -56,7 +56,7 @@ export default function BackOfficeCashVault({ balance, activity, bankAccounts }:
 
                     <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
                         <div className="flex border-b border-slate-100">
-                            {(['drop', 'deposit', 'count'] as Tab[]).map((t) => (
+                            {(['drop', 'deposit', 'withdraw', 'count'] as Tab[]).map((t) => (
                                 <button
                                     key={t}
                                     onClick={() => setTab(t)}
@@ -64,7 +64,7 @@ export default function BackOfficeCashVault({ balance, activity, bankAccounts }:
                                         tab === t ? 'text-emerald-700 border-b-2 border-emerald-600' : 'text-slate-400'
                                     }`}
                                 >
-                                    {t === 'drop' ? 'Till drop' : t === 'deposit' ? 'Bank deposit' : 'Count'}
+                                    {t === 'drop' ? 'Till drop' : t === 'deposit' ? 'Bank deposit' : t === 'withdraw' ? 'Bank withdrawal' : 'Count'}
                                 </button>
                             ))}
                         </div>
@@ -75,6 +75,14 @@ export default function BackOfficeCashVault({ balance, activity, bankAccounts }:
                                     action="/office/cash-vault/deposit"
                                     cta="Record Deposit"
                                     helper="The safe was emptied and banked."
+                                    bankAccounts={bankAccounts}
+                                />
+                            )}
+                            {tab === 'withdraw' && (
+                                <MoveForm
+                                    action="/office/cash-vault/withdraw"
+                                    cta="Record Withdrawal"
+                                    helper="Cash was withdrawn from the bank into the safe."
                                     bankAccounts={bankAccounts}
                                 />
                             )}

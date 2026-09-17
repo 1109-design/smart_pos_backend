@@ -143,6 +143,7 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::get('cash-vault', [BackOfficeCashVault::class, 'index'])->name('cash-vault.index');
         Route::post('cash-vault/drop', [BackOfficeCashVault::class, 'drop'])->name('cash-vault.drop');
         Route::post('cash-vault/deposit', [BackOfficeCashVault::class, 'deposit'])->name('cash-vault.deposit');
+        Route::post('cash-vault/withdraw', [BackOfficeCashVault::class, 'withdraw'])->name('cash-vault.withdraw');
         Route::post('cash-vault/count', [BackOfficeCashVault::class, 'count'])->name('cash-vault.count');
         Route::get('bank-accounts', [BackOfficeBankAccounts::class, 'index'])->name('bank-accounts.index');
         Route::post('bank-accounts', [BackOfficeBankAccounts::class, 'store'])->name('bank-accounts.store');

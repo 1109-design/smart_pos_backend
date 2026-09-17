@@ -79,6 +79,23 @@ class CashVaultService
     }
 
     /**
+     * The exact mirror of recordBankDeposit() — cash physically withdrawn
+     * from the bank into the vault/till. Posts Dr Cash Vault / Cr Bank.
+     */
+    public function recordBankWithdrawal(string $businessId, float $amount, string $date, ?string $note, ?string $userId, ?string $bankAccountId = null): void
+    {
+        $this->assertLive($businessId);
+
+        $vault = $this->vaultAccount($businessId);
+        $bank = $this->resolveBankAccount($bankAccountId, $this->requireAccount($businessId, '1010', 'Bank'));
+
+        $header = $this->journals->createDraft($businessId, $date, 'cash_vault_withdrawal', null, $note ?: 'Bank withdrawal to vault');
+        $this->journals->addLine($header, ['gl_account_id' => $vault->id, 'debit' => $amount]);
+        $this->journals->addLine($header, ['gl_account_id' => $bank->id, 'credit' => $amount]);
+        $this->journals->post($header, $userId);
+    }
+
+    /**
      * When a specific bank account was chosen for the deposit, post against
      * that account's own GL line instead of the single generic Bank (1010)
      * account — see BankAccountService. Falls back to $default when no bank

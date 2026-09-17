@@ -94,6 +94,20 @@ class BackOfficeCashVaultTest extends TestCase
         $this->assertSame(200.0, $this->account($tenantId, '1010')->balance());
     }
 
+    public function test_recording_a_withdrawal_moves_bank_funds_to_the_vault(): void
+    {
+        $tenantId = 'tenant-vault-7';
+        $this->actingBackOfficeSession($tenantId);
+        $this->fundCash($tenantId, 500);
+        $this->post('/office/cash-vault/drop', ['amount' => 300, 'date' => '2026-06-05']);
+        $this->post('/office/cash-vault/deposit', ['amount' => 250, 'date' => '2026-06-06']);
+
+        $this->post('/office/cash-vault/withdraw', ['amount' => 100, 'date' => '2026-06-07'])->assertRedirect();
+
+        $this->assertSame(150.0, $this->account($tenantId, '1010')->balance());
+        $this->assertSame(150.0, $this->account($tenantId, '1005')->balance());
+    }
+
     public function test_recording_a_count_with_a_shortfall_posts_a_variance(): void
     {
         $tenantId = 'tenant-vault-4';

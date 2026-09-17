@@ -12,7 +12,7 @@ class Expense extends Model
     protected $fillable = [
         'id', 'business_id', 'recorded_by_user_id', 'project_id', 'category', 'description',
         'amount', 'currency_code', 'base_equivalent', 'exchange_rate',
-        'payment_method', 'mobile_provider', 'payment_reference',
+        'payment_method', 'mobile_provider', 'payment_reference', 'bank_account_id',
         'receipt_path', 'notes', 'expense_date', 'deleted_at',
     ];
 
