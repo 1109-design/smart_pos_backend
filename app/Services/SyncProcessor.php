@@ -2442,6 +2442,7 @@ class SyncProcessor
                         'currency_code' => $payload['currency_code'] ?? 'USD',
                         'gl_account_id' => $incomingBankAccountGlId,
                         'is_active' => $payload['is_active'] ?? true,
+                        'accepts_card_swipe' => $payload['accepts_card_swipe'] ?? true,
                     ]
                 );
                 break;

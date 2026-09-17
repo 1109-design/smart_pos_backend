@@ -164,6 +164,59 @@ class SyncBankAccountEscalationGuardTest extends TestCase
         $this->assertCount(1, $response->json('accepted'));
     }
 
+    public function test_syncing_accepts_card_swipe_persists_it(): void
+    {
+        $tenantId = 'tenant-bank-swipe';
+        Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);
+
+        $account = $this->makeGlAccount($tenantId, '1000');
+        $cashier = User::factory()->create(['business_id' => $tenantId, 'email' => $tenantId.'-cashier@example.com']);
+        $cashier->assignRole('cashier');
+        $token = $this->actingDeviceToken($tenantId, $cashier);
+
+        $bankAccountId = (string) Str::uuid();
+        $response = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'bank_accounts',
+                    'uuid' => $bankAccountId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'name' => 'EFT-only Account',
+                        'currency_code' => 'USD',
+                        'gl_account_id' => $account->id,
+                        'is_active' => true,
+                        'accepts_card_swipe' => false,
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ]);
+
+        $response->assertOk();
+        $this->assertCount(1, $response->json('accepted'));
+        $this->assertFalse(BankAccount::find($bankAccountId)->accepts_card_swipe);
+    }
+
+    public function test_bank_account_without_the_field_defaults_to_accepting_swipe(): void
+    {
+        $tenantId = 'tenant-bank-swipe-default';
+        Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);
+
+        $account = $this->makeGlAccount($tenantId, '1000');
+        $cashier = User::factory()->create(['business_id' => $tenantId, 'email' => $tenantId.'-cashier@example.com']);
+        $cashier->assignRole('cashier');
+        $token = $this->actingDeviceToken($tenantId, $cashier);
+
+        $bankAccountId = (string) Str::uuid();
+        // No `accepts_card_swipe` key at all — mirrors a pre-upgrade client.
+        $response = $this->pushBankAccount($token, $tenantId, $bankAccountId, $account->id);
+
+        $response->assertOk();
+        $this->assertCount(1, $response->json('accepted'));
+        $this->assertTrue(BankAccount::find($bankAccountId)->accepts_card_swipe);
+    }
+
     public function test_a_trusted_server_side_write_is_not_gated(): void
     {
         $tenantId = 'tenant-bank-trusted';

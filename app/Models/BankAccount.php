@@ -13,13 +13,14 @@ class BankAccount extends Model
 
     protected $fillable = [
         'id', 'business_id', 'name', 'account_number', 'branch',
-        'currency_code', 'gl_account_id', 'is_active',
+        'currency_code', 'gl_account_id', 'is_active', 'accepts_card_swipe',
     ];
 
     protected function casts(): array
     {
         return [
             'is_active' => 'boolean',
+            'accepts_card_swipe' => 'boolean',
         ];
     }
 
