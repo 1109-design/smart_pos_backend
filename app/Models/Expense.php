@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Events\ExpenseChanged;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 
@@ -15,6 +16,20 @@ class Expense extends Model
         'payment_method', 'mobile_provider', 'payment_reference', 'bank_account_id',
         'receipt_path', 'notes', 'expense_date', 'deleted_at',
     ];
+
+    protected static function booted(): void
+    {
+        $dispatch = function (Expense $expense): void {
+            if (! $expense->business_id) {
+                return;
+            }
+
+            ExpenseChanged::dispatch($expense->business_id, $expense->id);
+        };
+
+        static::created($dispatch);
+        static::updated($dispatch);
+    }
 
     protected function casts(): array
     {

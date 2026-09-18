@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Events\QuotationChanged;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -18,6 +19,20 @@ class Quotation extends Model
         'sent_at', 'accepted_at', 'rejected_at',
         'currency_code', 'exchange_rate',
     ];
+
+    protected static function booted(): void
+    {
+        $dispatch = function (Quotation $quotation): void {
+            if (! $quotation->business_id) {
+                return;
+            }
+
+            QuotationChanged::dispatch($quotation->business_id, $quotation->location_id, $quotation->id);
+        };
+
+        static::created($dispatch);
+        static::updated($dispatch);
+    }
 
     protected function casts(): array
     {

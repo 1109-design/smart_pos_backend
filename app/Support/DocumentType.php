@@ -23,6 +23,15 @@ class DocumentType
 
     const DELIVERY_NOTE = 'delivery_note';
 
+    // AP module — see the Flutter DocumentType enum's identical additions.
+    const SUPPLIER_INVOICE = 'supplier_invoice';
+
+    const SUPPLIER_CREDIT_NOTE = 'supplier_credit_note';
+
+    const PAYMENT_VOUCHER = 'payment_voucher';
+
+    const SUPPLIER_STATEMENT = 'supplier_statement';
+
     /** @return list<string> */
     public static function all(): array
     {
@@ -33,6 +42,10 @@ class DocumentType
             self::REQUISITION,
             self::GRV,
             self::DELIVERY_NOTE,
+            self::SUPPLIER_INVOICE,
+            self::SUPPLIER_CREDIT_NOTE,
+            self::PAYMENT_VOUCHER,
+            self::SUPPLIER_STATEMENT,
         ];
     }
 

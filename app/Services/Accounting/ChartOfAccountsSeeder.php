@@ -174,6 +174,8 @@ class ChartOfAccountsSeeder
                     ['code' => '1010', 'name' => 'Bank', 'must_be_positive' => true],
                     ['code' => '1020', 'name' => 'Mobile Money Clearing'],
                     ['code' => '1100', 'name' => 'Accounts Receivable', 'control_type' => 'receivable'],
+                    // AP module — recoverable input tax on supplier invoices.
+                    ['code' => '1150', 'name' => 'Input VAT'],
                     ['code' => '1200', 'name' => 'Inventory', 'control_type' => 'inventory'],
                 ]],
                 ['name' => 'Fixed Assets', 'accounts' => [
@@ -188,6 +190,9 @@ class ChartOfAccountsSeeder
                 ['name' => 'Current Liabilities', 'accounts' => [
                     ['code' => '2000', 'name' => 'Accounts Payable', 'control_type' => 'payable'],
                     ['code' => '2010', 'name' => 'GRN Suspense'],
+                    // AP module — tax withheld from a supplier payment,
+                    // owed to the tax authority rather than the supplier.
+                    ['code' => '2015', 'name' => 'Withholding Tax Payable'],
                     ['code' => '2020', 'name' => 'Deposits Held'],
                     ['code' => '2030', 'name' => 'Tax Payable'],
                 ]],
@@ -202,6 +207,9 @@ class ChartOfAccountsSeeder
                 ['name' => "Shareholders' Equity", 'accounts' => [
                     ['code' => '3000', 'name' => "Owner's Capital"],
                     ['code' => '3010', 'name' => 'Retained Earnings'],
+                    // AP/AR take-on — the offsetting entry for an opening
+                    // balance imported from a business's pre-SmartPOS books.
+                    ['code' => '3020', 'name' => 'Opening Balance Equity'],
                 ]],
             ],
         ],
@@ -213,6 +221,9 @@ class ChartOfAccountsSeeder
                 ]],
                 ['name' => 'Other Income', 'accounts' => [
                     ['code' => '4010', 'name' => 'Other Income'],
+                    // AP module — early-settlement/volume discounts a
+                    // supplier grants that reduce the invoice's cost.
+                    ['code' => '4015', 'name' => 'Discount Received'],
                     ['code' => '4020', 'name' => 'FX Gain'],
                 ]],
             ],
@@ -232,6 +243,9 @@ class ChartOfAccountsSeeder
                 ['name' => 'Operating Expenses', 'accounts' => [
                     ['code' => '6000', 'name' => 'Rent'],
                     ['code' => '6010', 'name' => 'Transport'],
+                    // AP module — carriage/freight charged on a supplier
+                    // invoice, kept distinct from general 'Transport'.
+                    ['code' => '6015', 'name' => 'Freight & Carriage Inwards'],
                     ['code' => '6020', 'name' => 'Wages'],
                     ['code' => '6030', 'name' => 'Utilities'],
                     ['code' => '6040', 'name' => 'Bank Charges'],

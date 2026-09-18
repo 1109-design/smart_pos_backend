@@ -17,6 +17,9 @@ use App\Models\ApprovalRequest;
 use App\Models\ApprovalRequestStageDecision;
 use App\Models\ApprovalRule;
 use App\Models\ApprovalRuleSet;
+use App\Models\ArCollectionActivity;
+use App\Models\ArDispute;
+use App\Models\ArPromiseToPay;
 use App\Models\Asset;
 use App\Models\BankAccount;
 use App\Models\BankReconciliation;
@@ -32,10 +35,22 @@ use App\Models\CreditNoteItem;
 use App\Models\CreditTransaction;
 use App\Models\Currency;
 use App\Models\Customer;
+use App\Models\CustomerAdjustment;
+use App\Models\CustomerDebitNote;
+use App\Models\CustomerDebitNoteItem;
+use App\Models\CustomerReceipt;
+use App\Models\CustomerReceiptAllocation;
+use App\Models\CustomerReconciliation;
+use App\Models\CustomerReconciliationItem;
+use App\Models\CustomerWriteOff;
+use App\Models\DeliveryNote;
+use App\Models\DeliveryNoteItem;
 use App\Models\DocumentBrandingSetting;
 use App\Models\Employee;
 use App\Models\ExchangeRate;
 use App\Models\Expense;
+use App\Models\GoodsReceivedVoucher;
+use App\Models\GrvItem;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
 use App\Models\InvoicePayment;
@@ -65,6 +80,8 @@ use App\Models\Requisition;
 use App\Models\RequisitionItem;
 use App\Models\RolePermission;
 use App\Models\SalaryPayment;
+use App\Models\SalesOrder;
+use App\Models\SalesOrderItem;
 use App\Models\SheetCut;
 use App\Models\SheetLossRecord;
 use App\Models\SheetLot;
@@ -76,7 +93,15 @@ use App\Models\StockTakeItem;
 use App\Models\StockTransfer;
 use App\Models\StockTransferItem;
 use App\Models\Supplier;
+use App\Models\SupplierBank;
+use App\Models\SupplierCreditNote;
+use App\Models\SupplierCreditNoteLine;
+use App\Models\SupplierInvoice;
+use App\Models\SupplierInvoiceLine;
 use App\Models\SupplierPayment;
+use App\Models\SupplierPaymentAllocation;
+use App\Models\SupplierReconciliation;
+use App\Models\SupplierReconciliationItem;
 use App\Models\SyncRecord;
 use App\Models\TaxRate;
 use App\Models\Till;
@@ -139,6 +164,23 @@ class SyncProcessor
         // Central Approval Stage Engine's append-only audit trail — a
         // decision, once recorded, is never removed.
         'approval_request_stage_decisions',
+        // AP module — a receiving document, once posted (Dr Inventory / Cr
+        // GRN Suspense), is corrected by a later adjustment, never deleted.
+        'goods_received_vouchers', 'grv_items',
+        // AP module — a supplier invoice's own LINES are immutable once
+        // created, matching 'credit_note_items' above; the invoice header
+        // itself stays mutable while status is still 'draft' (see the
+        // 'supplier_invoices' upsert case's own status-transition guard).
+        'supplier_invoice_lines',
+        // AP module — which invoice(s) a payment was applied to is a
+        // financial fact, corrected by a new offsetting allocation, never
+        // an edit or delete — same reasoning as 'supplier_payments' itself.
+        'supplier_payment_allocations',
+        'supplier_credit_note_lines',
+        // AP module — a reconciliation session's own line items are a
+        // frozen snapshot of what was found at that point in time, never
+        // edited after the fact (matches 'credit_note_items' above).
+        'supplier_reconciliation_items',
     ];
 
     // Tables with their own business_id column, guarded in assertOwnership().
@@ -205,6 +247,25 @@ class SyncProcessor
         // (here) for the two mirrored provisioning paths.
         'account_sub_categories' => AccountSubCategory::class,
         'gl_accounts' => GlAccount::class,
+        // AP module.
+        'goods_received_vouchers' => GoodsReceivedVoucher::class,
+        'supplier_invoices' => SupplierInvoice::class,
+        'supplier_credit_notes' => SupplierCreditNote::class,
+        'supplier_payment_allocations' => SupplierPaymentAllocation::class,
+        'supplier_reconciliations' => SupplierReconciliation::class,
+        'supplier_banks' => SupplierBank::class,
+        // AR module.
+        'sales_orders' => SalesOrder::class,
+        'delivery_notes' => DeliveryNote::class,
+        'customer_receipts' => CustomerReceipt::class,
+        'customer_receipt_allocations' => CustomerReceiptAllocation::class,
+        'customer_debit_notes' => CustomerDebitNote::class,
+        'customer_adjustments' => CustomerAdjustment::class,
+        'customer_write_offs' => CustomerWriteOff::class,
+        'ar_collection_activities' => ArCollectionActivity::class,
+        'ar_promises_to_pay' => ArPromiseToPay::class,
+        'ar_disputes' => ArDispute::class,
+        'customer_reconciliations' => CustomerReconciliation::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -236,6 +297,16 @@ class SyncProcessor
         'project_milestones' => [ProjectMilestone::class, 'project_id'],
         'milestone_tasks' => [MilestoneTask::class, 'milestone_id'],
         'journal_lines' => [JournalLine::class, 'journal_header_id'],
+        // AP module.
+        'grv_items' => [GrvItem::class, 'grv_id'],
+        'supplier_invoice_lines' => [SupplierInvoiceLine::class, 'supplier_invoice_id'],
+        'supplier_credit_note_lines' => [SupplierCreditNoteLine::class, 'supplier_credit_note_id'],
+        'supplier_reconciliation_items' => [SupplierReconciliationItem::class, 'reconciliation_id'],
+        // AR module.
+        'sales_order_items' => [SalesOrderItem::class, 'sales_order_id'],
+        'delivery_note_items' => [DeliveryNoteItem::class, 'delivery_note_id'],
+        'customer_debit_note_items' => [CustomerDebitNoteItem::class, 'customer_debit_note_id'],
+        'customer_reconciliation_items' => [CustomerReconciliationItem::class, 'customer_reconciliation_id'],
     ];
 
     // Deliberately unguarded, and why:
@@ -382,6 +453,16 @@ class SyncProcessor
                 ->where('project_milestones.id', $parentId)
                 ->value('projects.business_id'),
             'journal_lines' => JournalHeader::where('id', $parentId)->value('business_id'),
+            // AP module.
+            'grv_items' => GoodsReceivedVoucher::where('id', $parentId)->value('business_id'),
+            'supplier_invoice_lines' => SupplierInvoice::where('id', $parentId)->value('business_id'),
+            'supplier_credit_note_lines' => SupplierCreditNote::where('id', $parentId)->value('business_id'),
+            'supplier_reconciliation_items' => SupplierReconciliation::where('id', $parentId)->value('business_id'),
+            // AR module.
+            'sales_order_items' => SalesOrder::where('id', $parentId)->value('business_id'),
+            'delivery_note_items' => DeliveryNote::where('id', $parentId)->value('business_id'),
+            'customer_debit_note_items' => CustomerDebitNote::where('id', $parentId)->value('business_id'),
+            'customer_reconciliation_items' => CustomerReconciliation::where('id', $parentId)->value('business_id'),
             default => null,
         };
     }
@@ -1567,6 +1648,559 @@ class SyncProcessor
                         'notes' => $payload['notes'] ?? null,
                         'tax_number' => $payload['tax_number'] ?? null,
                         'is_active' => $payload['is_active'] ?? true,
+                        // AP module.
+                        'supplier_code' => $payload['supplier_code'] ?? null,
+                        'trading_name' => $payload['trading_name'] ?? null,
+                        'currency_code' => $payload['currency_code'] ?? null,
+                        'payment_terms_days' => $payload['payment_terms_days'] ?? 30,
+                        'credit_limit' => $payload['credit_limit'] ?? null,
+                        'category' => $payload['category'] ?? null,
+                        'tax_status' => $payload['tax_status'] ?? 'standard',
+                        'bank_name' => $payload['bank_name'] ?? null,
+                        'bank_account_number' => $payload['bank_account_number'] ?? null,
+                        'bank_branch' => $payload['bank_branch'] ?? null,
+                        'control_account_id' => $payload['control_account_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'goods_received_vouchers':
+                // Flutter-first port — see this table's IMMUTABLE doc
+                // comment. Laravel's own stock_movement-driven creation
+                // (GrvPostingService.php) backs off once a business is cut
+                // over to client posting, so this and that path never race
+                // for the same business.
+                GoodsReceivedVoucher::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'grv_number' => $payload['grv_number'] ?? '',
+                        'purchase_order_id' => $payload['purchase_order_id'] ?? null,
+                        'supplier_id' => $payload['supplier_id'] ?? null,
+                        'received_date' => $payload['received_date'] ?? now()->toDateString(),
+                    ]
+                );
+                break;
+
+            case 'grv_items':
+                GrvItem::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'grv_id' => $payload['grv_id'] ?? null,
+                        'stock_movement_id' => $payload['stock_movement_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'product_name' => $payload['product_name'] ?? '',
+                        'quantity_received' => $payload['quantity_received'] ?? 0,
+                        'quantity_accepted' => $payload['quantity_accepted'] ?? 0,
+                        'quantity_rejected' => $payload['quantity_rejected'] ?? 0,
+                        'rejection_reason' => $payload['rejection_reason'] ?? null,
+                        'unit_cost' => $payload['unit_cost'] ?? 0,
+                    ]
+                );
+                break;
+
+            case 'supplier_invoices':
+                // Same fraud class as 'supplier_payments'/'assets' above — a
+                // fabricated or prematurely-'posted' supplier invoice raises
+                // a real Dr Inventory-or-Expense / Cr Accounts Payable
+                // liability the instant it posts.
+                if (! $trusted && ! ($actingUser?->hasRole(['business_owner', 'manager']) ?? false)) {
+                    throw new \RuntimeException('supplier_invoices: recording a supplier invoice requires owner or manager access.');
+                }
+
+                SupplierInvoice::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'supplier_id' => $payload['supplier_id'] ?? null,
+                        'purchase_order_id' => $payload['purchase_order_id'] ?? null,
+                        'invoice_number' => $payload['invoice_number'] ?? '',
+                        'invoice_date' => $payload['invoice_date'] ?? now()->toDateString(),
+                        'due_date' => $payload['due_date'] ?? null,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'exchange_rate' => $payload['exchange_rate'] ?? 1,
+                        'subtotal' => $payload['subtotal'] ?? 0,
+                        'discount_total' => $payload['discount_total'] ?? 0,
+                        'tax_total' => $payload['tax_total'] ?? 0,
+                        'withholding_tax_total' => $payload['withholding_tax_total'] ?? 0,
+                        'other_charges_total' => $payload['other_charges_total'] ?? 0,
+                        // 'amount' is this table's pre-existing total column
+                        // (see the 2026_09_06 migration) — Flutter's own
+                        // SupplierInvoices.total maps onto it rather than
+                        // renaming a column half the codebase still reads.
+                        'amount' => $payload['total'] ?? 0,
+                        'status' => $payload['status'] ?? 'draft',
+                        'match_status' => $payload['match_status'] ?? 'not_applicable',
+                        'description' => $payload['description'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                        'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
+                        'approved_at' => $payload['approved_at'] ?? null,
+                        'posted_at' => $payload['posted_at'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'supplier_invoice_lines':
+                SupplierInvoiceLine::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'supplier_invoice_id' => $payload['supplier_invoice_id'] ?? null,
+                        'purchase_order_item_id' => $payload['purchase_order_item_id'] ?? null,
+                        'grv_item_id' => $payload['grv_item_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'description' => $payload['description'] ?? '',
+                        'quantity' => $payload['quantity'] ?? 1,
+                        'unit_cost' => $payload['unit_cost'] ?? 0,
+                        'discount_pct' => $payload['discount_pct'] ?? 0,
+                        'tax_rate_id' => $payload['tax_rate_id'] ?? null,
+                        'gl_account_id' => $payload['gl_account_id'] ?? null,
+                        'line_total' => $payload['line_total'] ?? 0,
+                    ]
+                );
+                break;
+
+            case 'supplier_payment_allocations':
+                if (! $trusted && ! ($actingUser?->hasRole(['business_owner', 'manager']) ?? false)) {
+                    throw new \RuntimeException('supplier_payment_allocations: allocating a payment requires owner or manager access.');
+                }
+
+                SupplierPaymentAllocation::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'supplier_payment_id' => $payload['supplier_payment_id'] ?? null,
+                        'supplier_invoice_id' => $payload['supplier_invoice_id'] ?? null,
+                        'amount' => $payload['amount'] ?? 0,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'supplier_credit_notes':
+                if (! $trusted && ! ($actingUser?->hasRole(['business_owner', 'manager']) ?? false)) {
+                    throw new \RuntimeException('supplier_credit_notes: recording a credit/debit note requires owner or manager access.');
+                }
+
+                SupplierCreditNote::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'supplier_id' => $payload['supplier_id'] ?? null,
+                        'supplier_invoice_id' => $payload['supplier_invoice_id'] ?? null,
+                        'note_number' => $payload['note_number'] ?? '',
+                        'note_type' => $payload['note_type'] ?? 'credit',
+                        'note_date' => $payload['note_date'] ?? now()->toDateString(),
+                        'reason' => $payload['reason'] ?? null,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'exchange_rate' => $payload['exchange_rate'] ?? 1,
+                        'subtotal' => $payload['subtotal'] ?? 0,
+                        'tax_total' => $payload['tax_total'] ?? 0,
+                        'total' => $payload['total'] ?? 0,
+                        'status' => $payload['status'] ?? 'draft',
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'supplier_credit_note_lines':
+                SupplierCreditNoteLine::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'supplier_credit_note_id' => $payload['supplier_credit_note_id'] ?? null,
+                        'supplier_invoice_line_id' => $payload['supplier_invoice_line_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'description' => $payload['description'] ?? '',
+                        'quantity' => $payload['quantity'] ?? 1,
+                        'unit_cost' => $payload['unit_cost'] ?? 0,
+                        'gl_account_id' => $payload['gl_account_id'] ?? null,
+                        'line_total' => $payload['line_total'] ?? 0,
+                    ]
+                );
+                break;
+
+                // AR module.
+            case 'sales_orders':
+                SalesOrder::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'order_number' => $payload['order_number'] ?? '',
+                        'quotation_id' => $payload['quotation_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'sales_person_id' => $payload['sales_person_id'] ?? null,
+                        'order_date' => $payload['order_date'] ?? now()->toDateString(),
+                        'expected_delivery_date' => $payload['expected_delivery_date'] ?? null,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'exchange_rate' => $payload['exchange_rate'] ?? 1,
+                        'subtotal' => $payload['subtotal'] ?? 0,
+                        'discount_total' => $payload['discount_total'] ?? 0,
+                        'tax_total' => $payload['tax_total'] ?? 0,
+                        'total' => $payload['total'] ?? 0,
+                        'deposit_required' => $payload['deposit_required'] ?? 0,
+                        'deposit_paid' => $payload['deposit_paid'] ?? 0,
+                        'status' => $payload['status'] ?? 'draft',
+                        'delivery_status' => $payload['delivery_status'] ?? 'pending',
+                        'invoicing_status' => $payload['invoicing_status'] ?? 'pending',
+                        'terms_and_conditions' => $payload['terms_and_conditions'] ?? null,
+                        'notes' => $payload['notes'] ?? null,
+                        'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
+                        'approved_at' => $payload['approved_at'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'sales_order_items':
+                SalesOrderItem::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'sales_order_id' => $payload['sales_order_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'description' => $payload['description'] ?? '',
+                        'ordered_quantity' => $payload['ordered_quantity'] ?? 1,
+                        'delivered_quantity' => $payload['delivered_quantity'] ?? 0,
+                        'invoiced_quantity' => $payload['invoiced_quantity'] ?? 0,
+                        'unit_price' => $payload['unit_price'] ?? 0,
+                        'discount_pct' => $payload['discount_pct'] ?? 0,
+                        'tax_rate_id' => $payload['tax_rate_id'] ?? null,
+                        'tax_amount' => $payload['tax_amount'] ?? 0,
+                        'line_total' => $payload['line_total'] ?? 0,
+                        'notes' => $payload['notes'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'delivery_notes':
+                DeliveryNote::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'delivery_number' => $payload['delivery_number'] ?? '',
+                        'sales_order_id' => $payload['sales_order_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'delivery_date' => $payload['delivery_date'] ?? now()->toDateString(),
+                        'status' => $payload['status'] ?? 'pending',
+                        'dispatched_by_user_id' => $payload['dispatched_by_user_id'] ?? null,
+                        'received_by_name' => $payload['received_by_name'] ?? null,
+                        'received_by_signature_path' => $payload['received_by_signature_path'] ?? null,
+                        'received_at' => $payload['received_at'] ?? null,
+                        'tracking_reference' => $payload['tracking_reference'] ?? null,
+                        'notes' => $payload['notes'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'delivery_note_items':
+                DeliveryNoteItem::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'delivery_note_id' => $payload['delivery_note_id'] ?? null,
+                        'sales_order_item_id' => $payload['sales_order_item_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'description' => $payload['description'] ?? '',
+                        'dispatched_quantity' => $payload['dispatched_quantity'] ?? 0,
+                        'accepted_quantity' => $payload['accepted_quantity'] ?? 0,
+                        'rejected_quantity' => $payload['rejected_quantity'] ?? 0,
+                        'rejection_reason' => $payload['rejection_reason'] ?? null,
+                        'invoiced_quantity' => $payload['invoiced_quantity'] ?? 0,
+                        'notes' => $payload['notes'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'customer_receipts':
+                CustomerReceipt::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'receipt_number' => $payload['receipt_number'] ?? '',
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'receipt_date' => $payload['receipt_date'] ?? now()->toDateString(),
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'exchange_rate' => $payload['exchange_rate'] ?? 1,
+                        'amount' => $payload['amount'] ?? 0,
+                        'base_amount' => $payload['base_amount'] ?? 0,
+                        'unallocated_amount' => $payload['unallocated_amount'] ?? 0,
+                        'payment_method' => $payload['payment_method'] ?? 'cash',
+                        'bank_account_id' => $payload['bank_account_id'] ?? null,
+                        'reference' => $payload['reference'] ?? null,
+                        'is_advance' => $payload['is_advance'] ?? false,
+                        'notes' => $payload['notes'] ?? null,
+                        'journal_header_id' => $payload['journal_header_id'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                        'sync_status' => $payload['sync_status'] ?? 'synced',
+                    ]
+                );
+                break;
+
+            case 'customer_receipt_allocations':
+                CustomerReceiptAllocation::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'customer_receipt_id' => $payload['customer_receipt_id'] ?? null,
+                        'invoice_id' => $payload['invoice_id'] ?? null,
+                        'allocated_amount' => $payload['allocated_amount'] ?? 0,
+                        'tender_amount' => $payload['tender_amount'] ?? null,
+                        'exchange_rate_used' => $payload['exchange_rate_used'] ?? 1,
+                        'allocated_at' => $payload['allocated_at'] ?? now(),
+                        'allocated_by_user_id' => $payload['allocated_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'customer_debit_notes':
+                CustomerDebitNote::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'invoice_id' => $payload['invoice_id'] ?? null,
+                        'debit_note_number' => $payload['debit_note_number'] ?? '',
+                        'note_date' => $payload['note_date'] ?? now()->toDateString(),
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'exchange_rate' => $payload['exchange_rate'] ?? 1,
+                        'subtotal' => $payload['subtotal'] ?? 0,
+                        'tax_total' => $payload['tax_total'] ?? 0,
+                        'total' => $payload['total'] ?? 0,
+                        'reason' => $payload['reason'] ?? null,
+                        'status' => $payload['status'] ?? 'draft',
+                        'is_gl_posted' => $payload['is_gl_posted'] ?? false,
+                        'journal_header_id' => $payload['journal_header_id'] ?? null,
+                        'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
+                        'approved_at' => $payload['approved_at'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'customer_debit_note_items':
+                CustomerDebitNoteItem::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'customer_debit_note_id' => $payload['customer_debit_note_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'description' => $payload['description'] ?? '',
+                        'quantity' => $payload['quantity'] ?? 1,
+                        'unit_price' => $payload['unit_price'] ?? 0,
+                        'tax_rate_id' => $payload['tax_rate_id'] ?? null,
+                        'tax_amount' => $payload['tax_amount'] ?? 0,
+                        'line_total' => $payload['line_total'] ?? 0,
+                        'notes' => $payload['notes'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'customer_adjustments':
+                CustomerAdjustment::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'adjustment_number' => $payload['adjustment_number'] ?? '',
+                        'adjustment_date' => $payload['adjustment_date'] ?? now()->toDateString(),
+                        'adjustment_type' => $payload['adjustment_type'] ?? 'credit',
+                        'amount' => $payload['amount'] ?? 0,
+                        'reason_code' => $payload['reason_code'] ?? 'other',
+                        'description' => $payload['description'] ?? '',
+                        'reference' => $payload['reference'] ?? null,
+                        'gl_offset_account_id' => $payload['gl_offset_account_id'] ?? null,
+                        'status' => $payload['status'] ?? 'draft',
+                        'is_gl_posted' => $payload['is_gl_posted'] ?? false,
+                        'journal_header_id' => $payload['journal_header_id'] ?? null,
+                        'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
+                        'approved_at' => $payload['approved_at'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'customer_write_offs':
+                CustomerWriteOff::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'write_off_number' => $payload['write_off_number'] ?? '',
+                        'write_off_date' => $payload['write_off_date'] ?? now()->toDateString(),
+                        'amount' => $payload['amount'] ?? 0,
+                        'invoice_id' => $payload['invoice_id'] ?? null,
+                        'reason' => $payload['reason'] ?? 'insolvency',
+                        'status' => $payload['status'] ?? 'pending_approval',
+                        'is_gl_posted' => $payload['is_gl_posted'] ?? false,
+                        'journal_header_id' => $payload['journal_header_id'] ?? null,
+                        'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
+                        'approved_at' => $payload['approved_at'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'ar_collection_activities':
+                ArCollectionActivity::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'activity_type' => $payload['activity_type'] ?? 'phone_call',
+                        'activity_date' => $payload['activity_date'] ?? now(),
+                        'contact_person' => $payload['contact_person'] ?? null,
+                        'phone_or_email' => $payload['phone_or_email'] ?? null,
+                        'notes' => $payload['notes'] ?? '',
+                        'outcome' => $payload['outcome'] ?? null,
+                        'next_action_date' => $payload['next_action_date'] ?? null,
+                        'recorded_by_user_id' => $payload['recorded_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'ar_promises_to_pay':
+                ArPromiseToPay::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'promise_date' => $payload['promise_date'] ?? now()->toDateString(),
+                        'promised_payment_date' => $payload['promised_payment_date'] ?? now()->toDateString(),
+                        'promised_amount' => $payload['promised_amount'] ?? 0,
+                        'paid_amount' => $payload['paid_amount'] ?? 0,
+                        'status' => $payload['status'] ?? 'pending',
+                        'notes' => $payload['notes'] ?? null,
+                        'collection_activity_id' => $payload['collection_activity_id'] ?? null,
+                        'recorded_by_user_id' => $payload['recorded_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'ar_disputes':
+                ArDispute::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'invoice_id' => $payload['invoice_id'] ?? null,
+                        'dispute_number' => $payload['dispute_number'] ?? '',
+                        'dispute_date' => $payload['dispute_date'] ?? now()->toDateString(),
+                        'disputed_amount' => $payload['disputed_amount'] ?? 0,
+                        'reason_category' => $payload['reason_category'] ?? 'pricing_error',
+                        'description' => $payload['description'] ?? '',
+                        'status' => $payload['status'] ?? 'open',
+                        'resolution_notes' => $payload['resolution_notes'] ?? null,
+                        'credit_note_id' => $payload['credit_note_id'] ?? null,
+                        'assigned_to_user_id' => $payload['assigned_to_user_id'] ?? null,
+                        'resolved_at' => $payload['resolved_at'] ?? null,
+                        'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'customer_reconciliations':
+                CustomerReconciliation::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'reconciliation_date' => $payload['reconciliation_date'] ?? now()->toDateString(),
+                        'statement_cutoff_date' => $payload['statement_cutoff_date'] ?? now()->toDateString(),
+                        'customer_statement_balance' => $payload['customer_statement_balance'] ?? 0,
+                        'ledger_balance' => $payload['ledger_balance'] ?? 0,
+                        'variance' => $payload['variance'] ?? 0,
+                        'status' => $payload['status'] ?? 'in_progress',
+                        'notes' => $payload['notes'] ?? null,
+                        'reconciled_by_user_id' => $payload['reconciled_by_user_id'] ?? null,
+                        'reconciled_at' => $payload['reconciled_at'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'customer_reconciliation_items':
+                CustomerReconciliationItem::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'customer_reconciliation_id' => $payload['customer_reconciliation_id'] ?? null,
+                        'item_type' => $payload['item_type'] ?? 'missing_in_customer_statement',
+                        'reference_number' => $payload['reference_number'] ?? null,
+                        'item_date' => $payload['item_date'] ?? null,
+                        'ledger_amount' => $payload['ledger_amount'] ?? 0,
+                        'statement_amount' => $payload['statement_amount'] ?? 0,
+                        'difference' => $payload['difference'] ?? 0,
+                        'explanation' => $payload['explanation'] ?? null,
+                        'is_resolved' => $payload['is_resolved'] ?? false,
+                        'resolution_action' => $payload['resolution_action'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'ap_tolerance_settings':
+                // Deliberately unguarded — see role_permissions' identical
+                // note: business_id IS this table's own primary key, so a
+                // mismatched id can only ever create/update the caller's own
+                // row (assertOwnership's businesses-table special case
+                // already refuses anything else upstream of here).
+                DB::table('ap_tolerance_settings')->updateOrInsert(
+                    ['business_id' => $uuid],
+                    [
+                        'quantity_tolerance_pct' => $payload['quantity_tolerance_pct'] ?? 2.0,
+                        'price_tolerance_pct' => $payload['price_tolerance_pct'] ?? 1.0,
+                        'amount_tolerance' => $payload['amount_tolerance'] ?? 50.0,
+                        'updated_at' => now(),
+                    ]
+                );
+                break;
+
+            case 'supplier_reconciliations':
+                SupplierReconciliation::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'supplier_id' => $payload['supplier_id'] ?? null,
+                        'statement_date' => $payload['statement_date'] ?? now()->toDateString(),
+                        'statement_closing_balance' => $payload['statement_closing_balance'] ?? 0,
+                        'smart_pos_closing_balance' => $payload['smart_pos_closing_balance'] ?? 0,
+                        'variance' => $payload['variance'] ?? 0,
+                        'status' => $payload['status'] ?? 'in_progress',
+                        'notes' => $payload['notes'] ?? null,
+                        'reconciled_by_user_id' => $payload['reconciled_by_user_id'] ?? null,
+                        'reconciled_at' => $payload['reconciled_at'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'supplier_reconciliation_items':
+                SupplierReconciliationItem::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'reconciliation_id' => $payload['reconciliation_id'] ?? null,
+                        'document_type' => $payload['document_type'] ?? 'invoice',
+                        'document_reference' => $payload['document_reference'] ?? '',
+                        'document_date' => $payload['document_date'] ?? now()->toDateString(),
+                        'supplier_amount' => $payload['supplier_amount'] ?? 0,
+                        'smart_pos_amount' => $payload['smart_pos_amount'] ?? 0,
+                        'difference' => $payload['difference'] ?? 0,
+                        'status' => $payload['status'] ?? 'matched',
+                        'notes' => $payload['notes'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'supplier_banks':
+                SupplierBank::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'supplier_id' => $payload['supplier_id'] ?? null,
+                        'bank_name' => $payload['bank_name'] ?? '',
+                        'account_name' => $payload['account_name'] ?? null,
+                        'account_number' => $payload['account_number'] ?? '',
+                        'branch' => $payload['branch'] ?? null,
+                        'branch_code' => $payload['branch_code'] ?? null,
+                        'swift_code' => $payload['swift_code'] ?? null,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'is_default' => (bool) ($payload['is_default'] ?? false),
+                        'is_active' => (bool) ($payload['is_active'] ?? true),
                     ]
                 );
                 break;
@@ -3442,6 +4076,10 @@ class SyncProcessor
             'invoices' => Invoice::class,
             'invoice_items' => InvoiceItem::class,
             'credit_notes' => CreditNote::class,
+            'supplier_invoices' => SupplierInvoice::class,
+            'supplier_credit_notes' => SupplierCreditNote::class,
+            'supplier_reconciliations' => SupplierReconciliation::class,
+            'supplier_banks' => SupplierBank::class,
             'recurring_invoice_schedules' => RecurringInvoiceSchedule::class,
             'product_units' => ProductUnit::class,
             'product_price_tiers' => ProductPriceTier::class,
@@ -3454,7 +4092,7 @@ class SyncProcessor
             'approval_delegations' => ApprovalDelegation::class,
         ];
 
-        $softDeleteIsActive = ['locations', 'categories', 'units_of_measure', 'tax_rates', 'products', 'product_variants', 'suppliers', 'coupons', 'tills'];
+        $softDeleteIsActive = ['locations', 'categories', 'units_of_measure', 'tax_rates', 'products', 'product_variants', 'suppliers', 'supplier_banks', 'coupons', 'tills'];
 
         if (isset($modelMap[$table])) {
             if (in_array($table, $softDeleteIsActive)) {

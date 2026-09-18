@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Events\SupplierPaymentRecorded;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -15,6 +16,17 @@ class SupplierPayment extends Model
         'payment_date', 'method', 'reference', 'recorded_by_user_id',
         'bank_account_id',
     ];
+
+    protected static function booted(): void
+    {
+        static::created(function (SupplierPayment $payment): void {
+            if (! $payment->business_id) {
+                return;
+            }
+
+            SupplierPaymentRecorded::dispatch($payment->business_id, $payment->supplier_id, $payment->id);
+        });
+    }
 
     protected function casts(): array
     {

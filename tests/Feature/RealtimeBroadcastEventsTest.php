@@ -3,25 +3,51 @@
 namespace Tests\Feature;
 
 use App\Events\ApprovalRequestChanged;
+use App\Events\AssetChanged;
+use App\Events\BankAccountChanged;
+use App\Events\CreditNoteChanged;
 use App\Events\CustomerChanged;
+use App\Events\ExpenseChanged;
+use App\Events\GoodsReceivedVoucherRecorded;
+use App\Events\InvoiceChanged;
 use App\Events\InvoicePaymentRecorded;
 use App\Events\ProductPriceChanged;
 use App\Events\PurchaseOrderChanged;
+use App\Events\QuotationChanged;
+use App\Events\SalaryPaymentRecorded;
 use App\Events\ShiftStatusChanged;
 use App\Events\StockLevelChanged;
+use App\Events\StockTakeChanged;
 use App\Events\StockTransferChanged;
+use App\Events\SupplierChanged;
+use App\Events\SupplierInvoiceChanged;
+use App\Events\SupplierPaymentAllocated;
+use App\Events\SupplierPaymentRecorded;
 use App\Events\TillCashMovementRecorded;
 use App\Events\TransactionRecorded;
 use App\Models\ApprovalRequest;
+use App\Models\Asset;
+use App\Models\BankAccount;
+use App\Models\CreditNote;
 use App\Models\Customer;
+use App\Models\Employee;
+use App\Models\Expense;
+use App\Models\GoodsReceivedVoucher;
 use App\Models\Invoice;
 use App\Models\InvoicePayment;
 use App\Models\Location;
 use App\Models\Product;
 use App\Models\ProductStock;
 use App\Models\PurchaseOrder;
+use App\Models\Quotation;
+use App\Models\SalaryPayment;
 use App\Models\Shift;
+use App\Models\StockTake;
 use App\Models\StockTransfer;
+use App\Models\Supplier;
+use App\Models\SupplierInvoice;
+use App\Models\SupplierPayment;
+use App\Models\SupplierPaymentAllocation;
 use App\Models\Tenant;
 use App\Models\Till;
 use App\Models\TillCashMovement;
@@ -557,5 +583,357 @@ class RealtimeBroadcastEventsTest extends TestCase
         $request->update(['status' => 'approved', 'approver_user_id' => (string) Str::uuid(), 'approved_at' => now()]);
 
         Event::assertDispatched(ApprovalRequestChanged::class, fn ($e) => $e->approvalRequestId === $request->id);
+    }
+
+    public function test_invoice_creation_dispatches_invoice_changed(): void
+    {
+        Event::fake([InvoiceChanged::class]);
+
+        $tenantId = 'tenant-events-invoice';
+        $this->makeTenant($tenantId);
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Shop']);
+
+        $invoice = Invoice::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'location_id' => $location->id,
+            'customer_id' => (string) Str::uuid(),
+            'invoice_number' => 'INV-202609-EVT-1',
+            'status' => 'draft',
+            'issue_date' => now(),
+            'total' => 100,
+            'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        Event::assertDispatched(InvoiceChanged::class, fn ($e) => $e->businessId === $tenantId
+            && $e->locationId === $location->id
+            && $e->invoiceId === $invoice->id);
+    }
+
+    public function test_invoice_status_change_dispatches_invoice_changed(): void
+    {
+        $tenantId = 'tenant-events-invoice-status';
+        $this->makeTenant($tenantId);
+        $invoice = Invoice::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'customer_id' => (string) Str::uuid(),
+            'invoice_number' => 'INV-202609-EVT-2',
+            'status' => 'draft',
+            'issue_date' => now(),
+            'total' => 100,
+            'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        Event::fake([InvoiceChanged::class]);
+        $invoice->update(['status' => 'sent']);
+
+        Event::assertDispatched(InvoiceChanged::class, fn ($e) => $e->invoiceId === $invoice->id && $e->locationId === null);
+    }
+
+    public function test_quotation_creation_dispatches_quotation_changed(): void
+    {
+        Event::fake([QuotationChanged::class]);
+
+        $tenantId = 'tenant-events-quotation';
+        $this->makeTenant($tenantId);
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Shop']);
+
+        $quotation = Quotation::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'location_id' => $location->id,
+            'customer_id' => (string) Str::uuid(),
+            'quote_number' => 'QUO-202609-EVT-1',
+            'status' => 'draft',
+            'total' => 100,
+            'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        Event::assertDispatched(QuotationChanged::class, fn ($e) => $e->businessId === $tenantId
+            && $e->locationId === $location->id
+            && $e->quotationId === $quotation->id);
+    }
+
+    public function test_supplier_creation_dispatches_supplier_changed(): void
+    {
+        Event::fake([SupplierChanged::class]);
+
+        $tenantId = 'tenant-events-supplier';
+        $this->makeTenant($tenantId);
+
+        $supplier = Supplier::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Acme Supplies']);
+
+        Event::assertDispatched(SupplierChanged::class, fn ($e) => $e->businessId === $tenantId && $e->supplierId === $supplier->id);
+    }
+
+    public function test_supplier_payment_creation_dispatches_supplier_payment_recorded(): void
+    {
+        Event::fake([SupplierPaymentRecorded::class]);
+
+        $tenantId = 'tenant-events-supplier-payment';
+        $this->makeTenant($tenantId);
+        $supplier = Supplier::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Acme Supplies']);
+
+        $payment = SupplierPayment::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'supplier_id' => $supplier->id,
+            'amount' => 50,
+            'currency_code' => 'USD',
+            'payment_date' => now(),
+            'method' => 'cash',
+            'recorded_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        Event::assertDispatched(SupplierPaymentRecorded::class, fn ($e) => $e->businessId === $tenantId
+            && $e->supplierId === $supplier->id
+            && $e->paymentId === $payment->id);
+    }
+
+    public function test_expense_creation_dispatches_expense_changed(): void
+    {
+        Event::fake([ExpenseChanged::class]);
+
+        $tenantId = 'tenant-events-expense';
+        $this->makeTenant($tenantId);
+
+        $expense = Expense::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'recorded_by_user_id' => (string) Str::uuid(),
+            'category' => 'utilities',
+            'description' => 'Electricity',
+            'amount' => 30,
+            'currency_code' => 'USD',
+            'base_equivalent' => 30,
+            'payment_method' => 'cash',
+            'expense_date' => now(),
+        ]);
+
+        Event::assertDispatched(ExpenseChanged::class, fn ($e) => $e->businessId === $tenantId && $e->expenseId === $expense->id);
+    }
+
+    public function test_asset_creation_dispatches_asset_changed(): void
+    {
+        Event::fake([AssetChanged::class]);
+
+        $tenantId = 'tenant-events-asset';
+        $this->makeTenant($tenantId);
+
+        $asset = Asset::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'asset_number' => 'AST-001',
+            'name' => 'Delivery Van',
+            'category' => 'vehicle',
+            'acquisition_date' => now(),
+            'acquisition_cost' => 20000,
+            'salvage_value' => 2000,
+            'useful_life_months' => 60,
+            'funding_method' => 'cash',
+            'status' => 'active',
+            'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        Event::assertDispatched(AssetChanged::class, fn ($e) => $e->businessId === $tenantId && $e->assetId === $asset->id);
+    }
+
+    public function test_salary_payment_creation_dispatches_salary_payment_recorded(): void
+    {
+        Event::fake([SalaryPaymentRecorded::class]);
+
+        $tenantId = 'tenant-events-salary';
+        $this->makeTenant($tenantId);
+        $employee = Employee::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'Jane Cashier',
+            'pay_type' => 'salary',
+            'salary_amount' => 500,
+            'currency_code' => 'USD',
+            'status' => 'active',
+        ]);
+
+        $payment = SalaryPayment::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'employee_id' => $employee->id,
+            'period' => '2026-09',
+            'amount' => 500,
+            'currency_code' => 'USD',
+            'base_equivalent' => 500,
+            'paid_by_user_id' => (string) Str::uuid(),
+            'paid_at' => now(),
+        ]);
+
+        Event::assertDispatched(SalaryPaymentRecorded::class, fn ($e) => $e->businessId === $tenantId
+            && $e->employeeId === $employee->id
+            && $e->salaryPaymentId === $payment->id);
+    }
+
+    public function test_stock_take_creation_dispatches_stock_take_changed(): void
+    {
+        Event::fake([StockTakeChanged::class]);
+
+        $tenantId = 'tenant-events-stock-take';
+        $this->makeTenant($tenantId);
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Shop']);
+
+        $stockTake = StockTake::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'location_id' => $location->id,
+            'title' => 'Monthly Count',
+            'status' => 'draft',
+            'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        Event::assertDispatched(StockTakeChanged::class, fn ($e) => $e->businessId === $tenantId
+            && $e->locationId === $location->id
+            && $e->stockTakeId === $stockTake->id);
+    }
+
+    public function test_credit_note_creation_dispatches_credit_note_changed(): void
+    {
+        Event::fake([CreditNoteChanged::class]);
+
+        $tenantId = 'tenant-events-credit-note';
+        $this->makeTenant($tenantId);
+        $invoice = Invoice::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'customer_id' => (string) Str::uuid(),
+            'invoice_number' => 'INV-202609-EVT-3',
+            'status' => 'sent',
+            'issue_date' => now(),
+            'total' => 100,
+            'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        $creditNote = CreditNote::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'invoice_id' => $invoice->id,
+            'customer_id' => (string) Str::uuid(),
+            'credit_note_number' => 'CN-202609-EVT-1',
+            'reason' => 'Damaged goods',
+            'subtotal' => 10,
+            'tax_total' => 0,
+            'total' => 10,
+            'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        Event::assertDispatched(CreditNoteChanged::class, fn ($e) => $e->businessId === $tenantId && $e->creditNoteId === $creditNote->id);
+    }
+
+    public function test_bank_account_creation_dispatches_bank_account_changed(): void
+    {
+        Event::fake([BankAccountChanged::class]);
+
+        $tenantId = 'tenant-events-bank-account';
+        $this->makeTenant($tenantId);
+
+        $account = BankAccount::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'CBZ Main Account',
+            'currency_code' => 'ZWG',
+            'gl_account_id' => (string) Str::uuid(),
+        ]);
+
+        Event::assertDispatched(BankAccountChanged::class, fn ($e) => $e->businessId === $tenantId && $e->bankAccountId === $account->id);
+    }
+
+    public function test_bank_account_currency_change_dispatches_bank_account_changed(): void
+    {
+        $tenantId = 'tenant-events-bank-account-currency';
+        $this->makeTenant($tenantId);
+        $account = BankAccount::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'CBZ Main Account',
+            'currency_code' => 'USD',
+            'gl_account_id' => (string) Str::uuid(),
+        ]);
+
+        Event::fake([BankAccountChanged::class]);
+        $account->update(['currency_code' => 'ZWG']);
+
+        Event::assertDispatched(BankAccountChanged::class, fn ($e) => $e->bankAccountId === $account->id);
+    }
+
+    public function test_goods_received_voucher_creation_dispatches_recorded_event(): void
+    {
+        Event::fake([GoodsReceivedVoucherRecorded::class]);
+
+        $tenantId = 'tenant-events-grv';
+        $this->makeTenant($tenantId);
+        $supplier = Supplier::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Acme Supplies']);
+        $po = PurchaseOrder::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'supplier_id' => $supplier->id,
+            'po_number' => 'PO-1', 'status' => 'received', 'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        $grv = GoodsReceivedVoucher::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'grv_number' => 'GRV-2026-00000001',
+            'purchase_order_id' => $po->id, 'supplier_id' => $supplier->id, 'received_date' => now(),
+        ]);
+
+        Event::assertDispatched(GoodsReceivedVoucherRecorded::class, fn ($e) => $e->businessId === $tenantId
+            && $e->grvId === $grv->id
+            && $e->purchaseOrderId === $po->id);
+    }
+
+    public function test_supplier_invoice_creation_and_status_change_dispatch_changed_event(): void
+    {
+        Event::fake([SupplierInvoiceChanged::class]);
+
+        $tenantId = 'tenant-events-supplier-invoice';
+        $this->makeTenant($tenantId);
+        $supplier = Supplier::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Acme Supplies']);
+
+        $invoice = SupplierInvoice::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'supplier_id' => $supplier->id,
+            'invoice_number' => 'INV-1', 'invoice_date' => now(), 'amount' => 100, 'status' => 'draft',
+        ]);
+
+        Event::assertDispatched(SupplierInvoiceChanged::class, fn ($e) => $e->businessId === $tenantId
+            && $e->invoiceId === $invoice->id
+            && $e->status === 'draft');
+
+        Event::fake([SupplierInvoiceChanged::class]);
+        $invoice->update(['status' => 'approved']);
+
+        Event::assertDispatched(SupplierInvoiceChanged::class, fn ($e) => $e->invoiceId === $invoice->id
+            && $e->status === 'approved');
+    }
+
+    public function test_supplier_payment_allocation_creation_dispatches_allocated_event(): void
+    {
+        Event::fake([SupplierPaymentAllocated::class]);
+
+        $tenantId = 'tenant-events-supplier-allocation';
+        $this->makeTenant($tenantId);
+        $supplier = Supplier::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Acme Supplies']);
+        $invoice = SupplierInvoice::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'supplier_id' => $supplier->id,
+            'invoice_number' => 'INV-2', 'invoice_date' => now(), 'amount' => 100, 'status' => 'posted',
+        ]);
+        $payment = SupplierPayment::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'supplier_id' => $supplier->id,
+            'amount' => 100, 'currency_code' => 'USD', 'payment_date' => now(), 'method' => 'cash',
+            'recorded_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        $allocation = SupplierPaymentAllocation::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'supplier_payment_id' => $payment->id,
+            'supplier_invoice_id' => $invoice->id, 'amount' => 100,
+        ]);
+
+        Event::assertDispatched(SupplierPaymentAllocated::class, fn ($e) => $e->businessId === $tenantId
+            && $e->supplierPaymentId === $payment->id
+            && $e->supplierInvoiceId === $invoice->id
+            && $e->supplierInvoiceId === $allocation->supplier_invoice_id);
     }
 }

@@ -158,18 +158,21 @@ class SyncController extends Controller
                     }
 
                     $autoResolve = $this->autoResolvesVersionConflict($record['table']);
+                    $ledgerSuperseded = ! $autoResolve && $this->isLedgerRecomputeSupersededConflict($record['table'], $existing);
 
                     $conflict = $this->recordConflict(
                         $device,
                         $record,
-                        $autoResolve
-                            ? 'Newer version exists on server; auto-resolved by keeping the server record.'
-                            : 'Newer version exists on server; manual review required.',
+                        match (true) {
+                            $ledgerSuperseded => 'Superseded by an authoritative stock_movements ledger recompute — the server quantity already reflects every device\'s sales/receipts, so this device\'s own stale snapshot was discarded automatically. No action needed.',
+                            $autoResolve => 'Newer version exists on server; auto-resolved by keeping the server record.',
+                            default => 'Newer version exists on server; manual review required.',
+                        },
                         'version_conflict',
                         $existing?->payload
                     );
 
-                    if ($autoResolve) {
+                    if ($autoResolve || $ledgerSuperseded) {
                         // Last-write-wins: the server row is already newer than this
                         // push, so there's nothing to apply — just record the decision
                         // instead of leaving it pending for a human. Scoped to tables
@@ -177,9 +180,11 @@ class SyncController extends Controller
                         // (see autoResolvesVersionConflict()); structural conflicts
                         // (invalid transitions, ownership mismatches) are never
                         // auto-resolved because they signal a real bug, not a race.
+                        // The ledger-superseded case is narrower still — see
+                        // isLedgerRecomputeSupersededConflict()'s own doc comment.
                         $conflict->update([
                             'status' => 'resolved',
-                            'resolution_action' => 'accept_server',
+                            'resolution_action' => $ledgerSuperseded ? 'ledger_recompute_authoritative' : 'accept_server',
                             'resolved_at' => now(),
                         ]);
 
@@ -434,6 +439,10 @@ class SyncController extends Controller
         $tables = $request->input('tables', []);
         $serverTime = now();
 
+        $reconciliationRequired = $device
+            ? $this->detectReconciliationRequired($request, $device, $tables)
+            : [];
+
         $query = SyncRecord::query()
             ->where('business_id', $device?->tenant_id);
 
@@ -527,7 +536,70 @@ class SyncController extends Controller
             'records' => $records,
             'has_more' => $records->count() === $limit,
             'server_time' => $serverTime->toIso8601String(),
+            // See detectReconciliationRequired() — non-empty means the
+            // client's own claimed cursor for one of the requested tables
+            // doesn't match anything this server ever actually delivered to
+            // it. The client resets ONLY that table's local cursor and lets
+            // the ordinary incremental pull mechanism re-fetch its full
+            // history next cycle — never a wipe of the whole local database,
+            // and the outbox (pending pushes) is untouched either way.
+            'reconciliation_required' => $reconciliationRequired,
         ]);
+    }
+
+    /**
+     * A device claiming a pull position (`since`/`after_id`) the server has
+     * no record of ever having delivered to it (via this same device's own
+     * `sync_cursors` row) means that table's local cursor is untrustworthy —
+     * e.g. a local database restored from an unrelated backup/device, a
+     * device_identifier collision, or local data tampering/corruption. A
+     * device that is simply behind (the ordinary, common case) always
+     * claims a position at or behind what the server recorded here, so this
+     * never fires for normal lag — only for a cursor the server itself never
+     * produced. Only evaluated when the client sent an explicit `since`
+     * (a table with no local cursor yet sends none, and gets its full
+     * history through the ordinary code path — never flagged, nothing to
+     * reconcile).
+     *
+     * @param  array<int, string>  $tables
+     * @return array<int, string>
+     */
+    private function detectReconciliationRequired(Request $request, Device $device, array $tables): array
+    {
+        if (! $tables || ! $request->filled('since')) {
+            return [];
+        }
+
+        $claimedSince = Carbon::parse($request->input('since'));
+        $claimedAfterId = (int) $request->input('after_id', 0);
+
+        $serverCursors = SyncCursor::where('device_id', $device->id)
+            ->whereIn('table_name', $tables)
+            ->get()
+            ->keyBy('table_name');
+
+        $flagged = [];
+        foreach ($tables as $tableName) {
+            $serverCursor = $serverCursors->get($tableName);
+
+            if ($serverCursor === null) {
+                // Device claims a pulled-up-to position for a table the
+                // server has never recorded serving it anything for.
+                $flagged[] = $tableName;
+
+                continue;
+            }
+
+            $aheadOfServer = $claimedSince->gt($serverCursor->last_pulled_at)
+                || ($claimedSince->eq($serverCursor->last_pulled_at)
+                    && $claimedAfterId > (int) ($serverCursor->last_pulled_id ?? 0));
+
+            if ($aheadOfServer) {
+                $flagged[] = $tableName;
+            }
+        }
+
+        return $flagged;
     }
 
     /** Returns pending sync counts and cursors for this device */
@@ -563,6 +635,16 @@ class SyncController extends Controller
             'pending_pull' => $pendingPull,
             'device_id' => $device?->id,
             'cursors' => $cursorMap,
+            // Doubles as the closest thing to a SYNC_HELLO handshake
+            // response today (see the startup-sync architecture spec):
+            // server_time lets the client detect clock skew, the two
+            // version fields let it detect an unsupported build/schema.
+            // Deliberately additive to the existing pending_pull/cursors
+            // shape used by the app's periodic "Ping Server" check, not a
+            // new endpoint — SyncController already owns this concern.
+            'server_time' => now()->toIso8601String(),
+            'schema_version' => config('sync.schema_version'),
+            'minimum_supported_app_version' => config('sync.minimum_supported_app_version'),
         ]);
     }
 
@@ -727,6 +809,34 @@ class SyncController extends Controller
     private function autoResolvesVersionConflict(string $table): bool
     {
         return in_array($table, self::AUTO_RESOLVE_VERSION_CONFLICT_TABLES, true);
+    }
+
+    /**
+     * A narrower, structurally-provable auto-resolve than
+     * AUTO_RESOLVE_VERSION_CONFLICT_TABLES: `product_stock`'s `quantity`
+     * column is never the true source of truth — it's a cache recomputed
+     * from the `stock_movements` ledger by
+     * SyncProcessor::recomputeLocationStock() every time a movement lands
+     * (see e.g. two devices independently selling the same product while
+     * both offline, master spec section 9). That recompute always writes
+     * its result via emitBroadcastSyncRecord() with device_id left null —
+     * no device push ever does that — so `$existing->device_id === null`
+     * is a precise signal that the server's current winning value already
+     * IS the ledger-authoritative number, not just some other device's
+     * unverified snapshot that happened to arrive first.
+     *
+     * A losing product_stock push in that situation is provably stale
+     * (its own accompanying stock_movements row, processed moments later
+     * in the very same request, is about to trigger the exact same
+     * recompute again anyway), so leaving it "pending" only adds noise to
+     * the manual conflict queue for something that was never actually in
+     * dispute. Every other product_stock conflict — one device's genuine
+     * edit racing another's (e.g. low_stock_threshold, price_override) —
+     * still falls through to manual review untouched.
+     */
+    private function isLedgerRecomputeSupersededConflict(string $table, ?SyncRecord $existing): bool
+    {
+        return $table === 'product_stock' && $existing !== null && $existing->device_id === null;
     }
 
     /**
