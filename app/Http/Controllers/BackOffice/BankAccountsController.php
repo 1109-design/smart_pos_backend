@@ -39,8 +39,21 @@ class BankAccountsController extends BackOfficeController
             ->orderBy('name')
             ->get();
 
+        // Assets accounts not already claimed by another active bank
+        // account — what "link to an existing account" can legitimately
+        // offer, same validation store() itself enforces server-side.
+        $claimedGlAccountIds = BankAccount::where('business_id', $tenantId)
+            ->where('is_active', true)
+            ->pluck('gl_account_id');
+        $linkableAccounts = GlAccount::where('business_id', $tenantId)
+            ->whereHas('category', fn ($q) => $q->where('name', 'Assets'))
+            ->whereNotIn('id', $claimedGlAccountIds)
+            ->orderBy('code')
+            ->get(['id', 'code', 'name']);
+
         return Inertia::render('BackOffice/BankAccounts', [
             'accounts' => $accounts,
+            'linkableAccounts' => $linkableAccounts,
         ]);
     }
 
@@ -52,15 +65,38 @@ class BankAccountsController extends BackOfficeController
             'name' => ['required', 'string', 'max:255'],
             'account_number' => ['nullable', 'string', 'max:255'],
             'branch' => ['nullable', 'string', 'max:255'],
+            'branch_code' => ['nullable', 'string', 'max:255'],
+            'swift_code' => ['nullable', 'string', 'max:255'],
             'currency_code' => ['nullable', 'string', 'max:10'],
+            'gl_account_id' => ['nullable', 'uuid'],
         ]);
+
+        $glAccountId = null;
+        if (! empty($data['gl_account_id'])) {
+            $tenantId = $this->tenantId();
+            $glAccount = GlAccount::where('business_id', $tenantId)
+                ->where('id', $data['gl_account_id'])
+                ->whereHas('category', fn ($q) => $q->where('name', 'Assets'))
+                ->firstOrFail();
+
+            $alreadyClaimed = BankAccount::where('business_id', $tenantId)
+                ->where('gl_account_id', $glAccount->id)
+                ->where('is_active', true)
+                ->exists();
+            abort_if($alreadyClaimed, 422, 'That account already backs another active bank account.');
+
+            $glAccountId = $glAccount->id;
+        }
 
         $this->bankAccounts->create(
             $this->tenantId(),
             $data['name'],
             $data['account_number'] ?? null,
             $data['branch'] ?? null,
+            $data['branch_code'] ?? null,
+            $data['swift_code'] ?? null,
             $data['currency_code'] ?? 'USD',
+            $glAccountId,
         );
 
         return back()->with('success', 'Bank account added.');

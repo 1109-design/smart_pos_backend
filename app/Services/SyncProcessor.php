@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Exceptions\MissingParentRecordException;
+use App\Models\Accounting\AccountCategory;
 use App\Models\Accounting\AccountingPeriod;
 use App\Models\Accounting\AccountSubCategory;
 use App\Models\Accounting\GeneralLedgerEntry;
@@ -127,6 +128,7 @@ use App\Services\Accounting\StockTakePostingService;
 use App\Services\Accounting\SupplierPaymentService;
 use App\Services\Zimra\ZimraSalesService;
 use App\Support\BackOfficePermission;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -3028,40 +3030,92 @@ class SyncProcessor
                 }
                 break;
 
+            case 'account_categories':
+                // Previously had no case at all — this table was Laravel-only
+                // (ChartOfAccountsSeeder), so a device push for it silently
+                // fell through the switch and vanished (accepted, never
+                // written). Now that Flutter's ChartOfAccountsService can
+                // create a brand-new top-level category offline (see
+                // chart_of_accounts_service.dart), it needs a real case, with
+                // the same owner-or-manager gate as its sibling tables below.
+                $existingCategory = AccountCategory::where('id', $uuid)->first();
+                $incomingCategory = [
+                    'business_id' => $payload['business_id'] ?? null,
+                    'name' => $payload['name'] ?? '',
+                    'code' => $payload['code'] ?? null,
+                    'is_debit_normal' => $payload['is_debit_normal'] ?? true,
+                    'statement_type' => $payload['statement_type'] ?? 'balance_sheet',
+                    'reporting_order' => $payload['reporting_order'] ?? 99,
+                    'is_system' => $payload['is_system'] ?? false,
+                ];
+
+                if (! $trusted && $this->chartOfAccountsRowChanged($existingCategory, $incomingCategory)) {
+                    $this->requireOwnerOrManager($actingUser, 'account_categories: creating or changing a chart-of-accounts category');
+                }
+
+                AccountCategory::updateOrCreate(['id' => $uuid], $incomingCategory);
+                break;
+
             case 'account_sub_categories':
-                // Idempotent by id — a client only ever pushes one of these
-                // to bootstrap its own "Bank Accounts" subcategory the first
-                // time a bank account is created on that device; matches
-                // ChartOfAccountsSeeder::ensureSubCategory()'s own shape.
-                AccountSubCategory::updateOrCreate(
-                    ['id' => $uuid],
-                    [
-                        'business_id' => $payload['business_id'] ?? null,
-                        'account_category_id' => $payload['account_category_id'] ?? null,
-                        'name' => $payload['name'] ?? '',
-                        'reporting_order' => $payload['reporting_order'] ?? 99,
-                    ]
-                );
+                // Was idempotent-by-id with NO authority check at all — a
+                // client only ever pushes one of these to bootstrap its own
+                // "Bank Accounts" subcategory the first time a bank account
+                // is created on that device (matches
+                // ChartOfAccountsSeeder::ensureSubCategory()'s own shape),
+                // but the generic device sync path had nothing stopping any
+                // authenticated till from pushing an arbitrary new
+                // subcategory, or silently rewriting an existing one's name/
+                // parent category by reusing its known id. Same fraud class
+                // as 'account_role_mappings'/'bank_accounts' just below —
+                // gated the same way: owner or manager required (matches
+                // Permission.manageCashVault, the role floor already guarding
+                // the one legitimate caller, bank account creation) whenever
+                // an untrusted push creates a new row or changes an
+                // existing one. A device resending its own already-current
+                // row unchanged is still let through.
+                $existingSubCategory = AccountSubCategory::where('id', $uuid)->first();
+                $incomingSubCategory = [
+                    'business_id' => $payload['business_id'] ?? null,
+                    'account_category_id' => $payload['account_category_id'] ?? null,
+                    'name' => $payload['name'] ?? '',
+                    'reporting_order' => $payload['reporting_order'] ?? 99,
+                ];
+
+                if (! $trusted && $this->chartOfAccountsRowChanged($existingSubCategory, $incomingSubCategory)) {
+                    $this->requireOwnerOrManager($actingUser, 'account_sub_categories: creating or changing a chart-of-accounts subcategory');
+                }
+
+                AccountSubCategory::updateOrCreate(['id' => $uuid], $incomingSubCategory);
                 break;
 
             case 'gl_accounts':
-                // Idempotent by id — see the 'account_sub_categories' case
-                // just above for why this ordinarily server-only table
-                // accepts a client push at all.
-                GlAccount::updateOrCreate(
-                    ['id' => $uuid],
-                    [
-                        'business_id' => $payload['business_id'] ?? null,
-                        'code' => $payload['code'] ?? '',
-                        'name' => $payload['name'] ?? '',
-                        'account_category_id' => $payload['account_category_id'] ?? null,
-                        'account_sub_category_id' => $payload['account_sub_category_id'] ?? null,
-                        'allow_direct_posting' => $payload['allow_direct_posting'] ?? true,
-                        'control_type' => $payload['control_type'] ?? null,
-                        'must_be_positive' => $payload['must_be_positive'] ?? false,
-                        'status' => $payload['status'] ?? 'active',
-                    ]
-                );
+                // Same gap and same fix as 'account_sub_categories' above —
+                // this ordinarily server-only table (chart of accounts is
+                // seeded once, see ChartOfAccountsSeeder) accepted an
+                // untrusted push with no authority check whatsoever. A
+                // reused id here isn't just a routing lever like
+                // account_role_mappings' single gl_account_id field — every
+                // one of code/category/control_type/status defines what an
+                // account *is* for reporting purposes, so any change to an
+                // existing row (not just row creation) needs the same gate.
+                $existingGlAccount = GlAccount::where('id', $uuid)->first();
+                $incomingGlAccount = [
+                    'business_id' => $payload['business_id'] ?? null,
+                    'code' => $payload['code'] ?? '',
+                    'name' => $payload['name'] ?? '',
+                    'account_category_id' => $payload['account_category_id'] ?? null,
+                    'account_sub_category_id' => $payload['account_sub_category_id'] ?? null,
+                    'allow_direct_posting' => $payload['allow_direct_posting'] ?? true,
+                    'control_type' => $payload['control_type'] ?? null,
+                    'must_be_positive' => $payload['must_be_positive'] ?? false,
+                    'status' => $payload['status'] ?? 'active',
+                ];
+
+                if (! $trusted && $this->chartOfAccountsRowChanged($existingGlAccount, $incomingGlAccount)) {
+                    $this->requireOwnerOrManager($actingUser, 'gl_accounts: creating or changing a chart-of-accounts entry');
+                }
+
+                GlAccount::updateOrCreate(['id' => $uuid], $incomingGlAccount);
                 break;
 
             case 'bank_accounts':
@@ -3093,6 +3147,8 @@ class SyncProcessor
                         'name' => $payload['name'] ?? '',
                         'account_number' => $payload['account_number'] ?? null,
                         'branch' => $payload['branch'] ?? null,
+                        'branch_code' => $payload['branch_code'] ?? null,
+                        'swift_code' => $payload['swift_code'] ?? null,
                         'currency_code' => $payload['currency_code'] ?? 'USD',
                         'gl_account_id' => $incomingBankAccountGlId,
                         'is_active' => $payload['is_active'] ?? true,
@@ -3770,6 +3826,46 @@ class SyncProcessor
         return $query->where('subject_type', $subjectType)
             ->where('subject_id', $subjectId)
             ->exists();
+    }
+
+    /**
+     * Whether an inbound chart-of-accounts row (gl_accounts or
+     * account_sub_categories) either doesn't exist yet (a create) or
+     * differs from what's currently stored (a change) — a device resending
+     * its own already-current row untouched must not trip the owner/manager
+     * gate, or routine resyncs would spuriously fail.
+     *
+     * @param  array<string, mixed>  $incoming
+     */
+    private function chartOfAccountsRowChanged(?Model $existing, array $incoming): bool
+    {
+        if ($existing === null) {
+            return true;
+        }
+
+        foreach ($incoming as $field => $value) {
+            if ($existing->getAttribute($field) != $value) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Shared fraud guard for the chart-of-accounts sync cases — same role
+     * floor as 'bank_accounts' (Permission.manageCashVault: owner or
+     * manager), since gl_accounts creation is currently also reachable via
+     * bank-account creation and must keep working for a manager, not just
+     * an owner.
+     */
+    private function requireOwnerOrManager(?User $actingUser, string $context): void
+    {
+        $actingRole = $actingUser?->getRoleNames()->first();
+
+        if (! in_array($actingRole, ['business_owner', 'manager'], true)) {
+            throw new \RuntimeException("{$context} requires the owner or manager role.");
+        }
     }
 
     /**

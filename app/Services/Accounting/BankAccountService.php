@@ -24,29 +24,58 @@ class BankAccountService
 
     public function __construct(private readonly ChartOfAccountsSeeder $chartSeeder) {}
 
+    /**
+     * @param  string|null  $glAccountId  Link to this already-existing GL
+     *                                    account instead of minting a new
+     *                                    one — e.g. when a business already
+     *                                    created the account by hand via
+     *                                    Chart of Accounts management and
+     *                                    just wants a bank account to point
+     *                                    at it. Omitted (the default), this
+     *                                    behaves exactly as before: a fresh
+     *                                    account is minted under the
+     *                                    reserved 1011-1099 range. Not
+     *                                    validated to still be category
+     *                                    Assets or unclaimed by another bank
+     *                                    account here — see
+     *                                    ChartOfAccountsController's own
+     *                                    validation for the BackOffice path;
+     *                                    this method mirrors the same "any
+     *                                    id caller already resolved" trust
+     *                                    level `create()`'s $glAccount
+     *                                    lookup itself always had.
+     */
     public function create(
         string $businessId,
         string $name,
         ?string $accountNumber = null,
         ?string $branch = null,
+        ?string $branchCode = null,
+        ?string $swiftCode = null,
         string $currencyCode = 'USD',
+        ?string $glAccountId = null,
     ): BankAccount {
-        return DB::transaction(function () use ($businessId, $name, $accountNumber, $branch, $currencyCode) {
-            $code = $this->nextCode($businessId);
-            $glAccount = $this->chartSeeder->ensureAccount(
-                $businessId,
-                'Assets',
-                'Bank Accounts',
-                ['code' => $code, 'name' => $name],
-            );
+        return DB::transaction(function () use ($businessId, $name, $accountNumber, $branch, $branchCode, $swiftCode, $currencyCode, $glAccountId) {
+            if ($glAccountId === null) {
+                $code = $this->nextCode($businessId);
+                $glAccount = $this->chartSeeder->ensureAccount(
+                    $businessId,
+                    'Assets',
+                    'Bank Accounts',
+                    ['code' => $code, 'name' => $name],
+                );
+                $glAccountId = $glAccount->id;
+            }
 
             $bankAccount = BankAccount::create([
                 'business_id' => $businessId,
                 'name' => $name,
                 'account_number' => $accountNumber,
                 'branch' => $branch,
+                'branch_code' => $branchCode,
+                'swift_code' => $swiftCode,
                 'currency_code' => $currencyCode,
-                'gl_account_id' => $glAccount->id,
+                'gl_account_id' => $glAccountId,
             ]);
 
             $this->publish($bankAccount);
@@ -96,6 +125,8 @@ class BankAccountService
                 'name' => $bankAccount->name,
                 'account_number' => $bankAccount->account_number,
                 'branch' => $bankAccount->branch,
+                'branch_code' => $bankAccount->branch_code,
+                'swift_code' => $bankAccount->swift_code,
                 'currency_code' => $bankAccount->currency_code,
                 'gl_account_id' => $bankAccount->gl_account_id,
                 'is_active' => $bankAccount->is_active,

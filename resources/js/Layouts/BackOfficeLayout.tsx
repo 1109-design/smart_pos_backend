@@ -127,6 +127,7 @@ const ALL_NAV = [
     { label: 'Reports',         href: '/office/reports',         Icon: IconDocumentReport, roles: null },
     { label: 'Exchange Rates',  href: '/office/exchange-rates',  Icon: IconChart,          roles: ['business_owner', 'manager'] },
     { label: 'Journal Entries', href: '/office/journal-entries', Icon: IconDocumentReport, roles: ['business_owner'] },
+    { label: 'Chart of Accounts', href: '/office/chart-of-accounts', Icon: IconCog, roles: ['business_owner'] },
     { label: 'Account Mappings', href: '/office/account-mappings', Icon: IconCog, roles: ['business_owner'] },
     { label: 'Assets',          href: '/office/assets',          Icon: IconBox,            roles: ['business_owner'] },
     { label: 'Users',           href: '/office/users',           Icon: IconUsers,          roles: ['business_owner', 'manager'] },

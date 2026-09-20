@@ -10,6 +10,7 @@ use App\Http\Controllers\BackOffice\BankReconciliationController as BackOfficeBa
 use App\Http\Controllers\BackOffice\BundlesController as BackOfficeBundles;
 use App\Http\Controllers\BackOffice\CashVaultController as BackOfficeCashVault;
 use App\Http\Controllers\BackOffice\CategoriesController as BackOfficeCategories;
+use App\Http\Controllers\BackOffice\ChartOfAccountsController as BackOfficeChartOfAccounts;
 use App\Http\Controllers\BackOffice\CustomersController as BackOfficeCustomers;
 use App\Http\Controllers\BackOffice\DashboardController as BackOfficeDashboard;
 use App\Http\Controllers\BackOffice\ExchangeRatesController as BackOfficeExchangeRates;
@@ -137,6 +138,15 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::post('journal-entries/{journalEntry}/reverse', [BackOfficeJournalEntries::class, 'reverse'])->name('journal-entries.reverse');
         Route::get('account-mappings', [BackOfficeAccountRoleMappings::class, 'index'])->name('account-mappings.index');
         Route::post('account-mappings', [BackOfficeAccountRoleMappings::class, 'update'])->name('account-mappings.update');
+        Route::get('chart-of-accounts', [BackOfficeChartOfAccounts::class, 'index'])->name('chart-of-accounts.index');
+        Route::post('chart-of-accounts/categories', [BackOfficeChartOfAccounts::class, 'storeCategory'])->name('chart-of-accounts.categories.store');
+        Route::patch('chart-of-accounts/categories/{category}', [BackOfficeChartOfAccounts::class, 'updateCategory'])->name('chart-of-accounts.categories.update');
+        Route::post('chart-of-accounts/categories/{category}/sub-categories', [BackOfficeChartOfAccounts::class, 'storeSubCategory'])->name('chart-of-accounts.sub-categories.store');
+        Route::patch('chart-of-accounts/sub-categories/{subCategory}', [BackOfficeChartOfAccounts::class, 'updateSubCategory'])->name('chart-of-accounts.sub-categories.update');
+        Route::post('chart-of-accounts/accounts', [BackOfficeChartOfAccounts::class, 'storeAccount'])->name('chart-of-accounts.accounts.store');
+        Route::patch('chart-of-accounts/accounts/{account}', [BackOfficeChartOfAccounts::class, 'updateAccount'])->name('chart-of-accounts.accounts.update');
+        Route::post('chart-of-accounts/accounts/{account}/deactivate', [BackOfficeChartOfAccounts::class, 'deactivateAccount'])->name('chart-of-accounts.accounts.deactivate');
+        Route::post('chart-of-accounts/accounts/{account}/reactivate', [BackOfficeChartOfAccounts::class, 'reactivateAccount'])->name('chart-of-accounts.accounts.reactivate');
         Route::get('assets', [BackOfficeAssets::class, 'index'])->name('assets.index');
         Route::post('assets', [BackOfficeAssets::class, 'store'])->name('assets.store');
         Route::post('assets/{asset}/dispose', [BackOfficeAssets::class, 'dispose'])->name('assets.dispose');

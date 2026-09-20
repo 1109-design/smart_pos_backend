@@ -7,18 +7,31 @@ interface BankAccountRow {
     name: string;
     account_number: string | null;
     branch: string | null;
+    branch_code: string | null;
+    swift_code: string | null;
     currency_code: string;
     is_active: boolean;
 }
 
-interface Props {
-    accounts: BankAccountRow[];
+interface GlAccountRow {
+    id: string;
+    code: string;
+    name: string;
 }
 
-export default function BankAccounts({ accounts }: Props) {
+interface Props {
+    accounts: BankAccountRow[];
+    linkableAccounts: GlAccountRow[];
+}
+
+export default function BankAccounts({ accounts, linkableAccounts }: Props) {
     const [showForm, setShowForm] = useState(false);
+    const [linkExisting, setLinkExisting] = useState(false);
     const { flash } = usePage().props as unknown as { flash: { success: string | null } };
-    const form = useForm({ name: '', account_number: '', branch: '', currency_code: 'USD' });
+    const form = useForm({
+        name: '', account_number: '', branch: '', branch_code: '', swift_code: '',
+        currency_code: 'USD', gl_account_id: '',
+    });
 
     const submit = (e: React.FormEvent) => {
         e.preventDefault();
@@ -26,6 +39,7 @@ export default function BankAccounts({ accounts }: Props) {
             preserveScroll: true,
             onSuccess: () => {
                 form.reset();
+                setLinkExisting(false);
                 setShowForm(false);
             },
         });
@@ -88,6 +102,50 @@ export default function BankAccounts({ accounts }: Props) {
                             onChange={(e) => form.setData('branch', e.target.value)}
                             className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                         />
+                    </div>
+                    <div>
+                        <label className="text-xs font-semibold text-slate-500">Branch code</label>
+                        <input
+                            type="text"
+                            value={form.data.branch_code}
+                            onChange={(e) => form.setData('branch_code', e.target.value)}
+                            className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                    </div>
+                    <div>
+                        <label className="text-xs font-semibold text-slate-500">SWIFT code</label>
+                        <input
+                            type="text"
+                            value={form.data.swift_code}
+                            onChange={(e) => form.setData('swift_code', e.target.value)}
+                            className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                    </div>
+                    <div className="sm:col-span-4">
+                        <label className="flex items-center gap-1.5 text-xs text-slate-600">
+                            <input
+                                type="checkbox" checked={linkExisting}
+                                onChange={(e) => {
+                                    setLinkExisting(e.target.checked);
+                                    if (!e.target.checked) form.setData('gl_account_id', '');
+                                }}
+                            />
+                            Link to an existing GL account instead of creating a new one
+                        </label>
+                        {linkExisting && (
+                            <select
+                                required
+                                value={form.data.gl_account_id}
+                                onChange={(e) => form.setData('gl_account_id', e.target.value)}
+                                className="mt-2 w-full sm:w-auto text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            >
+                                <option value="">Select an account…</option>
+                                {linkableAccounts.map((a) => (
+                                    <option key={a.id} value={a.id}>{a.code} — {a.name}</option>
+                                ))}
+                            </select>
+                        )}
+                        {form.errors.gl_account_id && <p className="text-xs text-red-500 mt-1">{form.errors.gl_account_id}</p>}
                     </div>
                     <div className="sm:col-span-4">
                         <button type="submit" disabled={form.processing} className="btn-primary py-2 px-6 disabled:opacity-50">

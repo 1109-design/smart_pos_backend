@@ -3,6 +3,7 @@
 namespace Tests\Feature\Accounting;
 
 use App\Http\Middleware\AuthenticateBackOfficeUser;
+use App\Models\Accounting\GlAccount;
 use App\Models\BankAccount;
 use App\Models\Business;
 use App\Models\Tenant;
@@ -90,6 +91,66 @@ class BackOfficeBankAccountsTest extends TestCase
         $this->actingBackOfficeSession($otherTenantId);
 
         $this->post("/office/bank-accounts/{$foreignAccount->id}/deactivate")->assertForbidden();
+    }
+
+    public function test_creating_a_bank_account_records_branch_code_and_swift_code(): void
+    {
+        $tenantId = 'tenant-bank-7';
+        $this->actingBackOfficeSession($tenantId);
+
+        $this->post('/office/bank-accounts', [
+            'name' => 'CBZ Main Account',
+            'branch_code' => '10123',
+            'swift_code' => 'CBZWZWHA',
+        ])->assertRedirect();
+
+        $bankAccount = BankAccount::where('business_id', $tenantId)->firstOrFail();
+        $this->assertSame('10123', $bankAccount->branch_code);
+        $this->assertSame('CBZWZWHA', $bankAccount->swift_code);
+    }
+
+    public function test_linking_an_existing_gl_account_does_not_mint_a_new_one(): void
+    {
+        $tenantId = 'tenant-bank-8';
+        $this->actingBackOfficeSession($tenantId);
+        $existing = GlAccount::where('business_id', $tenantId)->where('code', '1020')->firstOrFail();
+        $countBefore = GlAccount::where('business_id', $tenantId)->count();
+
+        $this->post('/office/bank-accounts', [
+            'name' => 'Mobile Money Clearing Account',
+            'gl_account_id' => $existing->id,
+        ])->assertRedirect();
+
+        $bankAccount = BankAccount::where('business_id', $tenantId)->firstOrFail();
+        $this->assertSame($existing->id, $bankAccount->gl_account_id);
+        $this->assertSame($countBefore, GlAccount::where('business_id', $tenantId)->count());
+    }
+
+    public function test_linking_a_gl_account_already_claimed_by_another_active_bank_account_is_rejected(): void
+    {
+        $tenantId = 'tenant-bank-9';
+        $this->actingBackOfficeSession($tenantId);
+        $this->post('/office/bank-accounts', ['name' => 'First Bank']);
+        $firstGlAccountId = BankAccount::where('business_id', $tenantId)->firstOrFail()->gl_account_id;
+
+        $this->post('/office/bank-accounts', [
+            'name' => 'Second Bank, same account',
+            'gl_account_id' => $firstGlAccountId,
+        ])->assertStatus(422);
+
+        $this->assertSame(1, BankAccount::where('business_id', $tenantId)->count());
+    }
+
+    public function test_linking_a_non_asset_gl_account_is_rejected(): void
+    {
+        $tenantId = 'tenant-bank-10';
+        $this->actingBackOfficeSession($tenantId);
+        $expenseAccount = GlAccount::where('business_id', $tenantId)->where('code', '6000')->firstOrFail();
+
+        $this->post('/office/bank-accounts', [
+            'name' => 'Wrong Category',
+            'gl_account_id' => $expenseAccount->id,
+        ])->assertNotFound();
     }
 
     public function test_cash_book_shows_balance_and_activity(): void

@@ -13,9 +13,9 @@ class BankAccount extends Model
     use HasUuids;
 
     protected $fillable = [
-        'id', 'business_id', 'name', 'account_number', 'branch',
-        'currency_code', 'gl_account_id', 'is_active', 'accepts_card_swipe',
-        'show_on_documents',
+        'id', 'business_id', 'name', 'account_number', 'branch', 'branch_code',
+        'swift_code', 'currency_code', 'gl_account_id', 'is_active',
+        'accepts_card_swipe', 'show_on_documents',
     ];
 
     protected static function booted(): void
