@@ -533,7 +533,7 @@ class SyncController extends Controller
         }
 
         return response()->json([
-            'records' => $records,
+            'records' => $this->sanitizeApprovalPayloadJson($records),
             'has_more' => $records->count() === $limit,
             'server_time' => $serverTime->toIso8601String(),
             // See detectReconciliationRequired() — non-empty means the
@@ -545,6 +545,50 @@ class SyncController extends Controller
             // and the outbox (pending pushes) is untouched either way.
             'reconciliation_required' => $reconciliationRequired,
         ]);
+    }
+
+    /**
+     * PHP has no distinct "empty map" type — json_decode('{}', true) and
+     * json_decode('[]', true) both produce []. Eloquent's 'array' cast on
+     * SyncRecord::payload uses exactly that decode, so an approval_requests
+     * record whose nested payload_json started life as an empty JSON
+     * *object* comes back out of the cast as an empty PHP array — and
+     * re-encoding a PHP array (even one that started as an object) always
+     * produces '[]', never '{}'. Every client-side reader of payload_json
+     * (every Flutter Approvals screen) decodes it expecting a JSON object
+     * and throws on an array — this is what actually reaches the wire, so
+     * fixing it has to happen here, after casts have already run and
+     * flattened the distinction, not further upstream (ApprovalService
+     * still normalizes what it writes too, but that alone can't survive
+     * this round-trip). Converts $records to a plain array and re-injects
+     * a stdClass for the empty case, since json_encode(object) always
+     * renders '{}' regardless of nesting — unlike an array, it can't be
+     * collapsed back into a plain array by a later cast.
+     *
+     * Also heals any row already corrupted this way before this fix
+     * existed, since it runs on every read, not just new writes.
+     *
+     * @param  \Illuminate\Support\Collection<int, SyncRecord>  $records
+     * @return array<int, array<string, mixed>>
+     */
+    private function sanitizeApprovalPayloadJson($records): array
+    {
+        $recordsArray = $records->toArray();
+
+        foreach ($recordsArray as &$record) {
+            if (($record['table_name'] ?? null) !== 'approval_requests') {
+                continue;
+            }
+
+            $payload = $record['payload'] ?? null;
+            if (is_array($payload) && ($payload['payload_json'] ?? null) === []) {
+                $payload['payload_json'] = (object) [];
+                $record['payload'] = $payload;
+            }
+        }
+        unset($record);
+
+        return $recordsArray;
     }
 
     /**

@@ -136,6 +136,66 @@ class SyncApprovalRequestAndVoidReasonTest extends TestCase
         $this->assertNotNull($request->approved_at);
     }
 
+    /**
+     * Regression test for the Flutter Approvals crash ("type 'List<dynamic>'
+     * is not a subtype of type 'Map<String, dynamic>'"): PHP has no distinct
+     * "empty map" type, so an approval request's payload_json that started
+     * life as an empty JSON *object* ('{}') gets flattened by json_decode
+     * into an empty PHP array indistinguishable from an empty JSON *array*
+     * ('[]') — and every plain PHP array re-encodes as '[]', never '{}'.
+     * Every client reader of payload_json decodes it expecting an object
+     * and crashes on an array, so this must round-trip through pull as '{}'.
+     */
+    public function test_approval_request_with_empty_payload_pulls_back_as_a_json_object_not_an_array(): void
+    {
+        $tenantId = 'tenant-sync-approval-empty-payload';
+        $token = $this->actingDeviceToken($tenantId);
+        $requestId = (string) Str::uuid();
+
+        // (object) [] mirrors exactly what a Flutter device sends for an
+        // empty payload map — jsonEncode(<String, dynamic>{}) always
+        // produces the JSON object '{}', never '[]'. A plain PHP []
+        // here would send '[]' in the request body instead, missing the
+        // actual bug this test exists to catch.
+        $this->withHeader('Authorization', 'Bearer '.$token)->postJson('/api/v1/sync/push', [
+            'records' => [[
+                'table' => 'approval_requests',
+                'uuid' => $requestId,
+                'operation' => 'upsert',
+                'payload' => [
+                    'business_id' => $tenantId,
+                    'subject_type' => 'Transaction',
+                    'subject_id' => (string) Str::uuid(),
+                    'action' => 'void_transaction',
+                    'requested_by_user_id' => (string) Str::uuid(),
+                    'status' => 'pending',
+                    'payload_json' => (object) [],
+                ],
+                'updated_at' => now()->toIso8601String(),
+            ]],
+        ])->assertOk();
+
+        $otherToken = $this->actingDeviceToken($tenantId.'-other-owner');
+        Device::where('tenant_id', $tenantId.'-other-owner')->update(['tenant_id' => $tenantId]);
+
+        $pull = $this->withHeader('Authorization', 'Bearer '.$otherToken)
+            ->getJson('/api/v1/sync/pull?'.http_build_query(['tables' => ['approval_requests']]));
+
+        $pull->assertOk();
+        $record = collect($pull->json('records'))->firstWhere('record_uuid', $requestId);
+        $this->assertNotNull($record);
+
+        // json_decode() on the response here would silently paper over an
+        // object-vs-array mismatch by decoding both shapes identically —
+        // exactly the bug this test exists to catch — so this asserts
+        // against the literal wire bytes instead.
+        $this->assertStringContainsString(
+            '"payload_json":{}',
+            $pull->getContent(),
+            'payload_json must serialize as a JSON object, not an array, for an empty payload — Flutter clients crash decoding it as List<dynamic>.',
+        );
+    }
+
     public function test_void_reason_persists_via_sync_push(): void
     {
         $tenantId = 'tenant-sync-void-1';
