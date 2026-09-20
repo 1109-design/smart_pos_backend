@@ -67,18 +67,23 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::post('locations', [LocationController::class, 'store']);
     Route::get('locations/{id}', [LocationController::class, 'show']);
     Route::patch('locations/{id}', [LocationController::class, 'update']);
-    Route::get('locations/{id}/stock', [LocationController::class, 'stock']);
     Route::get('locations/{id}/tills', [TillController::class, 'index']);
-    Route::get('products/{productId}/stock-by-location', [LocationController::class, 'productStock']);
 
-    // Stock transfers
-    Route::get('transfers', [StockTransferController::class, 'index']);
-    Route::post('transfers', [StockTransferController::class, 'store']);
-    Route::get('transfers/{id}', [StockTransferController::class, 'show']);
-    Route::post('transfers/{id}/approve', [StockTransferController::class, 'approve']);
-    Route::post('transfers/{id}/dispatch', [StockTransferController::class, 'dispatch']);
-    Route::post('transfers/{id}/receive', [StockTransferController::class, 'receive']);
-    Route::post('transfers/{id}/cancel', [StockTransferController::class, 'cancel']);
+    // DEPRECATED / DECOMMISSIONED: Category C Procedural Operational Endpoints
+    // Under the Flutter-First architecture, Flutter is the operational application.
+    // Stock levels, stock transfers, approvals, dispatches, and receipts are performed
+    // locally on the device (Drift DB) and synchronized via /api/v1/sync/push and /api/v1/sync/pull.
+    // Direct procedural command APIs on Laravel violate this architectural contract.
+    //
+    // Route::get('locations/{id}/stock', [LocationController::class, 'stock']);
+    // Route::get('products/{productId}/stock-by-location', [LocationController::class, 'productStock']);
+    // Route::get('transfers', [StockTransferController::class, 'index']);
+    // Route::post('transfers', [StockTransferController::class, 'store']);
+    // Route::get('transfers/{id}', [StockTransferController::class, 'show']);
+    // Route::post('transfers/{id}/approve', [StockTransferController::class, 'approve']);
+    // Route::post('transfers/{id}/dispatch', [StockTransferController::class, 'dispatch']);
+    // Route::post('transfers/{id}/receive', [StockTransferController::class, 'receive']);
+    // Route::post('transfers/{id}/cancel', [StockTransferController::class, 'cancel']);
 
     // Owner-only, one-time: claims the business's single "reset all stock"
     // token (see StockResetService). The till itself does the zeroing and
