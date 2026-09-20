@@ -46,7 +46,11 @@ class BackOfficeAccountRoleMappingsTest extends TestCase
         $response = $this->get('/office/account-mappings');
 
         $response->assertOk();
-        $response->assertInertia(fn ($page) => $page->has('roles', 8));
+        // 8 pre-existing + 10 added by the Accounts Payable module (inventory,
+        // grn_suspense, input_vat, withholding_tax, freight,
+        // discount_received, purchase_price_variance, fx_gain, fx_loss,
+        // opening_balance_equity) — see AccountRoleMappingService::ROLE_DEFAULTS.
+        $response->assertInertia(fn ($page) => $page->has('roles', 18));
     }
 
     public function test_manager_cannot_access_account_mappings(): void

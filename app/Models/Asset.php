@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Events\AssetChanged;
 use App\Models\Accounting\GeneralLedgerEntry;
 use App\Models\Accounting\GlAccount;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
@@ -18,6 +19,20 @@ class Asset extends Model
         'funding_method', 'status', 'disposed_at', 'disposal_proceeds', 'created_by_user_id',
         'bank_account_id', 'disposal_bank_account_id',
     ];
+
+    protected static function booted(): void
+    {
+        $dispatch = function (Asset $asset): void {
+            if (! $asset->business_id) {
+                return;
+            }
+
+            AssetChanged::dispatch($asset->business_id, $asset->id);
+        };
+
+        static::created($dispatch);
+        static::updated($dispatch);
+    }
 
     protected function casts(): array
     {

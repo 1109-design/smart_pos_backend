@@ -52,6 +52,19 @@ class SupplierInvoiceService
             throw new RuntimeException('Accounting has not been switched on for this business yet.');
         }
 
+        // AP module — once a business is cut over to client-side posting,
+        // the till captures its own supplier invoices via
+        // supplier_invoice_service.dart (full line items, non-PO support,
+        // approval workflow) and pushes them through the normal sync path
+        // (see SyncProcessor's 'supplier_invoices' case). This legacy
+        // BackOffice-only, one-invoice-per-GRV action must back off then,
+        // the same way GrvPostingService::recordReceipt() already does —
+        // otherwise a manager using this old screen could raise a second,
+        // conflicting payable for the same GRV.
+        if ($business->postsFromClientFor($invoiceDate)) {
+            throw new RuntimeException('Supplier invoices are now recorded from the till for this business — use the till\'s Supplier Invoices screen instead.');
+        }
+
         return DB::transaction(function () use ($grv, $invoiceNumber, $invoiceDate, $amount, $userId) {
             $invoice = SupplierInvoice::create([
                 'business_id' => $grv->business_id,

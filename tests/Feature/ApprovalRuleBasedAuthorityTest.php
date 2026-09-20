@@ -10,6 +10,7 @@ use App\Models\Tenant;
 use App\Models\User;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use App\Services\BusinessProvisioner;
+use Database\Seeders\DefaultApprovalRulesSeeder;
 use Database\Seeders\RolesAndPermissionsSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
@@ -41,7 +42,7 @@ class ApprovalRuleBasedAuthorityTest extends TestCase
 
     private function provisionBusiness(): Tenant
     {
-        return app(BusinessProvisioner::class)->provision([
+        $tenant = app(BusinessProvisioner::class)->provision([
             'business_name' => 'Acme Retail '.Str::random(6),
             'owner_email' => Str::random(8).'@acme.com',
             'tier' => 'pro',
@@ -50,6 +51,14 @@ class ApprovalRuleBasedAuthorityTest extends TestCase
             'admin_name' => 'Ada Owner',
             'admin_pin' => '4321',
         ]);
+
+        // Central Approval Stage Engine: BusinessProvisioner no longer
+        // auto-seeds default rule sets (a process with zero configured
+        // stages is meant to be ungated) — seed explicitly here since this
+        // whole test file exists to exercise the rule genuinely applying.
+        DefaultApprovalRulesSeeder::seedForBusiness($tenant->id);
+
+        return $tenant;
     }
 
     private function raisePoApproval(string $tenantId, string $requesterId): ApprovalRequest

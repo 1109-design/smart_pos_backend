@@ -3,10 +3,12 @@
 namespace App\Services;
 
 use App\Models\ApprovalRequest;
+use App\Models\ApprovalRequestStageDecision;
 use App\Models\ApprovalRule;
 use App\Models\ExchangeRate;
 use App\Models\SyncRecord;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 /**
@@ -24,6 +26,29 @@ class ApprovalService
         private readonly SyncProcessor $processor,
         private readonly ApprovalRuleEngine $ruleEngine,
     ) {}
+
+    /**
+     * PHP has no distinct "empty map" type — json_decode('{}', true) and
+     * json_decode('[]', true) both produce []. An empty $payload here would
+     * then re-encode as a JSON *array* ('[]') everywhere it's embedded
+     * (both the approval_requests.payload_json column, and the
+     * sync_records.payload blob every device pulls), even though it
+     * started life as an empty object. Every reader of this field — every
+     * Flutter Approvals screen — decodes it expecting a JSON object and
+     * throws on an array. Casting the empty case to a stdClass sidesteps
+     * this: json_encode((object) []) always produces '{}', regardless of
+     * nesting depth, unlike an empty array.
+     *
+     * @param  array<string, mixed>|null  $payload
+     */
+    private function jsonSafePayload(?array $payload): array|object|null
+    {
+        if ($payload === null) {
+            return null;
+        }
+
+        return $payload === [] ? (object) [] : $payload;
+    }
 
     /**
      * @param  array<string, mixed>  $payload  Context needed to review/apply the action later.
@@ -59,7 +84,7 @@ class ApprovalService
             'approver_user_id' => null,
             'approved_at' => null,
             'reason' => null,
-            'payload_json' => $payload,
+            'payload_json' => $this->jsonSafePayload($payload),
             ...$ruleFields,
         ]);
 
@@ -100,45 +125,98 @@ class ApprovalService
         ];
     }
 
+    /**
+     * Wrapped in a transaction with a row lock on the request being
+     * resolved: without it, two near-simultaneous calls for the same id (a
+     * double-click, or two approvers/devices racing the same queued
+     * request) can both read status='pending' before either writes, and
+     * both proceed — duplicate ApprovalRequestStageDecision audit rows, and
+     * for a subject type with a side effect (PO release, exchange-rate
+     * write), a duplicate downstream action. `lockForUpdate()` serializes
+     * them: the second caller blocks until the first transaction commits,
+     * then sees the now-resolved status and takes the "already resolved"
+     * path below instead. This also gives the decision + its side effect
+     * the same all-or-nothing guarantee the till-side twin
+     * (`resolveApprovalRequest` in approval_resolution.dart) already has —
+     * a failure partway through must not leave the request marked resolved
+     * with its side effect never applied, or vice versa.
+     */
     public function resolve(string $id, string $approverUserId, string $decision, ?string $reason = null): ApprovalRequest
     {
-        $request = ApprovalRequest::findOrFail($id);
+        if (! in_array($decision, ['approved', 'rejected'], true)) {
+            throw new \RuntimeException("Invalid decision: {$decision}");
+        }
+
+        return DB::transaction(fn () => $this->resolveLocked($id, $approverUserId, $decision, $reason));
+    }
+
+    private function resolveLocked(string $id, string $approverUserId, string $decision, ?string $reason): ApprovalRequest
+    {
+        $request = ApprovalRequest::where('id', $id)->lockForUpdate()->firstOrFail();
 
         if (! $request->isPending()) {
             throw new \RuntimeException('This approval request has already been resolved.');
         }
 
-        if (! in_array($decision, ['approved', 'rejected'], true)) {
-            throw new \RuntimeException("Invalid decision: {$decision}");
-        }
-
-        // Separation of duties (always) + role-based authority (only when
-        // request() attached a rule_set_id — see resolveRuleFieldsForLevel()).
+        // Separation of duties (always) + group/role-based authority (only
+        // when request() attached a rule_set_id — see resolveRuleFieldsForLevel()).
         // ApprovalsController::approve()/reject() only ever checked the
         // coarse MANAGE_APPROVALS permission ("can this person decide
         // approvals at all"), never whether *this* person is an eligible
-        // decider for *this specific* request — so any manager with that
-        // permission could both resolve a request they themselves raised,
-        // and clear a request a rule says needs a more senior role than
-        // theirs. A request with no rule_set_id (every process not yet
-        // routed through request()'s optional $process param) keeps
-        // today's exact behaviour: any MANAGE_APPROVALS holder who isn't
-        // the requester.
-        $requiredRole = $request->rule_set_id
+        // decider for *this specific* request/stage — so any manager with
+        // that permission could both resolve a request they themselves
+        // raised, and clear a request a rule says needs a different named
+        // approver. A request with no rule_set_id (every process not yet
+        // routed through request()'s optional $process param) keeps today's
+        // exact behaviour: any MANAGE_APPROVALS holder who isn't the requester.
+        $rule = $request->rule_set_id
             ? $this->ruleEngine->findApplicableRule(
                 $request->ruleSet,
                 ['amount' => (float) ($request->estimated_value ?? 0)],
                 $request->current_level,
-            )?->required_role
+            )
             : null;
 
-        if (! $this->ruleEngine->canApprove($request->business_id, $approverUserId, $request, $requiredRole)) {
+        if (! $this->ruleEngine->canApprove($request->business_id, $approverUserId, $request, $rule)) {
             throw new \RuntimeException(
-                $requiredRole
-                    ? "This request requires {$requiredRole} authority or higher to decide."
-                    : 'You cannot approve or reject your own request.'
+                match (true) {
+                    $rule?->approval_group_id !== null => 'This stage requires a member of the assigned approver group to decide it.',
+                    $rule?->required_role !== null => "This request requires {$rule->required_role} authority or higher to decide.",
+                    default => 'You cannot approve or reject your own request.',
+                }
             );
         }
+
+        $delegatedFromUserId = $rule ? $this->ruleEngine->resolveDelegationSource($request->business_id, $approverUserId, $rule) : null;
+        $slaBreached = $request->sla_due_at !== null && now()->greaterThan($request->sla_due_at);
+
+        $priorStageDecision = ApprovalRequestStageDecision::where('approval_request_id', $request->id)
+            ->where('level', $request->current_level - 1)
+            ->latest('acted_at')
+            ->first();
+        $sameApproverAsPriorStage = $priorStageDecision !== null && $priorStageDecision->acted_by_user_id === $approverUserId;
+
+        $this->recordStageDecision($request, $request->current_level, $decision, $approverUserId, $delegatedFromUserId, $reason, $slaBreached, $sameApproverAsPriorStage);
+
+        // max_level is just the highest level *number* defined on the rule
+        // set — for a conditional multi-level rule set (e.g. the seeded PO
+        // rules, where level 2 only kicks in above $10,000) that number
+        // means nothing on its own. Only advance if a rule actually applies
+        // to THIS request's context at the next level; otherwise level 1
+        // was always the last stage this specific request needed, and it's
+        // final now, same as any single-level process.
+        $nextRule = $decision === 'approved' && $request->current_level < $request->max_level
+            ? $this->ruleEngine->findApplicableRule(
+                $request->ruleSet,
+                ['amount' => (float) ($request->estimated_value ?? 0)],
+                $request->current_level + 1,
+            )
+            : null;
+        $willAdvance = $nextRule !== null;
+
+        $finalStatus = $willAdvance ? 'pending' : $decision;
+        $nextLevel = $willAdvance ? $request->current_level + 1 : $request->current_level;
+        $slaDueAt = $willAdvance ? now()->addHours($nextRule->sla_hours)->toIso8601String() : $request->sla_due_at?->toIso8601String();
 
         $this->syncUpsert($request->id, [
             'business_id' => $request->business_id,
@@ -146,12 +224,25 @@ class ApprovalService
             'subject_id' => $request->subject_id,
             'action' => $request->action,
             'requested_by_user_id' => $request->requested_by_user_id,
-            'status' => $decision,
-            'approver_user_id' => $approverUserId,
-            'approved_at' => now()->toIso8601String(),
+            'status' => $finalStatus,
+            'approver_user_id' => $willAdvance ? null : $approverUserId,
+            'approved_at' => $willAdvance ? null : now()->toIso8601String(),
             'reason' => $reason,
-            'payload_json' => $request->payload_json,
+            'payload_json' => $this->jsonSafePayload($request->payload_json),
+            'rule_set_id' => $request->rule_set_id,
+            'current_level' => $nextLevel,
+            'max_level' => $request->max_level,
+            'sla_due_at' => $slaDueAt,
+            'priority' => $request->priority,
+            'estimated_value' => $request->estimated_value,
+            'branch_id' => $request->branch_id,
+            'is_delegated' => $delegatedFromUserId !== null,
+            'delegated_from_user_id' => $delegatedFromUserId,
         ]);
+
+        if ($willAdvance) {
+            return $request->fresh();
+        }
 
         if ($decision === 'approved') {
             $this->applyApprovedAction($request, $approverUserId);
@@ -160,6 +251,46 @@ class ApprovalService
         }
 
         return $request->fresh();
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    private function recordStageDecision(
+        ApprovalRequest $request,
+        int $level,
+        string $decision,
+        string $approverUserId,
+        ?string $delegatedFromUserId,
+        ?string $reason,
+        bool $slaBreached,
+        bool $sameApproverAsPriorStage,
+    ): void {
+        $id = (string) Str::uuid();
+        $payload = [
+            'business_id' => $request->business_id,
+            'approval_request_id' => $request->id,
+            'level' => $level,
+            'decision' => $decision,
+            'acted_by_user_id' => $approverUserId,
+            'acted_as_delegate_for_user_id' => $delegatedFromUserId,
+            'reason' => $reason,
+            'sla_breached' => $slaBreached,
+            'same_approver_as_prior_stage' => $sameApproverAsPriorStage,
+            'acted_at' => now()->toIso8601String(),
+        ];
+
+        $this->processor->process('approval_request_stage_decisions', $id, 'upsert', $payload);
+
+        SyncRecord::create([
+            'business_id' => $request->business_id,
+            'table_name' => 'approval_request_stage_decisions',
+            'record_uuid' => $id,
+            'operation' => 'upsert',
+            'payload' => $payload,
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+        ]);
     }
 
     /**

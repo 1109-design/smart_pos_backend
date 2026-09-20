@@ -39,6 +39,25 @@ class AccountRoleMappingService
         // write-offs. Shares '6050' (Stock Loss / Write-offs) rather than a
         // new chart code — see the Flutter side's identical note.
         'material_scrap_loss' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6050', 'name' => 'Stock Loss / Write-offs'],
+        // Accounts Payable module (spec §7/§12) — 'inventory'/'grn_suspense'
+        // point at the SAME '1200'/'2010' codes GrvPostingService/
+        // GrvPostingService.php already hardcoded; role-mapping them here
+        // just makes that resolvable/reassignable like everything else,
+        // it doesn't change what a fresh business gets seeded.
+        'inventory' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1200', 'name' => 'Inventory'],
+        'grn_suspense' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2010', 'name' => 'GRN Suspense'],
+        'input_vat' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1150', 'name' => 'Input VAT'],
+        'withholding_tax' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2015', 'name' => 'Withholding Tax Payable'],
+        'freight' => ['category' => 'Expenses', 'subCategory' => 'Operating Expenses', 'code' => '6015', 'name' => 'Freight & Carriage Inwards'],
+        'discount_received' => ['category' => 'Revenue', 'subCategory' => 'Other Income', 'code' => '4015', 'name' => 'Discount Received'],
+        'purchase_price_variance' => ['category' => 'Cost of Sales', 'subCategory' => 'Cost of Sales', 'code' => '5010', 'name' => 'Purchase Price Variance'],
+        'opening_balance_equity' => ['category' => 'Equity', 'subCategory' => "Shareholders' Equity", 'code' => '3020', 'name' => 'Opening Balance Equity'],
+        // Already seeded ('4020'/'6080' — see AR's InvoicePaymentPostingService)
+        // but never role-mapped until AP's own multi-currency settlement
+        // needed to resolve them too — see SupplierPaymentService's FX
+        // handling.
+        'fx_gain' => ['category' => 'Revenue', 'subCategory' => 'Other Income', 'code' => '4020', 'name' => 'FX Gain'],
+        'fx_loss' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6080', 'name' => 'FX Loss'],
         // Deliberately NOT mapped: 'accumulated depreciation' would need to
         // match whatever GL account the still-hardcoded, still-server-only
         // monthly depreciation sweep (postMonthlyDepreciation()) posts

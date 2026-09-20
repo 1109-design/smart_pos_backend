@@ -69,6 +69,22 @@ class CashVaultController extends BackOfficeController
         ), 'Bank deposit recorded.');
     }
 
+    public function withdraw(Request $request): RedirectResponse
+    {
+        $this->authorizeManager();
+
+        $data = $request->validate([
+            'amount' => ['required', 'numeric', 'min:0.01'],
+            'date' => ['required', 'date'],
+            'note' => ['nullable', 'string', 'max:255'],
+            'bank_account_id' => ['nullable', 'uuid'],
+        ]);
+
+        return $this->attempt(fn () => $this->vault->recordBankWithdrawal(
+            $this->tenantId(), (float) $data['amount'], $data['date'], $data['note'] ?? null, $this->userId(), $data['bank_account_id'] ?? null,
+        ), 'Bank withdrawal recorded.');
+    }
+
     public function count(Request $request): RedirectResponse
     {
         $this->authorizeManager();

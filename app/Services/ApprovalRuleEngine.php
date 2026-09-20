@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\ApprovalDelegation;
+use App\Models\ApprovalGroupMember;
 use App\Models\ApprovalRequest;
 use App\Models\ApprovalRule;
 use App\Models\ApprovalRuleSet;
@@ -62,22 +63,46 @@ class ApprovalRuleEngine
     }
 
     /**
-     * Checks if a user can approve an approval request.
+     * Checks if a user can approve an approval request at its current stage.
      *
      * Combines three checks:
      *  1. Separation of duties — approver ≠ requester (when rule enforces it)
-     *  2. Role hierarchy — approver's role is at or above the required_role level
-     *  3. Delegation — approver may be acting as delegate for an eligible user
+     *  2. Authority — either membership in the rule's named approver group
+     *     (the central-setup model going forward), or the legacy required_role
+     *     hierarchy check, for rules that still only carry a role
+     *  3. Delegation — approver may be acting as delegate for an eligible
+     *     group member or role-holder, scoped to this request's process/level
      */
-    public function canApprove(string $businessId, string $approverUserId, ApprovalRequest $request, ?string $requiredRole = null): bool
+    public function canApprove(string $businessId, string $approverUserId, ApprovalRequest $request, ?ApprovalRule $rule = null): bool
     {
         // Separation of duties — hard stop
         if (! $this->checkSeparationOfDuties($request, $approverUserId)) {
             return false;
         }
 
-        // If no required role, fall back to legacy allow (preserves existing behaviour)
-        if ($requiredRole === null) {
+        // No rule at this level — legacy allow (preserves existing behaviour
+        // for every process not routed through the rule engine).
+        if ($rule === null) {
+            return true;
+        }
+
+        $process = $rule->ruleSet?->process ?? $request->action;
+
+        if ($rule->approval_group_id !== null) {
+            if ($this->isGroupMember($rule->approval_group_id, $approverUserId)) {
+                return true;
+            }
+
+            foreach ($this->getActiveDelegates($businessId, $approverUserId, $process, $rule->level) as $delegatorId) {
+                if ($this->isGroupMember($rule->approval_group_id, $delegatorId)) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        if ($rule->required_role === null) {
             return true;
         }
 
@@ -92,12 +117,12 @@ class ApprovalRuleEngine
         $approverRoleName = $user->roles->first()?->name ?? '';
 
         // Direct role match via hierarchy
-        if ($this->roleCanApproveFor($approverRoleName, $requiredRole)) {
+        if ($this->roleCanApproveFor($approverRoleName, $rule->required_role)) {
             return true;
         }
 
         // Delegation fallback — check if approver is acting for someone with the right role
-        $delegatorIds = $this->getActiveDelegates($businessId, $approverUserId);
+        $delegatorIds = $this->getActiveDelegates($businessId, $approverUserId, $process, $rule->level);
 
         foreach ($delegatorIds as $delegatorId) {
             $delegator = User::where('id', $delegatorId)
@@ -105,12 +130,70 @@ class ApprovalRuleEngine
                 ->first();
 
             $delegatorRoleName = $delegator ? ($delegator->roles->first()?->name ?? '') : '';
-            if ($delegator && $this->roleCanApproveFor($delegatorRoleName, $requiredRole)) {
+            if ($delegator && $this->roleCanApproveFor($delegatorRoleName, $rule->required_role)) {
                 return true;
             }
         }
 
         return false;
+    }
+
+    /**
+     * Whether $userId is a named member of approval group $groupId.
+     */
+    public function isGroupMember(string $groupId, string $userId): bool
+    {
+        return ApprovalGroupMember::where('group_id', $groupId)
+            ->where('user_id', $userId)
+            ->exists();
+    }
+
+    /**
+     * Assumes canApprove() already passed for $approverUserId against $rule.
+     * Returns null if they qualify directly (group member / role holder),
+     * or the delegator's user id if they only qualify via an active
+     * delegation — used to record ApprovalRequestStageDecision's
+     * acted_as_delegate_for_user_id for the audit trail.
+     */
+    public function resolveDelegationSource(string $businessId, string $approverUserId, ApprovalRule $rule): ?string
+    {
+        $process = $rule->ruleSet?->process;
+
+        if ($rule->approval_group_id !== null) {
+            if ($this->isGroupMember($rule->approval_group_id, $approverUserId)) {
+                return null;
+            }
+
+            foreach ($this->getActiveDelegates($businessId, $approverUserId, $process, $rule->level) as $delegatorId) {
+                if ($this->isGroupMember($rule->approval_group_id, $delegatorId)) {
+                    return $delegatorId;
+                }
+            }
+
+            return null;
+        }
+
+        if ($rule->required_role === null) {
+            return null;
+        }
+
+        $user = User::where('id', $approverUserId)->where('business_id', $businessId)->first();
+        $approverRoleName = $user?->roles->first()?->name ?? '';
+
+        if ($this->roleCanApproveFor($approverRoleName, $rule->required_role)) {
+            return null;
+        }
+
+        foreach ($this->getActiveDelegates($businessId, $approverUserId, $process, $rule->level) as $delegatorId) {
+            $delegator = User::where('id', $delegatorId)->where('business_id', $businessId)->first();
+            $delegatorRoleName = $delegator ? ($delegator->roles->first()?->name ?? '') : '';
+
+            if ($delegator && $this->roleCanApproveFor($delegatorRoleName, $rule->required_role)) {
+                return $delegatorId;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -140,14 +223,21 @@ class ApprovalRuleEngine
     }
 
     /**
-     * Gets the IDs of users who have delegated authority TO this user (active now).
+     * Gets the IDs of users who have delegated authority TO this user (active
+     * now), optionally scoped to a process/level — a delegation with a null
+     * process or level on the row is a wildcard for that dimension.
      */
-    public function getActiveDelegates(string $businessId, string $userId): Collection
+    public function getActiveDelegates(string $businessId, string $userId, ?string $process = null, ?int $level = null): Collection
     {
-        return ApprovalDelegation::where('business_id', $businessId)
+        $query = ApprovalDelegation::where('business_id', $businessId)
             ->where('delegate_user_id', $userId)
-            ->active()
-            ->pluck('delegator_user_id');
+            ->active();
+
+        if ($process !== null && $level !== null) {
+            $query->covering($process, $level);
+        }
+
+        return $query->pluck('delegator_user_id');
     }
 
     /**

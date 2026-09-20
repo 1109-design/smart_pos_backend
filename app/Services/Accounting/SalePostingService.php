@@ -125,7 +125,21 @@ class SalePostingService
                 'sale',
                 $transaction->id,
                 'Sale '.($transaction->sale_number ?? $transaction->id),
+                // A sale posts at most one journal ever — existingJournal()
+                // above never excludes a reversed one, so source_id truly is
+                // 1:1 for this source type — safe to enforce at the DB level.
+                idempotencyKey: 'sale:'.$transaction->id,
             );
+
+            if (! $header->canEdit()) {
+                // Lost a race against another concurrent post for this same
+                // sale (e.g. a sync retry) — createDraft() handed back the
+                // winner's already-posted header instead of a fresh draft.
+                // Nothing left to do here.
+                Log::debug("Accounting: sale {$transaction->id} already posted by a concurrent request — skipping.");
+
+                return;
+            }
 
             // Revenue folds in surcharge_total (real income, simple to treat
             // as revenue) but not deposit_total, which is refundable and

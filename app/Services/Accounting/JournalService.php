@@ -8,6 +8,7 @@ use App\Models\Accounting\GlAccount;
 use App\Models\Accounting\JournalHeader;
 use App\Models\Accounting\JournalLine;
 use App\Models\SyncRecord;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
@@ -21,24 +22,78 @@ use RuntimeException;
  */
 class JournalService
 {
+    /**
+     * @param  string|null  $idempotencyKey  Set this ONLY for a posting path
+     *                                       that creates at most one journal
+     *                                       ever for a given source (e.g.
+     *                                       "sale:{$transactionId}") — it's
+     *                                       enforced uniquely at the DB
+     *                                       level (journal_headers_
+     *                                       idempotency_key_unique), closing
+     *                                       the race window between a
+     *                                       caller's own existingJournal()-
+     *                                       style pre-check and this insert.
+     *                                       Leave it null for anything that
+     *                                       legitimately posts more than one
+     *                                       journal against the same source
+     *                                       over time (recurring
+     *                                       depreciation, multi-part GRV
+     *                                       receipts, reverse-then-repost
+     *                                       edits) — a duplicate null never
+     *                                       collides with another.
+     */
     public function createDraft(
         string $businessId,
         string $transDate,
         ?string $sourceType = null,
         ?string $sourceId = null,
         ?string $description = null,
+        ?string $idempotencyKey = null,
     ): JournalHeader {
-        return DB::transaction(function () use ($businessId, $transDate, $sourceType, $sourceId, $description) {
-            return JournalHeader::create([
-                'business_id' => $businessId,
-                'journal_number' => $this->nextJournalNumber($businessId),
-                'trans_date' => $transDate,
-                'description' => $description,
-                'source_type' => $sourceType,
-                'source_id' => $sourceId,
-                'status' => 'draft',
-            ]);
-        });
+        try {
+            return DB::transaction(function () use ($businessId, $transDate, $sourceType, $sourceId, $description, $idempotencyKey) {
+                return JournalHeader::create([
+                    'business_id' => $businessId,
+                    'journal_number' => $this->nextJournalNumber($businessId),
+                    'trans_date' => $transDate,
+                    'description' => $description,
+                    'source_type' => $sourceType,
+                    'source_id' => $sourceId,
+                    'idempotency_key' => $idempotencyKey,
+                    'status' => 'draft',
+                ]);
+            });
+        } catch (QueryException $e) {
+            // Backstop for the check-then-insert race a caller that opted
+            // into $idempotencyKey does (existingJournal()-style lookup,
+            // then createDraft()): two near-simultaneous callers for the
+            // same source can both pass the lookup before either commits.
+            // The DB now rejects the second insert via
+            // journal_headers_idempotency_key_unique — treat that specific
+            // collision as "someone else already won this post" and hand
+            // back their row, so the caller's addLine()/post() sequence
+            // degrades to a no-op via JournalHeader::canEdit() instead of
+            // crashing. Anything else (e.g. a genuine journal_number
+            // collision, which shouldn't happen given nextJournalNumber()'s
+            // locking) still throws.
+            if ($idempotencyKey !== null && $this->isUniqueConstraintViolation($e)) {
+                $existing = JournalHeader::where('idempotency_key', $idempotencyKey)->first();
+
+                if ($existing) {
+                    return $existing;
+                }
+            }
+
+            throw $e;
+        }
+    }
+
+    private function isUniqueConstraintViolation(QueryException $e): bool
+    {
+        // SQLSTATE 23000 (integrity constraint violation) is the portable
+        // signal across sqlite (tests), mysql and pgsql — Laravel's
+        // QueryException::getCode() surfaces the driver's SQLSTATE here.
+        return $e->getCode() === '23000';
     }
 
     /**

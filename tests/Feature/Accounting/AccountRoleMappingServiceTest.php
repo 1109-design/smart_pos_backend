@@ -9,6 +9,7 @@ use App\Models\Tenant;
 use App\Services\Accounting\AccountRoleMappingService;
 use App\Services\Accounting\ChartOfAccountsSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class AccountRoleMappingServiceTest extends TestCase
@@ -100,5 +101,34 @@ class AccountRoleMappingServiceTest extends TestCase
         $this->assertContains('default_cash', $roles);
         $this->assertContains('default_bank', $roles);
         $this->assertContains('default_mobile_money', $roles);
+    }
+
+    /**
+     * @return array<string, array{0: string, 1: string}>
+     */
+    public static function apRoleProvider(): array
+    {
+        return [
+            'inventory' => ['inventory', '1200'],
+            'grn_suspense' => ['grn_suspense', '2010'],
+            'input_vat' => ['input_vat', '1150'],
+            'withholding_tax' => ['withholding_tax', '2015'],
+            'freight' => ['freight', '6015'],
+            'discount_received' => ['discount_received', '4015'],
+            'purchase_price_variance' => ['purchase_price_variance', '5010'],
+            'fx_gain' => ['fx_gain', '4020'],
+            'fx_loss' => ['fx_loss', '6080'],
+            'opening_balance_equity' => ['opening_balance_equity', '3020'],
+        ];
+    }
+
+    #[DataProvider('apRoleProvider')]
+    public function test_ap_module_roles_resolve_to_their_expected_gl_code(string $role, string $expectedCode): void
+    {
+        $businessId = $this->makeLiveBusiness();
+
+        $account = app(AccountRoleMappingService::class)->resolve($businessId, $role);
+
+        $this->assertSame($expectedCode, $account->code);
     }
 }

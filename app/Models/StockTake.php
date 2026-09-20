@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Events\StockTakeChanged;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -15,6 +16,20 @@ class StockTake extends Model
         'id', 'business_id', 'location_id', 'title', 'status', 'notes',
         'created_by_user_id', 'approved_by_user_id', 'approved_at', 'review_comment',
     ];
+
+    protected static function booted(): void
+    {
+        $dispatch = function (StockTake $stockTake): void {
+            if (! $stockTake->business_id) {
+                return;
+            }
+
+            StockTakeChanged::dispatch($stockTake->business_id, $stockTake->location_id, $stockTake->id);
+        };
+
+        static::created($dispatch);
+        static::updated($dispatch);
+    }
 
     /**
      * Statuses that end a stock take's lifecycle. Once reached, no further

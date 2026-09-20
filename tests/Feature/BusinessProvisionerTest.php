@@ -70,22 +70,22 @@ class BusinessProvisionerTest extends TestCase
     }
 
     /**
-     * Enterprise approval-rule-engine audit follow-up:
-     * DefaultApprovalRulesSeeder::seedForBusiness() existed with no caller
-     * anywhere in the app, so no business ever actually got a configured
-     * approval rule set — every process ran with no rule-based routing at
-     * all. Wired in alongside the chart of accounts seeder.
+     * Central Approval Stage Engine: provisioning briefly auto-seeded
+     * DefaultApprovalRulesSeeder's role-based rules (see git history for
+     * that short-lived fix), but the stage engine's whole premise is that a
+     * process with zero configured stages is ungated — no PIN prompt, no
+     * gate — until an owner explicitly opts in via the till's approval-
+     * config screen and assigns named approver groups. Auto-seeding here
+     * would silently gate every new business on processes nobody
+     * configured, so provisioning intentionally leaves this empty now.
+     * DefaultApprovalRulesSeeder itself still exists for manual/test use —
+     * see ApprovalRuleBasedAuthorityTest, which seeds it explicitly.
      */
-    public function test_provision_seeds_default_approval_rules_for_the_new_business(): void
+    public function test_provision_does_not_auto_seed_any_approval_rules(): void
     {
         $tenant = $this->provision();
 
-        $this->assertGreaterThan(0, ApprovalRuleSet::where('business_id', $tenant->id)->count());
-        $this->assertDatabaseHas('approval_rule_sets', [
-            'business_id' => $tenant->id,
-            'process' => 'purchase_order',
-            'is_enabled' => true,
-        ]);
+        $this->assertSame(0, ApprovalRuleSet::where('business_id', $tenant->id)->count());
     }
 
     public function test_duplicate_business_names_receive_unique_domains(): void

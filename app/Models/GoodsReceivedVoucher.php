@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Events\GoodsReceivedVoucherRecorded;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -10,6 +11,17 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 class GoodsReceivedVoucher extends Model
 {
     use HasUuids;
+
+    protected static function booted(): void
+    {
+        static::created(function (GoodsReceivedVoucher $grv): void {
+            if (! $grv->business_id) {
+                return;
+            }
+
+            GoodsReceivedVoucherRecorded::dispatch($grv->business_id, $grv->id, $grv->purchase_order_id);
+        });
+    }
 
     protected $fillable = [
         'id', 'business_id', 'grv_number', 'purchase_order_id', 'supplier_id', 'received_date',

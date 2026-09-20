@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Events\InvoiceChanged;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -18,6 +19,20 @@ class Invoice extends Model
         'recurring_schedule_id', 'notes', 'created_by_user_id',
         'currency_code', 'exchange_rate',
     ];
+
+    protected static function booted(): void
+    {
+        $dispatch = function (Invoice $invoice): void {
+            if (! $invoice->business_id) {
+                return;
+            }
+
+            InvoiceChanged::dispatch($invoice->business_id, $invoice->location_id, $invoice->id);
+        };
+
+        static::created($dispatch);
+        static::updated($dispatch);
+    }
 
     protected function casts(): array
     {

@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Events\CreditNoteChanged;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -15,6 +16,17 @@ class CreditNote extends Model
         'id', 'business_id', 'invoice_id', 'customer_id', 'credit_note_number',
         'reason', 'subtotal', 'tax_total', 'total', 'created_by_user_id',
     ];
+
+    protected static function booted(): void
+    {
+        static::created(function (CreditNote $creditNote): void {
+            if (! $creditNote->business_id) {
+                return;
+            }
+
+            CreditNoteChanged::dispatch($creditNote->business_id, $creditNote->id);
+        });
+    }
 
     public function invoice(): BelongsTo
     {

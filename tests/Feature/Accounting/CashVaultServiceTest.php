@@ -40,9 +40,14 @@ class CashVaultServiceTest extends TestCase
 
     private function fundCash(float $amount): void
     {
+        $this->fundAccount($this->account('1000'), $amount);
+    }
+
+    private function fundAccount(GlAccount $account, float $amount): void
+    {
         $journals = app(JournalService::class);
         $header = $journals->createDraft($this->businessId, '2026-06-01', 'capital', (string) Str::uuid());
-        $journals->addLine($header, ['gl_account_id' => $this->account('1000')->id, 'debit' => $amount]);
+        $journals->addLine($header, ['gl_account_id' => $account->id, 'debit' => $amount]);
         $journals->addLine($header, ['gl_account_id' => $this->account('3000')->id, 'credit' => $amount]);
         $journals->post($header);
     }
@@ -79,6 +84,39 @@ class CashVaultServiceTest extends TestCase
         $namedBankGl = GlAccount::find($bankAccount->gl_account_id);
         $this->assertSame(0.0, $this->account('1010')->balance());
         $this->assertSame(250.0, $namedBankGl->balance());
+    }
+
+    public function test_a_bank_withdrawal_moves_money_from_the_bank_to_the_vault(): void
+    {
+        $this->fundAccount($this->account('1010'), 400.0);
+
+        $this->vault->recordBankWithdrawal($this->businessId, 150.0, '2026-06-06', 'Restocking the till', 'user-1');
+
+        $this->assertSame(250.0, $this->account('1010')->balance());
+        $this->assertSame(150.0, $this->vault->balance($this->businessId));
+    }
+
+    public function test_a_bank_withdrawal_tagged_with_a_bank_account_posts_against_that_accounts_own_gl_line(): void
+    {
+        $bankAccount = app(BankAccountService::class)->create($this->businessId, 'CBZ Main Account');
+        $namedBankGl = GlAccount::find($bankAccount->gl_account_id);
+        $this->fundAccount($namedBankGl, 400.0);
+
+        $this->vault->recordBankWithdrawal($this->businessId, 150.0, '2026-06-06', null, 'user-1', $bankAccount->id);
+
+        $this->assertSame(0.0, $this->account('1010')->balance());
+        $this->assertSame(250.0, $namedBankGl->fresh()->balance());
+        $this->assertSame(150.0, $this->vault->balance($this->businessId));
+    }
+
+    public function test_a_bank_withdrawal_that_would_overdraw_the_bank_is_rejected(): void
+    {
+        $this->fundAccount($this->account('1010'), 100.0);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('negative');
+
+        $this->vault->recordBankWithdrawal($this->businessId, 500.0, '2026-06-06', null, 'user-1');
     }
 
     public function test_a_count_matching_the_ledger_posts_nothing(): void
@@ -170,5 +208,13 @@ class CashVaultServiceTest extends TestCase
         $this->vault->recordTillDrop($this->businessId, 200.0, '2026-06-05', null, 'user-1');
 
         $this->assertSame(1, JournalHeader::where('source_type', 'cash_vault_drop')->count());
+    }
+
+    public function test_journal_source_type_is_tagged_for_a_bank_withdrawal(): void
+    {
+        $this->fundAccount($this->account('1010'), 200.0);
+        $this->vault->recordBankWithdrawal($this->businessId, 50.0, '2026-06-06', null, 'user-1');
+
+        $this->assertSame(1, JournalHeader::where('source_type', 'cash_vault_withdrawal')->count());
     }
 }
