@@ -8,6 +8,7 @@ use App\Models\ApprovalRule;
 use App\Models\ExchangeRate;
 use App\Models\SyncRecord;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 /**
@@ -25,6 +26,29 @@ class ApprovalService
         private readonly SyncProcessor $processor,
         private readonly ApprovalRuleEngine $ruleEngine,
     ) {}
+
+    /**
+     * PHP has no distinct "empty map" type — json_decode('{}', true) and
+     * json_decode('[]', true) both produce []. An empty $payload here would
+     * then re-encode as a JSON *array* ('[]') everywhere it's embedded
+     * (both the approval_requests.payload_json column, and the
+     * sync_records.payload blob every device pulls), even though it
+     * started life as an empty object. Every reader of this field — every
+     * Flutter Approvals screen — decodes it expecting a JSON object and
+     * throws on an array. Casting the empty case to a stdClass sidesteps
+     * this: json_encode((object) []) always produces '{}', regardless of
+     * nesting depth, unlike an empty array.
+     *
+     * @param  array<string, mixed>|null  $payload
+     */
+    private function jsonSafePayload(?array $payload): array|object|null
+    {
+        if ($payload === null) {
+            return null;
+        }
+
+        return $payload === [] ? (object) [] : $payload;
+    }
 
     /**
      * @param  array<string, mixed>  $payload  Context needed to review/apply the action later.
@@ -60,7 +84,7 @@ class ApprovalService
             'approver_user_id' => null,
             'approved_at' => null,
             'reason' => null,
-            'payload_json' => $payload,
+            'payload_json' => $this->jsonSafePayload($payload),
             ...$ruleFields,
         ]);
 
@@ -101,16 +125,37 @@ class ApprovalService
         ];
     }
 
+    /**
+     * Wrapped in a transaction with a row lock on the request being
+     * resolved: without it, two near-simultaneous calls for the same id (a
+     * double-click, or two approvers/devices racing the same queued
+     * request) can both read status='pending' before either writes, and
+     * both proceed — duplicate ApprovalRequestStageDecision audit rows, and
+     * for a subject type with a side effect (PO release, exchange-rate
+     * write), a duplicate downstream action. `lockForUpdate()` serializes
+     * them: the second caller blocks until the first transaction commits,
+     * then sees the now-resolved status and takes the "already resolved"
+     * path below instead. This also gives the decision + its side effect
+     * the same all-or-nothing guarantee the till-side twin
+     * (`resolveApprovalRequest` in approval_resolution.dart) already has —
+     * a failure partway through must not leave the request marked resolved
+     * with its side effect never applied, or vice versa.
+     */
     public function resolve(string $id, string $approverUserId, string $decision, ?string $reason = null): ApprovalRequest
     {
-        $request = ApprovalRequest::findOrFail($id);
+        if (! in_array($decision, ['approved', 'rejected'], true)) {
+            throw new \RuntimeException("Invalid decision: {$decision}");
+        }
+
+        return DB::transaction(fn () => $this->resolveLocked($id, $approverUserId, $decision, $reason));
+    }
+
+    private function resolveLocked(string $id, string $approverUserId, string $decision, ?string $reason): ApprovalRequest
+    {
+        $request = ApprovalRequest::where('id', $id)->lockForUpdate()->firstOrFail();
 
         if (! $request->isPending()) {
             throw new \RuntimeException('This approval request has already been resolved.');
-        }
-
-        if (! in_array($decision, ['approved', 'rejected'], true)) {
-            throw new \RuntimeException("Invalid decision: {$decision}");
         }
 
         // Separation of duties (always) + group/role-based authority (only
@@ -183,7 +228,7 @@ class ApprovalService
             'approver_user_id' => $willAdvance ? null : $approverUserId,
             'approved_at' => $willAdvance ? null : now()->toIso8601String(),
             'reason' => $reason,
-            'payload_json' => $request->payload_json,
+            'payload_json' => $this->jsonSafePayload($request->payload_json),
             'rule_set_id' => $request->rule_set_id,
             'current_level' => $nextLevel,
             'max_level' => $request->max_level,
