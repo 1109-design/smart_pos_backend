@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Models\SyncRecord;
 use App\Models\User;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Hash;
@@ -45,6 +46,30 @@ class RehashPlaintextPins extends Command
             if (preg_match('/^\d{4}$/', $pin) === 1) {
                 if (! $dryRun) {
                     $user->forceFill(['pin_hash' => Hash::make($pin)])->save();
+                    $user->refresh();
+                    // Fan out to devices — without this the rehashed PIN
+                    // never appears in sync/pull (cursor-driven) and every
+                    // till keeps the old hash forever (see BUG-001).
+                    $roleName = method_exists($user, 'getRoleNames')
+                        ? ($user->getRoleNames()->first() ?? 'cashier')
+                        : 'cashier';
+                    SyncRecord::create([
+                        'business_id' => $user->business_id,
+                        'table_name' => 'users',
+                        'record_uuid' => $user->id,
+                        'operation' => 'upsert',
+                        'payload' => [
+                            'business_id' => $user->business_id,
+                            'name' => $user->name,
+                            'email' => $user->email,
+                            'pin_hash' => $user->pin_hash,
+                            'role' => $roleName === 'business_owner' ? 'owner' : $roleName,
+                            'is_active' => (bool) $user->is_active,
+                            'biometric_enabled' => false,
+                        ],
+                        'source_updated_at' => now(),
+                        'synced_at' => now(),
+                    ]);
                 }
                 $rehashed++;
 

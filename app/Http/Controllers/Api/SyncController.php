@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Events\SyncTablesChanged;
 use App\Exceptions\MissingParentRecordException;
 use App\Http\Controllers\Controller;
 use App\Models\Device;
@@ -11,11 +12,14 @@ use App\Models\SyncConflict;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
 use App\Models\User;
+use App\Services\AutoConflictResolver;
 use App\Services\DeviceResolver;
 use App\Services\SyncProcessor;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -159,11 +163,20 @@ class SyncController extends Controller
 
                     $autoResolve = $this->autoResolvesVersionConflict($record['table']);
                     $ledgerSuperseded = ! $autoResolve && $this->isLedgerRecomputeSupersededConflict($record['table'], $existing);
+                    // Rule A (identical content): the push carries no value the
+                    // server doesn't already hold — same-value race, not a real
+                    // divergence. Safe for every table since nothing changes.
+                    // Checked first: it is the most precise reason when it hits.
+                    $identicalContent = app(AutoConflictResolver::class)->payloadsMatch(
+                        $record['payload'] ?? [],
+                        $existing?->payload
+                    );
 
                     $conflict = $this->recordConflict(
                         $device,
                         $record,
                         match (true) {
+                            $identicalContent => 'Incoming values identical to the server record; auto-resolved by keeping the server record. No action needed.',
                             $ledgerSuperseded => 'Superseded by an authoritative stock_movements ledger recompute — the server quantity already reflects every device\'s sales/receipts, so this device\'s own stale snapshot was discarded automatically. No action needed.',
                             $autoResolve => 'Newer version exists on server; auto-resolved by keeping the server record.',
                             default => 'Newer version exists on server; manual review required.',
@@ -172,7 +185,7 @@ class SyncController extends Controller
                         $existing?->payload
                     );
 
-                    if ($autoResolve || $ledgerSuperseded) {
+                    if ($autoResolve || $ledgerSuperseded || $identicalContent) {
                         // Last-write-wins: the server row is already newer than this
                         // push, so there's nothing to apply — just record the decision
                         // instead of leaving it pending for a human. Scoped to tables
@@ -184,7 +197,9 @@ class SyncController extends Controller
                         // isLedgerRecomputeSupersededConflict()'s own doc comment.
                         $conflict->update([
                             'status' => 'resolved',
-                            'resolution_action' => $ledgerSuperseded ? 'ledger_recompute_authoritative' : 'accept_server',
+                            'resolution_action' => $identicalContent
+                                ? 'accept_server_identical'
+                                : ($ledgerSuperseded ? 'ledger_recompute_authoritative' : 'accept_server'),
                             'resolved_at' => now(),
                         ]);
 
@@ -300,6 +315,22 @@ class SyncController extends Controller
                 }
             } catch (\Throwable $e) {
                 foreach ($recordsToProcess as $item) {
+                    // Rule B (equivalent unique-key duplicate): the row the
+                    // device tried to insert already exists with identical
+                    // business values under a different UUID (every till
+                    // seeding its own "piece" unit, etc.). Keeping the
+                    // existing row loses nothing — verified unreferenced —
+                    // so resolve immediately instead of parking it.
+                    $autoDuplicate = $this->tryAutoResolveDuplicate(
+                        $device,
+                        $item['record'],
+                        $e
+                    );
+                    if ($autoDuplicate !== null) {
+                        $autoResolved[] = $autoDuplicate;
+
+                        continue;
+                    }
                     $conflict = $this->recordConflict(
                         $device,
                         $item['record'],
@@ -325,6 +356,23 @@ class SyncController extends Controller
         // give them a chance to apply now, so a device that later retries a
         // previously-failed push isn't the only path to convergence.
         $resolvedPending = $this->resolvePendingRecords($device?->tenant_id, $processor);
+
+        // Realtime fan-out: every accepted table changed on the server in
+        // this push — tell the business's other devices now instead of
+        // making them wait for their next periodic poll. Payload carries
+        // table names only; devices re-pull through the normal engine.
+        // Skipped when nothing was accepted (no state changed) or the
+        // tenant is unknown. Polling remains the fallback if the socket
+        // is down — see RealtimeService's reconnect catch-up sync.
+        $acceptedTables = collect($accepted)
+            ->pluck('table')
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+        if ($acceptedTables !== [] && $device?->tenant_id) {
+            SyncTablesChanged::dispatch($device->tenant_id, $acceptedTables);
+        }
 
         return response()->json([
             'accepted' => $accepted,
@@ -568,7 +616,7 @@ class SyncController extends Controller
      * Also heals any row already corrupted this way before this fix
      * existed, since it runs on every read, not just new writes.
      *
-     * @param  \Illuminate\Support\Collection<int, SyncRecord>  $records
+     * @param  Collection<int, SyncRecord>  $records
      * @return array<int, array<string, mixed>>
      */
     private function sanitizeApprovalPayloadJson($records): array
@@ -853,6 +901,90 @@ class SyncController extends Controller
     private function autoResolvesVersionConflict(string $table): bool
     {
         return in_array($table, self::AUTO_RESOLVE_VERSION_CONFLICT_TABLES, true);
+    }
+
+    /**
+     * Tables whose unique-key duplicates may auto-resolve via Rule B, with
+     * the `table.column` pairs that could reference the loser UUID. A table
+     * joins this list only after verifying its would-be referrers don't use
+     * the UUID (units_of_measure: products store the unit as plain text,
+     * proven against the live database) — anything unlisted abstains and
+     * stays manual.
+     *
+     * @var array<string, list<string>>
+     */
+    private const DUPLICATE_AUTO_RESOLVE_TABLES = [
+        'units_of_measure' => [],
+    ];
+
+    /**
+     * Rule B entry point for the push catch-all: returns the auto_resolved
+     * entry when the 1062 duplicate is business-equivalent to the existing
+     * row, else null (caller parks it as a manual processing_error).
+     *
+     * @param  array<string, mixed>  $record  Push record shape (table/uuid/operation/payload).
+     * @return array{id:int, table:string, uuid:string}|null
+     */
+    private function tryAutoResolveDuplicate(
+        ?Device $device,
+        array $record,
+        \Throwable $e
+    ): ?array {
+        $previous = $e;
+        $duplicateMessage = null;
+        do {
+            // MySQL reports driver code 1062; SQLite reports 19 — match the
+            // message shape instead so the rule works on both drivers.
+            if ($previous instanceof QueryException
+                && AutoConflictResolver::uniqueKeyColumns(
+                    $record['table'] ?? '',
+                    $previous->getMessage()
+                ) !== null) {
+                $duplicateMessage = $previous->getMessage();
+                break;
+            }
+            $previous = $previous->getPrevious();
+        } while ($previous !== null);
+
+        if ($duplicateMessage === null) {
+            return null;
+        }
+
+        $table = $record['table'] ?? null;
+        if (! is_string($table) || ! array_key_exists($table, self::DUPLICATE_AUTO_RESOLVE_TABLES)) {
+            return null;
+        }
+
+        $payload = array_merge(['business_id' => $device?->tenant_id], $record['payload'] ?? []);
+        $existing = app(AutoConflictResolver::class)->findEquivalentRow(
+            $table,
+            $payload,
+            $duplicateMessage,
+            $record['uuid'] ?? '',
+            self::DUPLICATE_AUTO_RESOLVE_TABLES[$table]
+        );
+        if ($existing === null) {
+            return null;
+        }
+
+        $conflict = $this->recordConflict(
+            $device,
+            $record,
+            "Duplicate '{$table}' entry matches the existing row's values; auto-resolved by keeping the existing row (equivalent UUID: ".($existing->id ?? $record['uuid'] ?? '?').'). No action needed.',
+            'duplicate_superseded',
+            (array) $existing
+        );
+        $conflict->update([
+            'status' => 'resolved',
+            'resolution_action' => 'accept_server_duplicate',
+            'resolved_at' => now(),
+        ]);
+
+        return [
+            'id' => $conflict->id,
+            'table' => $table,
+            'uuid' => $record['uuid'] ?? '',
+        ];
     }
 
     /**
