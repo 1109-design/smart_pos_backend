@@ -11,10 +11,12 @@ use App\Models\StockOversell;
 use App\Models\SyncConflict;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
+use App\Models\Transaction;
 use App\Models\User;
 use App\Services\AutoConflictResolver;
 use App\Services\DeviceResolver;
 use App\Services\SyncProcessor;
+use App\Services\Zimra\ZimraSalesService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -1154,5 +1156,46 @@ class SyncController extends Controller
                 'server_payload' => $serverPayload,
             ]
         );
+    }
+
+    /**
+     * Realtime acceleration endpoint: fiscalises a just-pushed transaction immediately
+     * so the POS can print a complete fiscal receipt without waiting for background sync polling.
+     */
+    public function fiscalise(string $transactionId, Request $request, ZimraSalesService $zimraService): JsonResponse
+    {
+        $device = $this->deviceResolver->fromRequest($request);
+        $transaction = Transaction::where('id', $transactionId)
+            ->where('business_id', $device?->tenant_id)
+            ->first();
+
+        if (! $transaction) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Transaction not found on server',
+            ], 404);
+        }
+
+        if ($transaction->fiscal_status === 'fiscalised') {
+            return response()->json([
+                'success' => true,
+                'fiscalised' => true,
+                'fiscal_status' => 'fiscalised',
+                'fiscal_receipt_number' => $transaction->fiscal_receipt_number,
+                'fiscal_qr_code' => $transaction->fiscal_qr_code,
+            ]);
+        }
+
+        $result = $zimraService->processQueued($transaction);
+        $transaction->refresh();
+
+        return response()->json([
+            'success' => $result['success'] ?? false,
+            'fiscalised' => ($transaction->fiscal_status === 'fiscalised'),
+            'fiscal_status' => $transaction->fiscal_status,
+            'fiscal_receipt_number' => $transaction->fiscal_receipt_number,
+            'fiscal_qr_code' => $transaction->fiscal_qr_code,
+            'message' => $result['message'] ?? null,
+        ]);
     }
 }

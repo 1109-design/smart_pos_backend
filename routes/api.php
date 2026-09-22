@@ -29,6 +29,7 @@ Route::prefix('v1')->middleware(['throttle:device-auth'])->group(function () {
 // Sync endpoints — business resolved from authenticated device token
 Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::post('sync/push', [SyncController::class, 'push']);
+    Route::post('sync/fiscalise/{transactionId}', [SyncController::class, 'fiscalise']);
     Route::get('sync/pull', [SyncController::class, 'pull']);
     Route::get('sync/status', [SyncController::class, 'status']);
     Route::get('sync/conflicts', [SyncController::class, 'conflicts']);

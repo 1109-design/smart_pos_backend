@@ -276,7 +276,20 @@ class ZimraSalesService
             }
 
             $receiptGlobalNo = (int) ($statusData['lastReceiptGlobalNo'] ?? 0) + 1;
-            $receiptCounter = (int) ($statusData['lastReceiptCounter'] ?? 0) + 1;
+
+            // ZIMRA GetStatus does not consistently return lastReceiptCounter (often
+            // only returning lastReceiptGlobalNo). When absent, compute it from the
+            // receipts recorded for this device in the current fiscal day.
+            $dayOpenedAt = $device->fiscal_day_opened_at ?? now()->startOfDay();
+            if (isset($statusData['lastReceiptCounter']) && (int) $statusData['lastReceiptCounter'] > 0) {
+                $receiptCounter = (int) $statusData['lastReceiptCounter'] + 1;
+            } else {
+                $dayReceiptsCount = ZimraSale::where('device_id', $device->device_id)
+                    ->whereNotNull('fiscalised_at')
+                    ->where('fiscalised_at', '>=', $dayOpenedAt)
+                    ->count();
+                $receiptCounter = $dayReceiptsCount + 1;
+            }
 
             // Hash chains are per fiscal day (spec §2.3): the previous hash is the
             // device signature hash of the last accepted receipt in THIS day only.
