@@ -101,7 +101,9 @@ class SupplierPaymentService
             return;
         }
 
-        $amount = round((float) $payment->amount, 4);
+        // Post in BASE currency: tender amount converted at capture rate.
+        // Falls back to raw amount for pre-multi-currency rows (rate 1).
+        $amount = round((float) ($payment->base_equivalent ?? $payment->amount), 4);
         if ($amount <= 0.005) {
             return;
         }

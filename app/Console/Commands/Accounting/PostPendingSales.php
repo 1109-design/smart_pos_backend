@@ -9,8 +9,12 @@ use App\Services\Accounting\SalePostingService;
 use Illuminate\Console\Command;
 
 /**
- * Catches whatever SyncProcessor's inline hooks missed on the first pass —
- * mainly a sale whose items/payments hadn't all synced yet when its
+ * RECOVERY / FALLBACK ONLY — not the accounting engine.
+ *
+ * The primary posting path is Flutter itself: the till creates the sale AND
+ * its journal locally at checkout (SalePostingService, offline-capable) and
+ * syncs both up. This command only catches whatever the inline hooks missed
+ * on the first pass — mainly a sale whose items/payments hadn't all synced
  * transaction row first landed (see SalePostingService's doc comment).
  * Scheduled every 15 minutes (routes/console.php), same cadence as ZIMRA's
  * own retry sweep.

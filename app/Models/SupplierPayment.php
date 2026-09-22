@@ -13,6 +13,7 @@ class SupplierPayment extends Model
 
     protected $fillable = [
         'id', 'business_id', 'supplier_id', 'amount', 'currency_code',
+        'exchange_rate_used', 'base_equivalent',
         'payment_date', 'method', 'reference', 'recorded_by_user_id',
         'bank_account_id',
     ];

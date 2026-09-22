@@ -1016,6 +1016,52 @@ class SyncProcessor
                 $this->syncUser($uuid, $payload, $trusted, $actingUser);
                 break;
 
+            case 'accounting_settings':
+                // Flutter-first activation: an authorized till enables
+                // accounting offline (AccountingSettingsService) and pushes
+                // the row up; the server coordinates it, never gates on it.
+                // record_uuid IS the business id (see
+                // Business::publishAccountingSettingsSyncRecord()).
+                $businessId = $payload['business_id'] ?? null;
+
+                if (empty($businessId) || (string) $businessId !== (string) $uuid) {
+                    throw new \RuntimeException('accounting_settings: business_id must match the record id.');
+                }
+
+                $business = Business::find($uuid);
+
+                if (! $business) {
+                    throw new \RuntimeException('accounting_settings: unknown business.');
+                }
+
+                if (! $trusted) {
+                    $this->requireOwnerOrManager($actingUser, 'accounting_settings: changing accounting activation');
+                }
+
+                // Last-write-wins across offline devices: a stale activation
+                // arriving after a newer one must not flap the flags back.
+                $incomingAt = isset($payload['updated_at']) ? Carbon::parse($payload['updated_at']) : null;
+
+                if ($incomingAt && $business->updated_at && $incomingAt->lt($business->updated_at)) {
+                    Log::debug("Sync: ignoring stale accounting_settings for business {$uuid}.");
+
+                    break;
+                }
+
+                $business->update([
+                    'accounting_go_live_date' => array_key_exists('accounting_go_live_date', $payload)
+                        ? $payload['accounting_go_live_date']
+                        : $business->accounting_go_live_date,
+                    'client_gl_posting_enabled_at' => array_key_exists('client_gl_posting_enabled_at', $payload)
+                        ? $payload['client_gl_posting_enabled_at']
+                        : $business->client_gl_posting_enabled_at,
+                ]);
+
+                // Fan out to every other till so the whole fleet converges
+                // on the same activation without any device polling for it.
+                $business->refresh()->publishAccountingSettingsSyncRecord();
+                break;
+
             case 'categories':
                 Category::updateOrCreate(
                     ['id' => $uuid],
@@ -3252,6 +3298,8 @@ class SyncProcessor
                         'supplier_id' => $payload['supplier_id'] ?? null,
                         'amount' => $payload['amount'] ?? 0,
                         'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'exchange_rate_used' => $payload['exchange_rate_used'] ?? 1,
+                        'base_equivalent' => $payload['base_equivalent'] ?? $payload['amount'] ?? 0,
                         'payment_date' => $payload['payment_date'] ?? now()->toDateString(),
                         'method' => $payload['method'] ?? 'cash',
                         'reference' => $payload['reference'] ?? null,

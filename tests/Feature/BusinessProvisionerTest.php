@@ -49,7 +49,10 @@ class BusinessProvisionerTest extends TestCase
         ]);
         $this->assertNotEmpty($tenant->pairing_code);
         $this->assertDatabaseHas('domains', ['tenant_id' => $tenant->id]);
-
+        $this->assertDatabaseHas('businesses', [
+            'id' => $tenant->id,
+            'name' => 'Acme Retail',
+        ]);
         $tenant->run(function () use ($tenant) {
             $owner = User::first();
 

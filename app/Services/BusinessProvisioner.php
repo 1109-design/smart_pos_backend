@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\Business;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Services\Accounting\ChartOfAccountsSeeder;
@@ -68,6 +69,21 @@ class BusinessProvisioner
                 ]);
 
                 $owner->assignRole('business_owner');
+
+                // The businesses row is the domain record every accounting
+                // and sync path resolves (Business::find, postIfReady,
+                // accounting_settings push). Tenant + owner alone leave a
+                // business whose activation push fails with "unknown
+                // business" — reproduced live. It must exist from birth.
+                Business::firstOrCreate(
+                    ['id' => $tenant->id],
+                    [
+                        'name' => $data['business_name'],
+                        'email' => $data['owner_email'],
+                        'currency_code' => $data['currency_code'] ?? 'USD',
+                        'base_currency_code' => $data['currency_code'] ?? 'USD',
+                    ],
+                );
 
                 (new ChartOfAccountsSeeder)->seedForBusiness($tenant->id);
 
