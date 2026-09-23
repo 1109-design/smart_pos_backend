@@ -1370,6 +1370,7 @@ class SyncProcessor
                     'location_id' => $payload['location_id'] ?? null,
                     'user_id' => $payload['user_id'] ?? null,
                     'customer_id' => $payload['customer_id'] ?? null,
+                    'client_name' => $payload['client_name'] ?? null,
                     'subtotal' => $payload['subtotal'] ?? 0,
                     'tax_total' => $payload['tax_total'] ?? 0,
                     'discount_total' => $payload['discount_total'] ?? 0,

@@ -12,7 +12,7 @@ class Transaction extends Model
     use HasUuids;
 
     protected $fillable = [
-        'id', 'business_id', 'location_id', 'user_id', 'customer_id',
+        'id', 'business_id', 'location_id', 'user_id', 'customer_id', 'client_name',
         'subtotal', 'tax_total', 'discount_total', 'deposit_total',
         'surcharge_total', 'total',
         'base_currency', 'status', 'sale_number', 'notes', 'void_reason',
