@@ -13,7 +13,7 @@ class TillCashMovement extends Model
 
     protected $fillable = [
         'id', 'business_id', 'location_id', 'till_id', 'shift_id',
-        'type', 'amount', 'reason', 'recorded_by_user_id',
+        'type', 'amount', 'currency_code', 'reason', 'recorded_by_user_id',
     ];
 
     // Append-only ledger (see SyncProcessor::IMMUTABLE) — only `created` fires.

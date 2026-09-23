@@ -2,8 +2,6 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Schema;
-use Illuminate\Support\Str;
 
 /**
  * Enable client-side GL posting for every business that already has a
@@ -30,15 +28,15 @@ return new class extends Migration
 {
     public function up(): void
     {
-        // Resolve the correct tenant-scoped connection. In a single-DB setup
-        // (this app's default) this is just the default connection; in a
-        // true multi-tenancy setup each tenant has its own schema, but the
-        // tenants table lives on the landlord connection.
+        // This app runs single-DB tenancy: the tenant-scoped record is the
+        // `businesses` table itself (client_gl_posting_enabled_at and
+        // accounting_go_live_date both live there — see the two migrations
+        // that added them), not the separate `tenants` table.
         //
-        // We operate on the tenants / businesses table directly rather than
-        // Eloquent models so this migration runs cleanly even outside a
-        // request (e.g. `php artisan migrate` on the server without a
-        // tenant context).
+        // We operate on the businesses table directly rather than the
+        // Business Eloquent model so this migration runs cleanly even
+        // outside a request (e.g. `php artisan migrate` on the server
+        // without a tenant context).
 
         // Find every business_id that has at least one GL account row.
         $businessIdsWithAccounts = DB::table('gl_accounts')
@@ -54,7 +52,7 @@ return new class extends Migration
         // that do not already have it set (never overwrite an earlier date —
         // that would retroactively re-post older transactions the server may
         // have already handled).
-        DB::table('tenants')
+        DB::table('businesses')
             ->whereIn('id', $businessIdsWithAccounts)
             ->whereNull('client_gl_posting_enabled_at')
             ->update(['client_gl_posting_enabled_at' => now()]);
@@ -66,12 +64,11 @@ return new class extends Migration
         // own guard). Use raw insert to avoid loading Eloquent tenant models.
         $now = now()->toIso8601String();
         foreach ($businessIdsWithAccounts as $businessId) {
-            $goLiveDate = DB::table('tenants')
+            $goLiveDate = DB::table('businesses')
                 ->where('id', $businessId)
                 ->value('accounting_go_live_date');
 
             DB::table('sync_records')->insert([
-                'id' => Str::uuid(),
                 'business_id' => $businessId,
                 'table_name' => 'accounting_settings',
                 'record_uuid' => $businessId,

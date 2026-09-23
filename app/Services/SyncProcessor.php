@@ -2414,6 +2414,7 @@ class SyncProcessor
                         'shift_id' => $payload['shift_id'] ?? null,
                         'type' => $payload['type'] ?? 'cash_in',
                         'amount' => $payload['amount'] ?? 0,
+                        'currency_code' => $payload['currency_code'] ?? null,
                         'reason' => $payload['reason'] ?? null,
                         'recorded_by_user_id' => $payload['recorded_by_user_id'] ?? null,
                     ]
