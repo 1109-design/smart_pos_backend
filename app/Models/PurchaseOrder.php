@@ -57,6 +57,11 @@ class PurchaseOrder extends Model
         return $this->hasMany(PurchaseOrderItem::class);
     }
 
+    public function variances(): HasMany
+    {
+        return $this->hasMany(PoReceiptVariance::class);
+    }
+
     /**
      * A PO is genuinely multi-device — created/sent on one till, received
      * via GRV on another (often a warehouse till) — same shape as
