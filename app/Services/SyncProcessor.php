@@ -1677,6 +1677,7 @@ class SyncProcessor
                         'amount' => $payload['amount'] ?? 0,
                         'currency_code' => $payload['currency_code'] ?? '',
                         'type' => $payload['type'] ?? 'issue',
+                        'payment_method' => $payload['payment_method'] ?? null,
                         'reason' => $payload['reason'] ?? null,
                         'user_id' => $payload['user_id'] ?? null,
                     ]

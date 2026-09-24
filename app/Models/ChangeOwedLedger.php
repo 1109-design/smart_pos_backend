@@ -14,7 +14,7 @@ class ChangeOwedLedger extends Model
 
     protected $fillable = [
         'id', 'business_id', 'location_id', 'customer_id', 'transaction_id',
-        'amount', 'currency_code', 'type', 'reason', 'user_id',
+        'amount', 'currency_code', 'type', 'payment_method', 'reason', 'user_id',
     ];
 
     protected function casts(): array
