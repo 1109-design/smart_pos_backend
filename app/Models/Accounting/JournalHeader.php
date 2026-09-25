@@ -14,7 +14,7 @@ class JournalHeader extends Model
         'id', 'business_id', 'journal_number', 'trans_date', 'description',
         'source_type', 'source_id', 'idempotency_key', 'status', 'posted_at',
         'posted_by_user_id', 'reversed_by_journal_id', 'reversed_at',
-        'reversed_by_user_id', 'reversal_of_journal_id',
+        'reversed_by_user_id', 'reversal_of_journal_id', 'location_id',
     ];
 
     protected function casts(): array

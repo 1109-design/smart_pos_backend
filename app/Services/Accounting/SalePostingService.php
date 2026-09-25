@@ -141,11 +141,30 @@ class SalePostingService
                 return;
             }
 
-            // Revenue folds in surcharge_total (real income, simple to treat
-            // as revenue) but not deposit_total, which is refundable and
-            // gets its own liability line — crediting it to Revenue would
-            // overstate income.
-            $revenue = (float) $transaction->subtotal - (float) $transaction->discount_total + (float) $transaction->surcharge_total;
+            // Derived from `total` rather than `subtotal - discount_total +
+            // surcharge_total`: that older formula double-subtracted
+            // cart-item discounts (subtotal is already net of them on the
+            // Flutter side, so subtracting discount_total again on top
+            // double-counted it) and never netted out tax embedded in a
+            // tax-inclusive line's price (tax is *extracted* from, not
+            // added to, a tax-inclusive line's subtotal) — so Revenue+Tax
+            // together overstated credits by the tax amount on every
+            // tax-inclusive sale, leaving the journal permanently
+            // unbalanced and stuck as an unposted draft that never reaches
+            // general_ledger. `total` already reflects every discount and
+            // both tax conventions correctly, so
+            // `total - deposit_total - tax_total` is exact regardless of
+            // discounts or tax-inclusive/exclusive mix — surcharge_total
+            // need not appear explicitly: it's part of `total` and, since
+            // it's folded into Revenue (see below) rather than its own
+            // account, cancels out algebraically. Mirrors
+            // sale_posting_service.dart's identical formula.
+            //
+            // Revenue folds in surcharge_total (real income, simple to
+            // treat as revenue) but not deposit_total, which is refundable
+            // and gets its own liability line — crediting it to Revenue
+            // would overstate income.
+            $revenue = (float) $transaction->total - (float) $transaction->deposit_total - (float) $transaction->tax_total;
             $tax = (float) $transaction->tax_total;
             $deposits = (float) $transaction->deposit_total;
 

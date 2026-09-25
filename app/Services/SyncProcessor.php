@@ -2533,6 +2533,7 @@ class SyncProcessor
                         'receipt_path' => $payload['receipt_path'] ?? null,
                         'notes' => $payload['notes'] ?? null,
                         'expense_date' => $payload['expense_date'] ?? now(),
+                        'location_id' => $payload['location_id'] ?? null,
                         'deleted_at' => $payload['deleted_at'] ?? null,
                     ]
                 );
@@ -3037,6 +3038,7 @@ class SyncProcessor
                         'reversed_at' => $payload['reversed_at'] ?? null,
                         'reversed_by_user_id' => $payload['reversed_by_user_id'] ?? null,
                         'reversal_of_journal_id' => $payload['reversal_of_journal_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
                     ]
                 );
                 break;
@@ -3092,6 +3094,7 @@ class SyncProcessor
                         'status' => $payload['status'] ?? 'active',
                         'reconciled_at' => $payload['reconciled_at'] ?? null,
                         'bank_reconciliation_id' => $payload['bank_reconciliation_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
                     ]
                 );
 
@@ -3119,6 +3122,7 @@ class SyncProcessor
                     'code' => $payload['code'] ?? null,
                     'is_debit_normal' => $payload['is_debit_normal'] ?? true,
                     'statement_type' => $payload['statement_type'] ?? 'balance_sheet',
+                    'cash_flow_section' => $payload['cash_flow_section'] ?? null,
                     'reporting_order' => $payload['reporting_order'] ?? 99,
                     'is_system' => $payload['is_system'] ?? false,
                 ];

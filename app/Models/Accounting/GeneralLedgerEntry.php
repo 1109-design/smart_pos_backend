@@ -19,7 +19,7 @@ class GeneralLedgerEntry extends Model
         'id', 'business_id', 'trans_date', 'journal_header_id', 'gl_account_id',
         'debit', 'credit', 'currency_code', 'exchange_rate', 'foreign_debit',
         'foreign_credit', 'party_type', 'party_id', 'description', 'status',
-        'reconciled_at', 'bank_reconciliation_id',
+        'reconciled_at', 'bank_reconciliation_id', 'location_id',
     ];
 
     protected function casts(): array

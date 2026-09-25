@@ -12,7 +12,7 @@ class AccountCategory extends Model
 
     protected $fillable = [
         'id', 'business_id', 'name', 'code', 'is_debit_normal',
-        'statement_type', 'reporting_order', 'is_system',
+        'statement_type', 'cash_flow_section', 'reporting_order', 'is_system',
     ];
 
     protected function casts(): array

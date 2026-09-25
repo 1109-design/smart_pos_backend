@@ -54,6 +54,7 @@ class SalePostingServiceTest extends TestCase
         string $status = 'completed',
         ?string $customerId = null,
         ?string $createdAt = null,
+        float $discount = 0,
     ): Transaction {
         $tx = Transaction::create([
             'id' => (string) Str::uuid(),
@@ -62,7 +63,7 @@ class SalePostingServiceTest extends TestCase
             'customer_id' => $customerId,
             'subtotal' => $subtotal,
             'tax_total' => $tax,
-            'discount_total' => 0,
+            'discount_total' => $discount,
             'total' => $total,
             'base_currency' => 'USD',
             'status' => $status,
@@ -147,6 +148,61 @@ class SalePostingServiceTest extends TestCase
         $this->assertSame(15.0, $tax->balance());
         $this->assertSame(60.0, $cogs->balance());
         $this->assertSame(-60.0, $inventory->balance()); // credited, stock leaving
+    }
+
+    /**
+     * Regression for the tax-double-count bug: a tax-inclusive product's
+     * `subtotal` (Flutter's CartItem.subtotalAfterDiscount) already has tax
+     * embedded in it, so `total` equals `subtotal` exactly (nothing gets
+     * added on top) — the old `subtotal - discount_total + surcharge_total`
+     * revenue formula credited the full gross amount to Revenue AND the
+     * same tax again to Tax Payable, overstating credits by the tax amount
+     * on every such sale and leaving the journal stuck as an unposted
+     * 'draft' that never reached general_ledger.
+     */
+    public function test_a_tax_inclusive_sale_posts_a_balanced_journal(): void
+    {
+        $businessId = $this->makeLiveBusiness();
+        // $100 gross, 15% VAT already embedded: tax = 100 * 15/115 ≈ 13.04.
+        $tx = $this->makeSale($businessId, subtotal: 100, tax: 13.04, total: 100);
+        $this->addItem($tx, 100);
+        $this->addPayment($tx, 100);
+
+        $this->posting->postIfReady($tx);
+
+        $journal = JournalHeader::where('source_type', 'sale')->where('source_id', $tx->id)->first();
+        $this->assertNotNull($journal);
+        $this->assertSame('posted', $journal->status);
+
+        $revenue = $this->account($businessId, '4000');
+        $tax = $this->account($businessId, '2030');
+
+        $this->assertSame(86.96, $revenue->balance());
+        $this->assertSame(13.04, $tax->balance());
+    }
+
+    /**
+     * Regression: `subtotal` is already net of cart-item discounts
+     * (Flutter's CartItem.subtotalAfterDiscount), so the old formula's
+     * `- discount_total` subtracted the same discount a second time,
+     * understating Revenue and unbalancing the journal.
+     */
+    public function test_a_discounted_sale_posts_a_balanced_journal(): void
+    {
+        $businessId = $this->makeLiveBusiness();
+        // $100 line discounted by $10 -> subtotal 90 (net), 15% tax on top = 13.5, total 103.5.
+        $tx = $this->makeSale($businessId, subtotal: 90, tax: 13.5, total: 103.5, discount: 10);
+        $this->addItem($tx, 90);
+        $this->addPayment($tx, 103.5);
+
+        $this->posting->postIfReady($tx);
+
+        $journal = JournalHeader::where('source_type', 'sale')->where('source_id', $tx->id)->first();
+        $this->assertNotNull($journal);
+        $this->assertSame('posted', $journal->status);
+
+        $revenue = $this->account($businessId, '4000');
+        $this->assertSame(90.0, $revenue->balance());
     }
 
     public function test_a_credit_sale_debits_accounts_receivable_and_tags_the_customer(): void
