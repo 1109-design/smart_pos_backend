@@ -11,7 +11,7 @@ class CreditTransaction extends Model
 
     protected $fillable = [
         'id', 'customer_id', 'transaction_id', 'amount', 'type', 'method', 'reference', 'receipt_number',
-        'bank_account_id',
+        'bank_account_id', 'created_by_user_id',
     ];
 
     protected function casts(): array
