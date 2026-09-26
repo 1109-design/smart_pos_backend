@@ -138,4 +138,25 @@ class StockTakePostingServiceTest extends TestCase
 
         $this->assertSame(0, JournalHeader::where('source_type', 'stock_take_variance')->count());
     }
+
+    /**
+     * Regression: this service was the one posting path that never checked
+     * postsFromClientFor() (SalePostingService/GrvPostingService both
+     * already did) — a stock-take-variance movement synced up from a
+     * cutover till (which now posts its own journal locally, see
+     * stock_take_report_screen.dart) would have been double-posted here.
+     */
+    public function test_a_cutover_business_gets_no_server_posted_journal_for_a_stocktake_variance(): void
+    {
+        Business::where('id', $this->businessId)->update(['client_gl_posting_enabled_at' => '2026-01-15']);
+        $movement = $this->makeVarianceMovement(quantityChange: -4, runningAvgCost: 5, date: '2026-02-01 09:00:00');
+
+        $this->posting->recordVariance($movement);
+
+        $this->assertSame(
+            0,
+            JournalHeader::where('source_type', 'stock_take_variance')->count(),
+            'the server must stand down for a cutover business and wait for the till\'s own journal'
+        );
+    }
 }

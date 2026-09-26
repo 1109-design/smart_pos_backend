@@ -53,6 +53,16 @@ class StockTakePostingService
             return;
         }
 
+        // Once cut over, the till posts its own stock-take journal locally
+        // (SalePostingService.php's identical guard; the Flutter-side
+        // equivalent is stock_take_report_screen.dart's own posting block) —
+        // this was missing here even after GrvPostingService/SalePostingService
+        // both got it, so a cutover business would double-post every
+        // approved stock take once the till started posting its own.
+        if ($business->postsFromClientFor($transDate)) {
+            return;
+        }
+
         $qtyChange = (float) $movement->quantity_change;
         $unitCost = (float) ($movement->running_avg_cost ?? 0);
         $amount = round(abs($qtyChange) * $unitCost, 4);

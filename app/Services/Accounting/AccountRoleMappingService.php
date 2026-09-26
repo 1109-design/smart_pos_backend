@@ -39,6 +39,10 @@ class AccountRoleMappingService
         // write-offs. Shares '6050' (Stock Loss / Write-offs) rather than a
         // new chart code — see the Flutter side's identical note.
         'material_scrap_loss' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6050', 'name' => 'Stock Loss / Write-offs'],
+        // Generic stock adjustments / write-offs / stocktake variances (not
+        // dimensional-material scrap) — see the Flutter side's identical
+        // note. Shares '6050' with material_scrap_loss.
+        'inventory_adjustment' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6050', 'name' => 'Stock Loss / Write-offs'],
         // Accounts Payable module (spec §7/§12) — 'inventory'/'grn_suspense'
         // point at the SAME '1200'/'2010' codes GrvPostingService/
         // GrvPostingService.php already hardcoded; role-mapping them here
@@ -58,6 +62,10 @@ class AccountRoleMappingService
         // handling.
         'fx_gain' => ['category' => 'Revenue', 'subCategory' => 'Other Income', 'code' => '4020', 'name' => 'FX Gain'],
         'fx_loss' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6080', 'name' => 'FX Loss'],
+        // A forfeited returnable-container deposit is money the business
+        // keeps for good — see the Flutter side's identical note. Shares
+        // '4010' Other Income rather than a new code.
+        'deposit_forfeiture_income' => ['category' => 'Revenue', 'subCategory' => 'Other Income', 'code' => '4010', 'name' => 'Other Income'],
         // Deliberately NOT mapped: 'accumulated depreciation' would need to
         // match whatever GL account the still-hardcoded, still-server-only
         // monthly depreciation sweep (postMonthlyDepreciation()) posts
