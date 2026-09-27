@@ -28,10 +28,12 @@ use Throwable;
  * typo'd opening balance before go-live) posts the same two accounts in
  * reverse.
  *
- * No Flutter-side port yet — same as StockTakePostingService, this only
- * runs from the sync path once a movement lands on the server, regardless
- * of which app created it. A business cut over to client-side GL posting
- * still gets this one server-side until a client port exists.
+ * No Flutter-side port yet — unlike StockTakePostingService (which now has
+ * one, see stock_take_report_screen.dart), this still runs unconditionally
+ * from the sync path once a movement lands on the server, regardless of
+ * which app created it or whether the business has cut over to client-side
+ * GL posting. That's correct today (no client poster to double up with),
+ * but this comment needs updating the moment one is added.
  */
 class ProductOpeningStockPostingService
 {
