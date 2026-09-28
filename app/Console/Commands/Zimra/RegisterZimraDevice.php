@@ -3,6 +3,7 @@
 namespace App\Console\Commands\Zimra;
 
 use App\Models\Business;
+use App\Models\Location;
 use App\Models\Zimra\ZimraDevice;
 use App\Services\Zimra\ZimraClient;
 use Exception;
@@ -14,7 +15,8 @@ use function Laravel\Prompts\text;
 class RegisterZimraDevice extends Command
 {
     protected $signature = 'zimra:register-device
-        {business_id? : The business (tenant) this device belongs to — omit to pick from businesses without a fiscal device}
+        {business_id? : The business (tenant) this device belongs to — omit to pick interactively}
+        {location_id? : The branch/location this device is registered for — omit for a business-wide fallback device, or to pick interactively}
         {tin? : Taxpayer Identification Number}
         {device_id? : ZIMRA-issued device ID}
         {serial_no? : Device serial number}
@@ -24,12 +26,15 @@ class RegisterZimraDevice extends Command
 
     public function handle(ZimraClient $client): int
     {
-        $businessId = $this->argument('business_id') ?? $this->chooseUnfiscalisedBusiness();
+        $businessId = $this->argument('business_id') ?? $this->chooseBusiness();
         if ($businessId === null) {
             return self::FAILURE;
         }
 
         $business = Business::find($businessId);
+
+        $locationId = $this->argument('location_id')
+            ?? $this->chooseLocation((string) $businessId);
 
         $tin = $this->argument('tin') ?? text(
             label: 'Taxpayer Identification Number (TIN)',
@@ -89,6 +94,7 @@ class RegisterZimraDevice extends Command
             ['device_id' => $deviceId],
             [
                 'business_id' => $businessId,
+                'location_id' => $locationId ?: null,
                 'tin' => $tin,
                 'device_serial_no' => $serialNo,
                 'activation_key' => $activationKey,
@@ -115,51 +121,72 @@ class RegisterZimraDevice extends Command
     }
 
     /**
-     * Interactive picker over businesses that have no active fiscal device yet.
-     * Returns the chosen business id, or null when every business is already
-     * fiscalised (or none exist).
+     * Interactive picker over every business. A chain registers one device
+     * per branch, so — unlike the old single-device-per-business assumption —
+     * a business already having active devices is not excluded; its current
+     * device count is shown so the admin can tell at a glance who still
+     * needs one.
      */
-    private function chooseUnfiscalisedBusiness(): ?string
+    private function chooseBusiness(): ?string
     {
-        $fiscalisedIds = ZimraDevice::where('is_active', true)->pluck('business_id');
+        $deviceCounts = ZimraDevice::where('is_active', true)
+            ->selectRaw('business_id, COUNT(*) as device_count')
+            ->groupBy('business_id')
+            ->pluck('device_count', 'business_id');
 
-        $candidates = Business::whereNotIn('id', $fiscalisedIds)
-            ->orderBy('name')
-            ->get(['id', 'name', 'tin']);
+        $candidates = Business::orderBy('name')->get(['id', 'name', 'tin']);
 
         if ($candidates->isEmpty()) {
-            $this->error(Business::count() === 0
-                ? 'No businesses found in the database.'
-                : 'Every business already has an active fiscal device.');
+            $this->error('No businesses found in the database.');
 
             return null;
         }
 
-        $options = $candidates->mapWithKeys(fn (Business $business) => [
-            $business->id => $business->name
-                .($business->tin ? " (TIN {$business->tin})" : ' (no TIN set)'),
-        ])->all();
+        $options = $candidates->mapWithKeys(function (Business $business) use ($deviceCounts) {
+            $count = (int) ($deviceCounts[$business->id] ?? 0);
+            $status = $count > 0
+                ? " ({$count} active device".($count === 1 ? '' : 's').')'
+                : ' (no device yet)';
+
+            return [$business->id => $business->name
+                .($business->tin ? " (TIN {$business->tin})" : ' (no TIN set)')
+                .$status];
+        })->all();
 
         return (string) select(
             label: 'Which business is this fiscal device for?',
             options: $options,
             scroll: 10,
         );
+    }
 
+    /**
+     * Interactive picker over a business's locations, plus a "business-wide"
+     * fallback option (null). Skips the prompt entirely when the business has
+     * no locations recorded yet, so single-location businesses are unaffected.
+     */
+    private function chooseLocation(string $businessId): ?string
+    {
+        $locations = Location::where('business_id', $businessId)
+            ->orderBy('name')
+            ->get(['id', 'name', 'type']);
 
+        if ($locations->isEmpty()) {
+            return null;
+        }
 
+        $options = ['' => 'Business-wide (no specific branch / fallback device)']
+            + $locations->mapWithKeys(fn (Location $location) => [
+                $location->id => $location->name.($location->type ? " ({$location->type})" : ''),
+            ])->all();
 
+        $choice = select(
+            label: 'Which branch is this fiscal device physically at?',
+            options: $options,
+            scroll: 10,
+        );
 
-
-
-
-
-
-
-
-
-
-
+        return $choice === '' ? null : (string) $choice;
 
     }
 

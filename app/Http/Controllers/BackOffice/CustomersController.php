@@ -2,19 +2,23 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\Customer;
 use App\Models\LoyaltyTransaction;
 use App\Models\SyncRecord;
 use App\Models\Transaction;
+use App\Services\Accounting\PartyLedgerService;
+use App\Services\BackOfficeAuthorizer;
 use App\Services\SyncProcessor;
+use App\Support\BackOfficePermission;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class CustomersController extends Controller
+class CustomersController extends BackOfficeController
 {
+    public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
+
     /**
      * Customers and their loyalty ledger are populated entirely by the till
      * via sync — this page is read plus a light edit (credit limit,
@@ -42,7 +46,7 @@ class CustomersController extends Controller
         ]);
     }
 
-    public function show(string $customer): Response
+    public function show(string $customer, PartyLedgerService $ledger): Response
     {
         $this->authorizeManager();
 
@@ -64,6 +68,12 @@ class CustomersController extends Controller
             'customer' => $record,
             'loyalty_history' => $loyaltyHistory,
             'purchase_history' => $purchaseHistory,
+            // Debtor ledger (Phase 11c) — derived from the general ledger,
+            // not stored, so it can never drift from the Accounts
+            // Receivable control account. Empty/zero until this customer
+            // has a posted credit sale — see SalePostingService.
+            'statement' => $ledger->statement($tenantId, 'customer', $record->id),
+            'aging' => $ledger->agingBuckets($tenantId, 'customer', $record->id),
         ]);
     }
 
@@ -113,15 +123,10 @@ class CustomersController extends Controller
 
     private function authorizeManager(): void
     {
-        abort_if(
-            ! in_array(session('backoffice.role'), ['business_owner', 'manager']),
+        abort_unless(
+            $this->authorizer->can($this->tenantId(), session('backoffice.role'), BackOfficePermission::MANAGE_CUSTOMERS),
             403,
             'Access denied.'
         );
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
     }
 }

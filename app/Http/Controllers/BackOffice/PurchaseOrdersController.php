@@ -2,19 +2,26 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
+use App\Models\Accounting\JournalHeader;
+use App\Models\GoodsReceivedVoucher;
 use App\Models\PoAuditLog;
 use App\Models\PurchaseOrder;
 use App\Models\Supplier;
+use App\Models\SupplierInvoice;
 use App\Models\SyncRecord;
+use App\Services\BackOfficeAuthorizer;
 use App\Services\SyncProcessor;
+use App\Support\BackOfficePermission;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class PurchaseOrdersController extends Controller
+class PurchaseOrdersController extends BackOfficeController
 {
+    public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
+
     /**
      * Purchase orders are created and received at the till, where goods are
      * physically handled — this page is visibility from the web plus a
@@ -29,8 +36,8 @@ class PurchaseOrdersController extends Controller
         $status = $request->string('status')->toString() ?: 'all';
         $supplierId = $request->string('supplier')->toString() ?: 'all';
 
-        $orders = PurchaseOrder::with(['receivingLocation:id,name'])
-            ->where('business_id', $tenantId)
+        $orders = $this->scopedOrders()
+            ->with('receivingLocation:id,name')
             ->when($status !== 'all', fn ($q) => $q->where('status', $status))
             ->when($supplierId !== 'all', fn ($q) => $q->where('supplier_id', $supplierId))
             ->latest()
@@ -48,15 +55,72 @@ class PurchaseOrdersController extends Controller
     {
         $this->authorizeManager();
 
-        $order = PurchaseOrder::with(['receivingLocation:id,name', 'items'])
-            ->where('business_id', $this->tenantId())
+        $order = $this->scopedOrders()
+            ->with(['receivingLocation:id,name', 'items'])
             ->findOrFail($purchaseOrder);
 
         $audit = PoAuditLog::where('po_id', $order->id)->latest('created_at')->get();
 
+        // Purchasing & Cash Vault Blueprint, part A — GRVs are created
+        // automatically by GrvPostingService whenever a synced receipt
+        // references this PO; nothing here creates one. Each GRV's posted
+        // status shows whether it actually reached the general ledger.
+        $grvs = GoodsReceivedVoucher::where('purchase_order_id', $order->id)
+            ->with('items')
+            ->orderByDesc('received_date')
+            ->get()
+            ->map(function (GoodsReceivedVoucher $grv) {
+                $posted = JournalHeader::where('source_type', 'grv')
+                    ->where('source_id', $grv->id)
+                    ->where('status', 'posted')
+                    ->exists();
+
+                // Part B — has the supplier's actual bill been recorded
+                // against this voucher yet? Drives whether the page shows
+                // an invoice-entry form or the invoice that's already there.
+                $invoice = SupplierInvoice::where('grv_id', $grv->id)->first();
+
+                return [
+                    'id' => $grv->id,
+                    'grv_number' => $grv->grv_number,
+                    'received_date' => $grv->received_date->toDateString(),
+                    'posted_to_ledger' => $posted,
+                    'value' => (float) $grv->items->sum(fn ($i) => (float) $i->quantity_accepted * (float) $i->unit_cost),
+                    'invoice' => $invoice ? [
+                        'invoice_number' => $invoice->invoice_number,
+                        'invoice_date' => $invoice->invoice_date->toDateString(),
+                        'amount' => (float) $invoice->amount,
+                    ] : null,
+                    'items' => $grv->items->map(fn ($item) => [
+                        'product_name' => $item->product_name,
+                        'quantity_received' => (float) $item->quantity_received,
+                        'quantity_accepted' => (float) $item->quantity_accepted,
+                        'quantity_rejected' => (float) $item->quantity_rejected,
+                        'unit_cost' => (float) $item->unit_cost,
+                        'landed_unit_cost' => $item->landed_unit_cost !== null ? (float) $item->landed_unit_cost : null,
+                    ]),
+                ];
+            });
+
+        // Short/over/unordered/rejected lines from receiving against this PO
+        // — see PoReceiptVariance's migration doc comment. Independent of the
+        // GRV/GL pipeline above, so it's populated even when accounting isn't
+        // live for this business yet.
+        $variances = $order->variances()->orderBy('product_name')->get()->map(fn (\App\Models\PoReceiptVariance $v) => [
+            'product_name' => $v->product_name,
+            'ordered_qty' => (float) $v->ordered_qty,
+            'received_qty' => (float) $v->received_qty,
+            'rejected_qty' => (float) $v->rejected_qty,
+            'variance_qty' => (float) $v->variance_qty,
+            'status' => $v->status,
+            'rejection_reason' => $v->rejection_reason,
+        ]);
+
         return Inertia::render('BackOffice/PurchaseOrderShow', [
             'order' => $order,
             'audit' => $audit,
+            'grvs' => $grvs,
+            'variances' => $variances,
         ]);
     }
 
@@ -64,7 +128,7 @@ class PurchaseOrdersController extends Controller
     {
         $this->authorizeManager();
 
-        $order = PurchaseOrder::where('business_id', $this->tenantId())->findOrFail($purchaseOrder);
+        $order = $this->scopedOrders()->findOrFail($purchaseOrder);
 
         abort_if(! in_array($order->status, ['draft', 'sent'], true), 422, 'Only a draft or sent order can be cancelled from here.');
 
@@ -104,22 +168,26 @@ class PurchaseOrdersController extends Controller
         return redirect()->route('office.purchase-orders.index')->with('success', "{$order->po_number} cancelled.");
     }
 
+    /**
+     * Base query every action uses: this tenant's orders, further narrowed
+     * to the acting user's location scope when they're restricted to
+     * specific branches. Centralized so a new action (like cancel(), which
+     * previously skipped this) can't forget to apply it.
+     */
+    private function scopedOrders(): Builder
+    {
+        $scope = $this->authorizer->currentLocationScope();
+
+        return PurchaseOrder::where('business_id', $this->tenantId())
+            ->when($scope !== null, fn ($q) => $q->whereIn('receiving_location_id', $scope));
+    }
+
     private function authorizeManager(): void
     {
-        abort_if(
-            ! in_array(session('backoffice.role'), ['business_owner', 'manager']),
+        abort_unless(
+            $this->authorizer->can($this->tenantId(), session('backoffice.role'), BackOfficePermission::MANAGE_PURCHASE_ORDERS),
             403,
             'Access denied.'
         );
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
-    }
-
-    private function userId(): ?string
-    {
-        return session('backoffice')['user_id'] ?? null;
     }
 }

@@ -33,6 +33,10 @@ class SyncUserPinHashingTest extends TestCase
         Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);
 
         $user = User::factory()->create(['email' => $tenantId.'-owner@example.com']);
+        // This test is about PIN hashing, not authorization — give the
+        // acting device an owner role so pushing a new user's role doesn't
+        // get blocked by SyncProcessor::syncUser()'s manage_users gate.
+        $user->assignRole('business_owner');
 
         $plain = $user->createToken('sync-test')->plainTextToken;
         $tokenId = (int) explode('|', $plain)[0];

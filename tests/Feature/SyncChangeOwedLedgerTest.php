@@ -108,6 +108,51 @@ class SyncChangeOwedLedgerTest extends TestCase
         $this->assertEquals(4, $outstanding);
     }
 
+    public function test_change_owed_claim_payment_method_syncs_through(): void
+    {
+        $tenantId = 'tenant-change-owed-payment-method';
+        $token = $this->actingDeviceToken($tenantId);
+
+        $txId = (string) Str::uuid();
+        $claimId = (string) Str::uuid();
+        $userId = (string) Str::uuid();
+
+        Transaction::create([
+            'id' => $txId, 'business_id' => $tenantId, 'user_id' => $userId,
+            'subtotal' => 40, 'total' => 40, 'base_currency' => 'USD',
+            'status' => 'completed', 'sale_number' => '202609-TEST-2',
+        ]);
+
+        $response = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'change_owed_ledger',
+                    'uuid' => $claimId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'transaction_id' => $txId,
+                        'amount' => -5,
+                        'currency_code' => 'USD',
+                        'type' => 'claim',
+                        'payment_method' => 'mobile_money',
+                        'reason' => 'Paid out ZWG 65.00 (rate 1 USD = 13.00 ZWG)',
+                        'user_id' => $userId,
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ]);
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'accepted');
+
+        $this->assertDatabaseHas('change_owed_ledger', [
+            'id' => $claimId,
+            'payment_method' => 'mobile_money',
+            'reason' => 'Paid out ZWG 65.00 (rate 1 USD = 13.00 ZWG)',
+        ]);
+    }
+
     public function test_change_owed_ledger_cannot_be_overwritten_by_another_business(): void
     {
         $victimTenant = 'tenant-change-owed-victim';

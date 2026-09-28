@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
+use App\Models\Business;
 use App\Models\Tenant;
 use App\Models\User;
 use Illuminate\Http\RedirectResponse;
@@ -11,7 +11,7 @@ use Illuminate\Support\Facades\Hash;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class SessionController extends Controller
+class SessionController extends BackOfficeController
 {
     public function create(): Response
     {
@@ -52,6 +52,11 @@ class SessionController extends Controller
 
         $role = $user->roles->first()?->name;
 
+        // Branding lives on the tenant-scoped Business row, not the
+        // landlord Tenant row above — fetch it while tenancy is still
+        // initialized, same as everything else read in this method.
+        $business = Business::find($tenant->id);
+
         tenancy()->end();
 
         session()->regenerate();
@@ -65,6 +70,8 @@ class SessionController extends Controller
                 'role' => $role,
                 'business_name' => $tenant->business_name,
                 'currency_code' => $tenant->currency_code,
+                'primary_color' => $business?->primary_color,
+                'logo_url' => $business?->logoUrl(),
             ],
         ]);
 

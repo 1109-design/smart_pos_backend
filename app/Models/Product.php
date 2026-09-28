@@ -2,8 +2,10 @@
 
 namespace App\Models;
 
+use App\Events\ProductPriceChanged;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Product extends Model
 {
@@ -13,8 +15,23 @@ class Product extends Model
         'id', 'business_id', 'category_id', 'name', 'item_type', 'sku', 'barcode',
         'price', 'min_price', 'discount_percent', 'cost_price', 'deposit_amount', 'unit',
         'track_stock', 'stock_quantity', 'low_stock_threshold',
-        'image_path', 'expiry_date', 'is_active', 'merged_into_product_id',
+        'sheet_width', 'sheet_height',
+        // GLS·02
+        'sheet_min_usable_width', 'sheet_min_usable_height', 'sheet_kerf_width',
+        'sheet_cutting_charge', 'sheet_allow_rotate',
+        'image_path', 'expiry_date', 'is_active', 'is_taxable', 'merged_into_product_id',
     ];
+
+    protected static function booted(): void
+    {
+        static::updated(function (Product $product): void {
+            if (! $product->wasChanged(['price', 'min_price', 'discount_percent', 'is_active']) || ! $product->business_id) {
+                return;
+            }
+
+            ProductPriceChanged::dispatch($product->business_id, $product->id);
+        });
+    }
 
     protected function casts(): array
     {
@@ -26,9 +43,29 @@ class Product extends Model
             'deposit_amount' => 'decimal:4',
             'stock_quantity' => 'decimal:4',
             'low_stock_threshold' => 'decimal:4',
+            'sheet_width' => 'decimal:4',
+            'sheet_height' => 'decimal:4',
+            'sheet_min_usable_width' => 'decimal:4',
+            'sheet_min_usable_height' => 'decimal:4',
+            'sheet_kerf_width' => 'decimal:4',
+            'sheet_cutting_charge' => 'decimal:4',
+            'sheet_allow_rotate' => 'boolean',
             'track_stock' => 'boolean',
             'is_active' => 'boolean',
+            'is_taxable' => 'boolean',
             'expiry_date' => 'datetime',
         ];
+    }
+
+    /** Alternate selling units (e.g. "box" = 100 base units) — see PricingService. */
+    public function units(): HasMany
+    {
+        return $this->hasMany(ProductUnit::class);
+    }
+
+    /** Quantity-break prices, always keyed in the product's base unit — see PricingService. */
+    public function priceTiers(): HasMany
+    {
+        return $this->hasMany(ProductPriceTier::class);
     }
 }

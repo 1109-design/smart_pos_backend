@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Http\Middleware\AuthenticateBackOfficeUser;
+use App\Models\Business;
 use App\Models\Location;
 use App\Models\Product;
 use App\Models\ProductStock;
@@ -10,6 +11,7 @@ use App\Models\StockTransfer;
 use App\Models\SyncRecord;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Services\LocationService;
 use App\Services\SyncProcessor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
@@ -133,7 +135,11 @@ class BackOfficeTransfersTest extends TestCase
         $this->assertSame('in_transit', $transfer->status);
         $sourceStock = $this->stockAt($product->id, $warehouse->id);
         $this->assertSame('20.0000', $sourceStock->quantity);
-        $this->assertSame('10.0000', $sourceStock->reserved_quantity);
+        // Dispatch commits source stock via in_transit_quantity, not
+        // reserved_quantity — that field is order-holds only (see the
+        // dedicated in-transit tests below for the full picture).
+        $this->assertSame('0.0000', $sourceStock->reserved_quantity);
+        $this->assertSame('10.0000', $sourceStock->in_transit_quantity);
 
         // 4. Receive — full amount arrives.
         $this->post("/office/transfers/{$transfer->id}/receive", [
@@ -172,6 +178,255 @@ class BackOfficeTransfersTest extends TestCase
             2,
             SyncRecord::where('table_name', 'stock_transfers')->where('record_uuid', $transfer->id)->count()
         );
+    }
+
+    public function test_dispatching_a_transfer_does_not_wipe_the_source_locations_price_override(): void
+    {
+        // Regression: LocationService::publishStock() used to build its sync
+        // payload from only quantity/reserved_quantity, and SyncProcessor
+        // treats a missing key as an explicit null — so any transfer touching
+        // a product with a location override would silently null it out.
+        $tenantId = 'tenant-transfer-override-1';
+        $this->actingBackOfficeSession($tenantId);
+
+        $warehouse = $this->makeLocation($tenantId, 'Warehouse', 'warehouse');
+        $shop = $this->makeLocation($tenantId, 'Shop', 'shop');
+
+        $product = Product::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'Priced Widget',
+            'item_type' => 'product',
+            'price' => 5,
+            'track_stock' => true,
+            'stock_quantity' => 20,
+        ]);
+        $this->seedLocationStock($tenantId, $product->id, $warehouse->id, 20);
+
+        $this->post("/office/products/{$product->id}/location-overrides", [
+            'location_id' => $warehouse->id,
+            'price_override' => 4.5,
+        ])->assertRedirect();
+
+        $this->post('/office/transfers', [
+            'from_location_id' => $warehouse->id,
+            'to_location_id' => $shop->id,
+            'items' => [['product_id' => $product->id, 'qty_requested' => 5]],
+        ])->assertRedirect();
+        $transfer = StockTransfer::where('business_id', $tenantId)->first();
+        $item = $transfer->items->first();
+
+        $this->post("/office/transfers/{$transfer->id}/dispatch", [
+            'items' => [['item_id' => $item->id, 'qty_sent' => 5]],
+        ])->assertRedirect();
+
+        $this->assertSame('4.5000', $this->stockAt($product->id, $warehouse->id)->price_override);
+    }
+
+    public function test_dispatch_holds_source_stock_in_transit_not_in_reserved_quantity(): void
+    {
+        $tenantId = 'tenant-transfer-intransit-1';
+        $this->actingBackOfficeSession($tenantId);
+
+        $warehouse = $this->makeLocation($tenantId, 'Warehouse', 'warehouse');
+        $shop = $this->makeLocation($tenantId, 'Shop', 'shop');
+
+        $product = Product::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'In-Transit Widget',
+            'item_type' => 'product', 'price' => 5, 'track_stock' => true, 'stock_quantity' => 20,
+        ]);
+        $this->seedLocationStock($tenantId, $product->id, $warehouse->id, 20);
+
+        $this->post('/office/transfers', [
+            'from_location_id' => $warehouse->id,
+            'to_location_id' => $shop->id,
+            'items' => [['product_id' => $product->id, 'qty_requested' => 8]],
+        ])->assertRedirect();
+        $transfer = StockTransfer::where('business_id', $tenantId)->first();
+        $item = $transfer->items->first();
+
+        $this->post("/office/transfers/{$transfer->id}/dispatch", [
+            'items' => [['item_id' => $item->id, 'qty_sent' => 8]],
+        ])->assertRedirect();
+
+        $sourceStock = $this->stockAt($product->id, $warehouse->id);
+        // reserved_quantity is untouched — that field is order-holds only now.
+        $this->assertSame('0.0000', $sourceStock->reserved_quantity);
+        $this->assertSame('8.0000', $sourceStock->in_transit_quantity);
+        // Available stock at source excludes what's been dispatched.
+        $this->assertSame(12.0, (float) $sourceStock->available_quantity);
+    }
+
+    public function test_destination_sees_incoming_stock_before_the_transfer_is_received(): void
+    {
+        $tenantId = 'tenant-transfer-intransit-2';
+        $this->actingBackOfficeSession($tenantId);
+
+        $warehouse = $this->makeLocation($tenantId, 'Warehouse', 'warehouse');
+        $shop = $this->makeLocation($tenantId, 'Shop', 'shop');
+
+        $product = Product::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Incoming Widget',
+            'item_type' => 'product', 'price' => 5, 'track_stock' => true, 'stock_quantity' => 20,
+        ]);
+        $this->seedLocationStock($tenantId, $product->id, $warehouse->id, 20);
+
+        $this->post('/office/transfers', [
+            'from_location_id' => $warehouse->id,
+            'to_location_id' => $shop->id,
+            'items' => [['product_id' => $product->id, 'qty_requested' => 6]],
+        ])->assertRedirect();
+        $transfer = StockTransfer::where('business_id', $tenantId)->first();
+        $item = $transfer->items->first();
+
+        $this->post("/office/transfers/{$transfer->id}/dispatch", [
+            'items' => [['item_id' => $item->id, 'qty_sent' => 6]],
+        ])->assertRedirect();
+
+        $destStock = $this->stockAt($product->id, $shop->id);
+        $this->assertNotNull($destStock);
+        // Nothing has physically arrived yet — quantity is still 0 — but the
+        // branch can see 6 units are on their way.
+        $this->assertSame('0.0000', $destStock->quantity);
+        $this->assertSame('6.0000', $destStock->in_transit_quantity);
+        $this->assertSame(6.0, (float) $destStock->expected_quantity);
+    }
+
+    public function test_receiving_a_transfer_reconciles_in_transit_quantity_to_zero_on_both_sides(): void
+    {
+        $tenantId = 'tenant-transfer-intransit-3';
+        $this->actingBackOfficeSession($tenantId);
+
+        $warehouse = $this->makeLocation($tenantId, 'Warehouse', 'warehouse');
+        $shop = $this->makeLocation($tenantId, 'Shop', 'shop');
+
+        $product = Product::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Reconciled Widget',
+            'item_type' => 'product', 'price' => 5, 'track_stock' => true, 'stock_quantity' => 20,
+        ]);
+        $this->seedLocationStock($tenantId, $product->id, $warehouse->id, 20);
+
+        $this->post('/office/transfers', [
+            'from_location_id' => $warehouse->id,
+            'to_location_id' => $shop->id,
+            'items' => [['product_id' => $product->id, 'qty_requested' => 7]],
+        ])->assertRedirect();
+        $transfer = StockTransfer::where('business_id', $tenantId)->first();
+        $item = $transfer->items->first();
+
+        $this->post("/office/transfers/{$transfer->id}/dispatch", [
+            'items' => [['item_id' => $item->id, 'qty_sent' => 7]],
+        ])->assertRedirect();
+
+        $this->post("/office/transfers/{$transfer->id}/receive", [
+            'items' => [['item_id' => $item->id, 'qty_received' => 7]],
+        ])->assertRedirect();
+
+        $this->assertSame('0.0000', $this->stockAt($product->id, $warehouse->id)->in_transit_quantity);
+        $this->assertSame('0.0000', $this->stockAt($product->id, $shop->id)->in_transit_quantity);
+        $this->assertSame('7.0000', $this->stockAt($product->id, $shop->id)->quantity);
+    }
+
+    public function test_in_transit_quantity_never_collides_with_an_unrelated_order_hold_reservation(): void
+    {
+        $tenantId = 'tenant-transfer-intransit-4';
+        $this->actingBackOfficeSession($tenantId);
+
+        $warehouse = $this->makeLocation($tenantId, 'Warehouse', 'warehouse');
+        $shop = $this->makeLocation($tenantId, 'Shop', 'shop');
+
+        $product = Product::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Dual-Hold Widget',
+            'item_type' => 'product', 'price' => 5, 'track_stock' => true, 'stock_quantity' => 30,
+        ]);
+        $this->seedLocationStock($tenantId, $product->id, $warehouse->id, 30);
+
+        // An unrelated order-hold reservation on the same product/location.
+        app(LocationService::class)->reserveStock($product->id, $warehouse->id, 5);
+
+        $this->post('/office/transfers', [
+            'from_location_id' => $warehouse->id,
+            'to_location_id' => $shop->id,
+            'items' => [['product_id' => $product->id, 'qty_requested' => 10]],
+        ])->assertRedirect();
+        $transfer = StockTransfer::where('business_id', $tenantId)->first();
+        $item = $transfer->items->first();
+
+        $this->post("/office/transfers/{$transfer->id}/dispatch", [
+            'items' => [['item_id' => $item->id, 'qty_sent' => 10]],
+        ])->assertRedirect();
+
+        $sourceStock = $this->stockAt($product->id, $warehouse->id);
+        $this->assertSame('5.0000', $sourceStock->reserved_quantity);
+        $this->assertSame('10.0000', $sourceStock->in_transit_quantity);
+        // 30 - 5 (order hold) - 10 (in transit) = 15.
+        $this->assertSame(15.0, (float) $sourceStock->available_quantity);
+    }
+
+    public function test_dispatch_from_pending_is_blocked_once_the_business_requires_approval(): void
+    {
+        $tenantId = 'tenant-transfer-workflow-1';
+        $this->actingBackOfficeSession($tenantId);
+        Business::create(['id' => $tenantId, 'name' => $tenantId, 'workflow_settings' => ['stock_transfer_requires_approval' => true]]);
+
+        $warehouse = $this->makeLocation($tenantId, 'Warehouse', 'warehouse');
+        $shop = $this->makeLocation($tenantId, 'Shop', 'shop');
+        $product = Product::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Gated Widget',
+            'item_type' => 'product', 'price' => 5, 'track_stock' => true, 'stock_quantity' => 10,
+        ]);
+        $this->seedLocationStock($tenantId, $product->id, $warehouse->id, 10);
+
+        $this->post('/office/transfers', [
+            'from_location_id' => $warehouse->id,
+            'to_location_id' => $shop->id,
+            'items' => [['product_id' => $product->id, 'qty_requested' => 5]],
+        ])->assertRedirect();
+        $transfer = StockTransfer::where('business_id', $tenantId)->first();
+        $item = $transfer->items->first();
+
+        // Still pending — never approved — so dispatch must be refused.
+        $this->post("/office/transfers/{$transfer->id}/dispatch", [
+            'items' => [['item_id' => $item->id, 'qty_sent' => 5]],
+        ])->assertSessionHasErrors('transfer');
+        $this->assertSame('pending', $transfer->fresh()->status);
+
+        // Approving first clears the gate.
+        $this->post("/office/transfers/{$transfer->id}/approve")->assertRedirect();
+        $this->post("/office/transfers/{$transfer->id}/dispatch", [
+            'items' => [['item_id' => $item->id, 'qty_sent' => 5]],
+        ])->assertRedirect();
+        $this->assertSame('in_transit', $transfer->fresh()->status);
+    }
+
+    public function test_dispatch_from_pending_is_unaffected_when_the_workflow_toggle_is_off(): void
+    {
+        // Regression: absent/false workflow_settings must behave exactly like
+        // no Business row at all — today's gate-free default.
+        $tenantId = 'tenant-transfer-workflow-2';
+        $this->actingBackOfficeSession($tenantId);
+        Business::create(['id' => $tenantId, 'name' => $tenantId, 'workflow_settings' => ['stock_transfer_requires_approval' => false]]);
+
+        $warehouse = $this->makeLocation($tenantId, 'Warehouse', 'warehouse');
+        $shop = $this->makeLocation($tenantId, 'Shop', 'shop');
+        $product = Product::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Ungated Widget',
+            'item_type' => 'product', 'price' => 5, 'track_stock' => true, 'stock_quantity' => 10,
+        ]);
+        $this->seedLocationStock($tenantId, $product->id, $warehouse->id, 10);
+
+        $this->post('/office/transfers', [
+            'from_location_id' => $warehouse->id,
+            'to_location_id' => $shop->id,
+            'items' => [['product_id' => $product->id, 'qty_requested' => 5]],
+        ])->assertRedirect();
+        $transfer = StockTransfer::where('business_id', $tenantId)->first();
+        $item = $transfer->items->first();
+
+        $this->post("/office/transfers/{$transfer->id}/dispatch", [
+            'items' => [['item_id' => $item->id, 'qty_sent' => 5]],
+        ])->assertRedirect();
+        $this->assertSame('in_transit', $transfer->fresh()->status);
     }
 
     public function test_receive_with_shortfall_logs_a_loss_and_only_moves_what_arrived(): void

@@ -2,8 +2,10 @@
 
 namespace App\Services;
 
+use App\Models\Business;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Services\Accounting\ChartOfAccountsSeeder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
@@ -67,6 +69,34 @@ class BusinessProvisioner
                 ]);
 
                 $owner->assignRole('business_owner');
+
+                // The businesses row is the domain record every accounting
+                // and sync path resolves (Business::find, postIfReady,
+                // accounting_settings push). Tenant + owner alone leave a
+                // business whose activation push fails with "unknown
+                // business" — reproduced live. It must exist from birth.
+                Business::firstOrCreate(
+                    ['id' => $tenant->id],
+                    [
+                        'name' => $data['business_name'],
+                        'email' => $data['owner_email'],
+                        'currency_code' => $data['currency_code'] ?? 'USD',
+                        'base_currency_code' => $data['currency_code'] ?? 'USD',
+                    ],
+                );
+
+                (new ChartOfAccountsSeeder)->seedForBusiness($tenant->id);
+
+                // Central Approval Stage Engine: intentionally NOT calling
+                // DefaultApprovalRulesSeeder::seedForBusiness() here anymore.
+                // A process with zero configured ApprovalRule rows is meant
+                // to behave as if approval doesn't exist for it — no PIN
+                // prompt, no gate — until the owner opts in via the till's
+                // approval-config screen and assigns named approver groups
+                // to stages. Auto-seeding role-based rules here would leave
+                // every new business silently gated on processes nobody
+                // configured. DefaultApprovalRulesSeeder itself is left in
+                // place for manual/test use, just no longer auto-invoked.
             } finally {
                 tenancy()->end();
             }

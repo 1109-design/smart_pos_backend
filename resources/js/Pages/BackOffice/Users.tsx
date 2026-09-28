@@ -10,11 +10,19 @@ interface User {
     email: string;
     role: string | null;
     is_active: boolean;
+    location_ids: string[];
+    location_names: string[];
+}
+
+interface LocationOption {
+    id: string;
+    name: string;
 }
 
 interface Props {
     users: User[];
     roles: string[];
+    locations: LocationOption[];
     viewer_role: string;
     filters: { search: string };
 }
@@ -29,9 +37,9 @@ function roleLabel(role: string): string {
     return role.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-type ModalMode = 'create' | 'edit' | 'password' | null;
+type ModalMode = 'create' | 'edit' | 'password' | 'locations' | null;
 
-export default function BackOfficeUsers({ users, roles, viewer_role, filters }: Props) {
+export default function BackOfficeUsers({ users, roles, locations, viewer_role, filters }: Props) {
     const [modalMode, setModalMode]     = useState<ModalMode>(null);
     const [selected, setSelected]       = useState<User | null>(null);
     const [search, setSearch]           = useState(filters.search);
@@ -49,6 +57,7 @@ export default function BackOfficeUsers({ users, roles, viewer_role, filters }: 
 
     const editForm = useForm({ name: '', email: '', role: 'cashier', is_active: true as boolean, pin: '' });
     const pwForm   = useForm({ password: '', password_confirmation: '' });
+    const locForm  = useForm<{ location_ids: string[] }>({ location_ids: [] });
 
     const openCreate = () => {
         setSelected(null);
@@ -72,6 +81,25 @@ export default function BackOfficeUsers({ users, roles, viewer_role, filters }: 
     };
 
     const closeModal = () => { setModalMode(null); setSelected(null); };
+
+    const openLocations = (u: User) => {
+        setSelected(u);
+        locForm.clearErrors();
+        locForm.setData('location_ids', u.location_ids);
+        setModalMode('locations');
+    };
+
+    const submitLocations = (e: React.FormEvent) => {
+        e.preventDefault();
+        locForm.put(`/office/users/${selected!.id}/locations`, { onSuccess: closeModal });
+    };
+
+    const toggleLocationId = (id: string) => {
+        const next = locForm.data.location_ids.includes(id)
+            ? locForm.data.location_ids.filter((x) => x !== id)
+            : [...locForm.data.location_ids, id];
+        locForm.setData('location_ids', next);
+    };
 
     const submitUserForm = (e: React.FormEvent) => {
         e.preventDefault();
@@ -152,8 +180,13 @@ export default function BackOfficeUsers({ users, roles, viewer_role, filters }: 
                                 <StatusBadge label={u.is_active ? 'Active' : 'Inactive'} variant={u.is_active ? 'green' : 'red'} />
                             </div>
                             {u.role && (
-                                <div className="mt-2">
+                                <div className="mt-2 flex flex-wrap items-center gap-1.5">
                                     <StatusBadge label={roleLabel(u.role)} variant={roleVariant(u.role)} />
+                                    <StatusBadge
+                                        label={u.location_ids.length === 0 ? 'All locations' : u.location_names.join(', ')}
+                                        variant="gray"
+                                        dot={false}
+                                    />
                                 </div>
                             )}
                             <div className="flex flex-wrap items-center gap-2 mt-3">
@@ -162,6 +195,12 @@ export default function BackOfficeUsers({ users, roles, viewer_role, filters }: 
                                     className="text-xs font-medium text-slate-600 hover:text-slate-900 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 transition-colors"
                                 >
                                     Edit
+                                </button>
+                                <button
+                                    onClick={() => openLocations(u)}
+                                    className="text-xs font-medium text-slate-600 hover:text-slate-900 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 transition-colors"
+                                >
+                                    Locations
                                 </button>
                                 <button
                                     onClick={() => openPassword(u)}
@@ -201,6 +240,7 @@ export default function BackOfficeUsers({ users, roles, viewer_role, filters }: 
                                 <th className="table-th">Name</th>
                                 <th className="table-th">Email</th>
                                 <th className="table-th">Role</th>
+                                <th className="table-th">Locations</th>
                                 <th className="table-th">Status</th>
                                 <th className="table-th">Actions</th>
                             </tr>
@@ -213,6 +253,9 @@ export default function BackOfficeUsers({ users, roles, viewer_role, filters }: 
                                     <td className="table-td">
                                         {u.role && <StatusBadge label={roleLabel(u.role)} variant={roleVariant(u.role)} />}
                                     </td>
+                                    <td className="table-td text-slate-500 text-xs">
+                                        {u.location_ids.length === 0 ? 'All locations' : u.location_names.join(', ')}
+                                    </td>
                                     <td className="table-td">
                                         <StatusBadge label={u.is_active ? 'Active' : 'Inactive'} variant={u.is_active ? 'green' : 'red'} />
                                     </td>
@@ -223,6 +266,12 @@ export default function BackOfficeUsers({ users, roles, viewer_role, filters }: 
                                                 className="text-xs font-medium text-slate-600 hover:text-slate-900 px-2.5 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 transition-colors"
                                             >
                                                 Edit
+                                            </button>
+                                            <button
+                                                onClick={() => openLocations(u)}
+                                                className="text-xs font-medium text-slate-600 hover:text-slate-900 px-2.5 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 transition-colors"
+                                            >
+                                                Locations
                                             </button>
                                             <button
                                                 onClick={() => openPassword(u)}
@@ -248,7 +297,7 @@ export default function BackOfficeUsers({ users, roles, viewer_role, filters }: 
                             ))}
                             {users.length === 0 && (
                                 <tr>
-                                    <td colSpan={5} className="px-6 py-10 text-center text-slate-400 text-sm">
+                                    <td colSpan={6} className="px-6 py-10 text-center text-slate-400 text-sm">
                                         {search
                                             ? <>No users match "<span className="font-medium text-slate-600">{search}</span>".</>
                                             : 'No users found.'}
@@ -379,6 +428,45 @@ export default function BackOfficeUsers({ users, roles, viewer_role, filters }: 
                         <div className="flex justify-end gap-3 pt-2">
                             <button type="button" onClick={closeModal} className="btn-secondary">Cancel</button>
                             <button type="submit" disabled={pwForm.processing} className="btn-primary disabled:opacity-50">Update Password</button>
+                        </div>
+                    </form>
+                </div>
+            </Modal>
+
+            {/* ── Locations Modal ────────────────────────────────────────── */}
+            <Modal show={modalMode === 'locations'} onClose={closeModal} maxWidth="sm">
+                <div className="p-6">
+                    <div className="flex items-center justify-between mb-1">
+                        <h2 className="text-lg font-semibold text-slate-900">Location Access</h2>
+                        <CloseBtn />
+                    </div>
+                    {selected && (
+                        <p className="text-sm text-slate-500 mb-5">
+                            Restrict <span className="font-medium text-slate-700">{selected.name}</span> to specific
+                            locations. Leave everything unchecked for unrestricted access to every location.
+                        </p>
+                    )}
+                    <form onSubmit={submitLocations} className="space-y-4">
+                        <div className="space-y-2 max-h-64 overflow-y-auto">
+                            {locations.map((loc) => (
+                                <label key={loc.id} className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={locForm.data.location_ids.includes(loc.id)}
+                                        onChange={() => toggleLocationId(loc.id)}
+                                        className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                                    />
+                                    {loc.name}
+                                </label>
+                            ))}
+                            {locations.length === 0 && (
+                                <p className="text-sm text-slate-400">No locations yet.</p>
+                            )}
+                        </div>
+                        {locForm.errors.location_ids && <p className="text-red-500 text-xs mt-1">{locForm.errors.location_ids}</p>}
+                        <div className="flex justify-end gap-3 pt-2">
+                            <button type="button" onClick={closeModal} className="btn-secondary">Cancel</button>
+                            <button type="submit" disabled={locForm.processing} className="btn-primary disabled:opacity-50">Save</button>
                         </div>
                     </form>
                 </div>

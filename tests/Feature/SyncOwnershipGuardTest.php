@@ -7,6 +7,8 @@ use App\Models\BundleItem;
 use App\Models\Category;
 use App\Models\Device;
 use App\Models\Product;
+use App\Models\Project;
+use App\Models\ProjectMilestone;
 use App\Models\Tenant;
 use App\Models\Transaction;
 use App\Models\User;
@@ -101,6 +103,43 @@ class SyncOwnershipGuardTest extends TestCase
         $response->assertJsonCount(1, 'errors');
 
         $this->assertDatabaseHas('categories', ['id' => $victimCategoryId, 'is_active' => true]);
+    }
+
+    /**
+     * 2026-09-06 offline-first audit follow-up: assertOwnership() only ever
+     * compared the payload's claimed business_id against an *existing* row's
+     * owner — for a brand-new uuid there's nothing in the database yet to
+     * check against, so a device could plant a fabricated record inside any
+     * OTHER business's tenant scope simply by naming that business_id on a
+     * uuid that doesn't exist. Fixed in SyncController::push(): the payload's
+     * business_id is now unconditionally overridden to the authenticated
+     * device's own tenant_id before it ever reaches SyncProcessor, so lying
+     * about it has no effect — the record still lands, just correctly
+     * attributed to the caller's real business.
+     */
+    public function test_push_cannot_plant_a_new_record_under_another_businesss_id(): void
+    {
+        $attackerTenant = 'tenant-guard-planter';
+        $attackerToken = $this->actingDeviceToken($attackerTenant);
+        $newCategoryId = (string) Str::uuid();
+
+        $response = $this->withHeader('Authorization', 'Bearer '.$attackerToken)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'categories',
+                    'uuid' => $newCategoryId,
+                    'operation' => 'upsert',
+                    'payload' => ['business_id' => 'tenant-guard-victim-3', 'name' => 'Planted Category'],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ]);
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'accepted');
+        $response->assertJsonCount(0, 'errors');
+
+        $this->assertDatabaseHas('categories', ['id' => $newCategoryId, 'business_id' => $attackerTenant]);
+        $this->assertDatabaseMissing('categories', ['id' => $newCategoryId, 'business_id' => 'tenant-guard-victim-3']);
     }
 
     public function test_same_tenant_upsert_and_delete_still_work(): void
@@ -220,6 +259,40 @@ class SyncOwnershipGuardTest extends TestCase
             'bundle_id' => $attackerBundleId,
             'product_id' => (string) Str::uuid(),
             'quantity' => 99,
+        ]);
+    }
+
+    /**
+     * milestone_tasks is scoped two hops deep (task -> milestone -> project's
+     * business_id) via resolveParentOwner()'s join case — proves that lookup
+     * actually resolves the real owner rather than silently passing.
+     */
+    public function test_milestone_task_cannot_be_hijacked_into_another_businesss_milestone(): void
+    {
+        $victimTenant = 'tenant-guard-milestone-victim';
+        Tenant::create(['id' => $victimTenant, 'business_name' => $victimTenant, 'owner_email' => $victimTenant.'@example.com']);
+        $attackerTenant = 'tenant-guard-milestone-attacker';
+        Tenant::create(['id' => $attackerTenant, 'business_name' => $attackerTenant, 'owner_email' => $attackerTenant.'@example.com']);
+
+        $victimProjectId = (string) Str::uuid();
+        Project::create(['id' => $victimProjectId, 'business_id' => $victimTenant, 'name' => 'Victim Project', 'created_by_user_id' => (string) Str::uuid()]);
+        $victimMilestoneId = (string) Str::uuid();
+        ProjectMilestone::create(['id' => $victimMilestoneId, 'project_id' => $victimProjectId, 'title' => 'Victim Milestone']);
+        $existingTaskId = (string) Str::uuid();
+
+        $attackerProjectId = (string) Str::uuid();
+        Project::create(['id' => $attackerProjectId, 'business_id' => $attackerTenant, 'name' => 'Attacker Project', 'created_by_user_id' => (string) Str::uuid()]);
+        $attackerMilestoneId = (string) Str::uuid();
+        ProjectMilestone::create(['id' => $attackerMilestoneId, 'project_id' => $attackerProjectId, 'title' => 'Attacker Milestone']);
+
+        $this->expectException(\RuntimeException::class);
+
+        // Attacker tries to attach a brand-new task to the VICTIM's
+        // milestone while claiming it as their own business.
+        app(SyncProcessor::class)->process('milestone_tasks', $existingTaskId, 'upsert', [
+            'business_id' => $attackerTenant,
+            'milestone_id' => $victimMilestoneId,
+            'title' => 'Planted Task',
         ]);
     }
 }

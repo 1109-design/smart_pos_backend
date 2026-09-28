@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Http\Middleware\AuthenticateBackOfficeUser;
 use App\Models\Location;
 use App\Models\Product;
+use App\Models\ProductStock;
 use App\Models\StockTransfer;
 use App\Models\Tenant;
 use App\Models\User;
@@ -119,6 +120,62 @@ class BackOfficeStoremanTest extends TestCase
             ->where('suggestions.0.to_location_id', $shop->id)
             ->where('suggestions.0.suggested_qty', 8) // shortfall = 10 - 2; whole numbers serialize as JSON ints
         );
+    }
+
+    public function test_stock_health_uses_the_locations_own_threshold_override_not_the_product_default(): void
+    {
+        $tenantId = 'tenant-storeman-threshold-1';
+        $this->actingBackOfficeSession($tenantId);
+
+        $shop = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Shop', 'type' => 'shop', 'is_active' => true]);
+
+        // Product default threshold is 5 — 8 units would read healthy against
+        // it, but this location has overridden its own threshold to 10.
+        $product = $this->makeProduct($tenantId, 'Overridden Widget', 5);
+        $this->seedLocationStock($tenantId, $product->id, $shop->id, 8);
+
+        ProductStock::where('product_id', $product->id)
+            ->where('location_id', $shop->id)
+            ->update(['low_stock_threshold' => 10]);
+
+        $response = $this->get('/office/storeman');
+        $response->assertInertia(fn ($page) => $page
+            ->where('stock_health.0.low_stock_count', 1)
+        );
+    }
+
+    /**
+     * Regression: a warehouse already committed to sending stock out on
+     * another in-transit transfer isn't really "surplus" for a new
+     * suggestion — health/suggestion math must net out in_transit_quantity,
+     * same as ProductStock::getAvailableQuantityAttribute() does everywhere
+     * else stock availability is judged.
+     */
+    public function test_stock_health_and_suggestions_exclude_stock_already_committed_in_transit(): void
+    {
+        $tenantId = 'tenant-storeman-intransit-1';
+        $this->actingBackOfficeSession($tenantId);
+
+        $warehouse = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Warehouse', 'type' => 'warehouse', 'is_active' => true]);
+        $shop = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Shop', 'type' => 'shop', 'parent_id' => $warehouse->id, 'is_active' => true]);
+
+        // Raw quantity of 30 clears the surplus bar (2x threshold of 10 = 20),
+        // but 25 of it is already committed to another outbound transfer —
+        // only 5 is actually available, which is not a surplus.
+        $product = $this->makeProduct($tenantId, 'Committed Widget', 10);
+        $this->seedLocationStock($tenantId, $product->id, $warehouse->id, 30);
+        ProductStock::where('product_id', $product->id)
+            ->where('location_id', $warehouse->id)
+            ->update(['in_transit_quantity' => 25]);
+
+        $this->seedLocationStock($tenantId, $product->id, $shop->id, 2);
+
+        $response = $this->get('/office/storeman');
+        $response->assertOk();
+        $warehouseHealth = collect($response->viewData('page')['props']['stock_health'])
+            ->firstWhere('id', $warehouse->id);
+        $this->assertSame(0, $warehouseHealth['surplus_count']);
+        $response->assertInertia(fn ($page) => $page->has('suggestions', 0));
     }
 
     public function test_no_suggestion_when_warehouse_has_no_surplus(): void

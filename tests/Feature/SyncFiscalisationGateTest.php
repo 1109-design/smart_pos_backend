@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Jobs\ProcessZimraFiscalisationJob;
 use App\Models\Business;
 use App\Models\Device;
+use App\Models\Location;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Models\Zimra\ZimraDevice;
@@ -42,7 +43,7 @@ class SyncFiscalisationGateTest extends TestCase
         return $plain;
     }
 
-    private function pushTransaction(string $token, string $tenantId, string $transactionId): TestResponse
+    private function pushTransaction(string $token, string $tenantId, string $transactionId, ?string $locationId = null): TestResponse
     {
         return $this->withHeader('Authorization', 'Bearer '.$token)
             ->postJson('/api/v1/sync/push', [
@@ -52,6 +53,7 @@ class SyncFiscalisationGateTest extends TestCase
                     'operation' => 'upsert',
                     'payload' => [
                         'business_id' => $tenantId,
+                        'location_id' => $locationId,
                         'user_id' => '99999999-9999-4999-9999-999999999999',
                         'subtotal' => 10,
                         'tax_total' => 1.5,
@@ -243,5 +245,99 @@ class SyncFiscalisationGateTest extends TestCase
         $this->pushTransaction($token, $tenantId, $transactionId)->assertOk();
 
         $this->assertSame($firstCount, ZimraSale::count());
+    }
+
+    public function test_sale_fiscalises_through_its_own_branchs_device_not_another_branchs(): void
+    {
+        // Regression for the "always picks ZimraDevice::first()" bug: a chain
+        // with one registered device per branch must fiscalise each sale
+        // through its own branch's device, never whichever device happens to
+        // be first for the tenant.
+        Queue::fake();
+        $tenantId = 'tenant-fiscal-multi-branch';
+        $token = $this->actingDeviceToken($tenantId);
+
+        Business::create([
+            'id' => $tenantId,
+            'name' => 'Multi Branch Hardware',
+            'fiscalisation_enabled' => true,
+            'tin' => '1234567890',
+        ]);
+
+        $branchA = Location::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'Branch A',
+            'type' => 'shop',
+            'is_active' => true,
+        ]);
+        $branchB = Location::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'name' => 'Branch B',
+            'type' => 'shop',
+            'is_active' => true,
+        ]);
+
+        // Device A registered first — this is the row that ->first() used to
+        // return for every sale regardless of branch.
+        ZimraDevice::create([
+            'business_id' => $tenantId,
+            'location_id' => $branchA->id,
+            'tin' => '1234567890',
+            'device_id' => '90001',
+            'is_active' => true,
+            'status' => 'active',
+        ]);
+        ZimraDevice::create([
+            'business_id' => $tenantId,
+            'location_id' => $branchB->id,
+            'tin' => '1234567890',
+            'device_id' => '90002',
+            'is_active' => true,
+            'status' => 'active',
+        ]);
+
+        $saleAtBranchB = (string) Str::uuid();
+        $this->pushTransaction($token, $tenantId, $saleAtBranchB, $branchB->id)->assertOk();
+
+        $this->assertDatabaseHas('zimra_sales', [
+            'transaction_id' => $saleAtBranchB,
+            'device_id' => '90002',
+        ]);
+    }
+
+    public function test_sale_with_no_location_falls_back_to_business_wide_device(): void
+    {
+        // Backward compatibility: a business that hasn't split its fiscal
+        // device by branch (location_id null on the device) keeps working
+        // even for sales that carry no location_id either.
+        Queue::fake();
+        $tenantId = 'tenant-fiscal-fallback';
+        $token = $this->actingDeviceToken($tenantId);
+
+        Business::create([
+            'id' => $tenantId,
+            'name' => 'Single Device Shop',
+            'fiscalisation_enabled' => true,
+            'tin' => '1234567890',
+        ]);
+
+        ZimraDevice::create([
+            'business_id' => $tenantId,
+            'location_id' => null,
+            'tin' => '1234567890',
+            'device_id' => '90003',
+            'is_active' => true,
+            'status' => 'active',
+        ]);
+
+        $transactionId = (string) Str::uuid();
+        $this->pushTransaction($token, $tenantId, $transactionId)->assertOk();
+
+        $this->assertDatabaseHas('zimra_sales', [
+            'transaction_id' => $transactionId,
+            'device_id' => '90003',
+        ]);
     }
 }

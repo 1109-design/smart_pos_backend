@@ -7,7 +7,33 @@ interface BackofficeAuth {
     role: string | null;
     business_name: string;
     currency_code: string;
+    primary_color: string | null;
+    logo_url: string | null;
 }
+
+const DEFAULT_BRAND_COLOR = '#059669'; // today's emerald-600, used whenever a tenant hasn't set one
+
+/** The sidebar/topbar mark: the tenant's uploaded logo when set, else the default SmartPOS glyph tinted with the brand color. */
+const BrandMark = ({ logoUrl, size }: { logoUrl?: string | null; size: 'sm' | 'md' }) => {
+    const boxClass = size === 'md' ? 'w-8 h-8' : 'w-6 h-6';
+    const iconClass = size === 'md' ? 'w-4 h-4' : 'w-3.5 h-3.5';
+
+    if (logoUrl) {
+        return (
+            <div className={`${boxClass} rounded-lg overflow-hidden flex-shrink-0 bg-white flex items-center justify-center`}>
+                <img src={logoUrl} alt="" className="w-full h-full object-contain" />
+            </div>
+        );
+    }
+
+    return (
+        <div className={`${boxClass} rounded-lg flex items-center justify-center flex-shrink-0`} style={{ backgroundColor: 'var(--brand-primary)' }}>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="white" className={iconClass}>
+                <path d="M2.879 7.121A3 3 0 0 0 7.5 6.66a2.997 2.997 0 0 0 2.5 1.34 2.997 2.997 0 0 0 2.5-1.34 3 3 0 1 0 4.622-3.78l-.293-.293A2 2 0 0 0 15.415 2H4.585a2 2 0 0 0-1.414.586l-.292.292a3 3 0 0 0 0 4.243ZM3 12v5h5v-3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v3h5v-5a3 3 0 0 1-3-3 3 3 0 0 1-2.5 1.338A3 3 0 0 1 9.5 9 3 3 0 0 1 7 10.338 3 3 0 0 1 3 9v3Z" />
+            </svg>
+        </div>
+    );
+};
 
 const IconChart = () => (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
@@ -85,6 +111,12 @@ const IconCog = () => (
     </svg>
 );
 
+const IconLock = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+        <path fillRule="evenodd" d="M10 1a4.5 4.5 0 0 0-4.5 4.5V9H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2h-.5V5.5A4.5 4.5 0 0 0 10 1Zm3 8V5.5a3 3 0 1 0-6 0V9h6Z" clipRule="evenodd" />
+    </svg>
+);
+
 const ALL_NAV = [
     { label: 'Dashboard',       href: '/office/dashboard',       Icon: IconChart,          roles: null },
     { label: 'Transactions',    href: '/office/transactions',    Icon: IconReceipt,        roles: null },
@@ -93,15 +125,28 @@ const ALL_NAV = [
     { label: 'Combos',          href: '/office/combos',          Icon: IconBox,            roles: ['business_owner', 'manager'] },
     { label: 'Storeman',        href: '/office/storeman',        Icon: IconMapPin,         roles: ['business_owner', 'manager'] },
     { label: 'Transfers',       href: '/office/transfers',       Icon: IconTruck,          roles: ['business_owner', 'manager'] },
+    { label: 'Requisitions',    href: '/office/requisitions',    Icon: IconBox,            roles: ['business_owner', 'manager'] },
+    { label: 'Projects',        href: '/office/projects',        Icon: IconDocumentReport, roles: ['business_owner', 'manager'] },
+    { label: 'Approvals',       href: '/office/approvals',       Icon: IconCog,            roles: ['business_owner', 'manager'] },
     { label: 'Suppliers',       href: '/office/suppliers',       Icon: IconTruck,          roles: ['business_owner', 'manager'] },
     { label: 'Purchase Orders', href: '/office/purchase-orders', Icon: IconBox,            roles: ['business_owner', 'manager'] },
+    { label: 'Procurement Budgets', href: '/office/procurement-budgets', Icon: IconLock,   roles: ['business_owner', 'manager'] },
     { label: 'Stocktakes',      href: '/office/stocktakes',      Icon: IconBox,            roles: ['business_owner', 'manager'] },
     { label: 'Customers',       href: '/office/customers',       Icon: IconUsers,          roles: ['business_owner', 'manager'] },
     { label: 'Notes',           href: '/office/product-requests', Icon: IconNote,          roles: null },
     { label: 'Assets',          href: '/office/assets',          Icon: IconArchiveBox,     roles: ['business_owner', 'manager'] },
     { label: 'Locations',       href: '/office/locations',       Icon: IconMapPin,         roles: ['business_owner', 'manager'] },
+    { label: 'Tills',           href: '/office/tills',           Icon: IconMapPin,         roles: ['business_owner', 'manager'] },
+    { label: 'Cash Vault',      href: '/office/cash-vault',      Icon: IconLock,           roles: ['business_owner', 'manager'] },
+    { label: 'Bank Accounts',   href: '/office/bank-accounts',   Icon: IconLock,           roles: ['business_owner', 'manager'] },
     { label: 'Reports',         href: '/office/reports',         Icon: IconDocumentReport, roles: null },
+    { label: 'Exchange Rates',  href: '/office/exchange-rates',  Icon: IconChart,          roles: ['business_owner', 'manager'] },
+    { label: 'Journal Entries', href: '/office/journal-entries', Icon: IconDocumentReport, roles: ['business_owner'] },
+    { label: 'Chart of Accounts', href: '/office/chart-of-accounts', Icon: IconCog, roles: ['business_owner'] },
+    { label: 'Account Mappings', href: '/office/account-mappings', Icon: IconCog, roles: ['business_owner'] },
+    { label: 'Assets',          href: '/office/assets',          Icon: IconBox,            roles: ['business_owner'] },
     { label: 'Users',           href: '/office/users',           Icon: IconUsers,          roles: ['business_owner', 'manager'] },
+    { label: 'Roles',           href: '/office/roles',           Icon: IconUsers,          roles: ['business_owner'] },
     { label: 'Settings',        href: '/office/settings',        Icon: IconCog,            roles: ['business_owner'] },
 ];
 
@@ -141,16 +186,16 @@ export default function BackOfficeLayout({ children }: PropsWithChildren) {
                                     : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
                             }`}
                         >
-                            <span className={active ? 'text-emerald-400' : 'text-slate-500'}><Icon /></span>
+                            <span className="text-slate-500" style={active ? { color: 'var(--brand-primary)' } : undefined}><Icon /></span>
                             {label}
-                            {active && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-emerald-400" />}
+                            {active && <span className="ml-auto w-1.5 h-1.5 rounded-full" style={{ backgroundColor: 'var(--brand-primary)' }} />}
                         </Link>
                     );
                 })}
             </nav>
             <div className="border-t border-slate-800 p-3 space-y-1">
                 <div className="flex items-center gap-3 px-3 py-2.5">
-                    <div className="w-8 h-8 rounded-lg bg-emerald-700 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center text-white text-xs font-bold flex-shrink-0" style={{ backgroundColor: 'var(--brand-primary)' }}>
                         {initials}
                     </div>
                     <div className="min-w-0 flex-1">
@@ -172,7 +217,10 @@ export default function BackOfficeLayout({ children }: PropsWithChildren) {
     );
 
     return (
-        <div className="flex min-h-screen bg-slate-50">
+        <div
+            className="flex min-h-screen bg-slate-50 print:bg-white"
+            style={{ '--brand-primary': auth?.primary_color || DEFAULT_BRAND_COLOR } as React.CSSProperties}
+        >
             {/* Mobile overlay */}
             {sidebarOpen && (
                 <div
@@ -184,15 +232,11 @@ export default function BackOfficeLayout({ children }: PropsWithChildren) {
             {/* Sidebar */}
             <aside className={`
                 fixed inset-y-0 left-0 z-40 w-60 bg-slate-900 flex flex-col transition-transform duration-200
-                lg:translate-x-0
+                lg:translate-x-0 print:hidden
                 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
             `}>
                 <div className="h-16 flex items-center gap-3 px-5 border-b border-slate-800">
-                    <div className="w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center flex-shrink-0">
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="white" className="w-4 h-4">
-                            <path d="M2.879 7.121A3 3 0 0 0 7.5 6.66a2.997 2.997 0 0 0 2.5 1.34 2.997 2.997 0 0 0 2.5-1.34 3 3 0 1 0 4.622-3.78l-.293-.293A2 2 0 0 0 15.415 2H4.585a2 2 0 0 0-1.414.586l-.292.292a3 3 0 0 0 0 4.243ZM3 12v5h5v-3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v3h5v-5a3 3 0 0 1-3-3 3 3 0 0 1-2.5 1.338A3 3 0 0 1 9.5 9 3 3 0 0 1 7 10.338 3 3 0 0 1 3 9v3Z" />
-                        </svg>
-                    </div>
+                    <BrandMark logoUrl={auth?.logo_url} size="md" />
                     <div className="min-w-0">
                         <p className="text-sm font-bold text-white leading-none tracking-tight truncate">
                             {auth?.business_name ?? 'Back Office'}
@@ -204,9 +248,9 @@ export default function BackOfficeLayout({ children }: PropsWithChildren) {
             </aside>
 
             {/* Main */}
-            <div className="flex-1 flex flex-col min-w-0 lg:ml-60">
+            <div className="flex-1 flex flex-col min-w-0 lg:ml-60 print:ml-0">
                 {/* Mobile topbar */}
-                <header className="lg:hidden h-14 bg-white border-b border-slate-200 flex items-center gap-3 px-4 sticky top-0 z-20">
+                <header className="lg:hidden h-14 bg-white border-b border-slate-200 flex items-center gap-3 px-4 sticky top-0 z-20 print:hidden">
                     <button
                         onClick={() => setSidebarOpen(true)}
                         className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 transition-colors"
@@ -216,16 +260,12 @@ export default function BackOfficeLayout({ children }: PropsWithChildren) {
                         </svg>
                     </button>
                     <div className="flex items-center gap-2 min-w-0">
-                        <div className="w-6 h-6 rounded-md bg-emerald-600 flex items-center justify-center flex-shrink-0">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="white" className="w-3.5 h-3.5">
-                                <path d="M2.879 7.121A3 3 0 0 0 7.5 6.66a2.997 2.997 0 0 0 2.5 1.34 2.997 2.997 0 0 0 2.5-1.34 3 3 0 1 0 4.622-3.78l-.293-.293A2 2 0 0 0 15.415 2H4.585a2 2 0 0 0-1.414.586l-.292.292a3 3 0 0 0 0 4.243ZM3 12v5h5v-3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v3h5v-5a3 3 0 0 1-3-3 3 3 0 0 1-2.5 1.338A3 3 0 0 1 9.5 9 3 3 0 0 1 7 10.338 3 3 0 0 1 3 9v3Z" />
-                            </svg>
-                        </div>
+                        <BrandMark logoUrl={auth?.logo_url} size="sm" />
                         <span className="text-sm font-bold text-slate-900 truncate">{auth?.business_name ?? 'Back Office'}</span>
                     </div>
                 </header>
 
-                <main className="flex-1 p-4 sm:p-6 lg:p-8">{children}</main>
+                <main className="flex-1 p-4 sm:p-6 lg:p-8 print:p-0">{children}</main>
             </div>
         </div>
     );

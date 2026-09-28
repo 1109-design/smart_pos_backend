@@ -2,105 +2,159 @@
 
 namespace App\Models;
 
+use App\Events\AssetChanged;
+use App\Models\Accounting\GeneralLedgerEntry;
+use App\Models\Accounting\GlAccount;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Support\Carbon;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class Asset extends Model
 {
     use HasUuids;
 
     protected $fillable = [
-        'id', 'business_id', 'location_id', 'created_by_user_id',
-        'name', 'category', 'asset_tag',
-        'purchase_date', 'purchase_cost', 'salvage_value',
-        'depreciation_method', 'useful_life_years', 'depreciation_rate_percent',
-        'status', 'disposed_at', 'disposal_value',
-        'notes', 'created_at', 'updated_at', 'deleted_at',
+        'id', 'business_id', 'asset_number', 'name', 'category', 'notes',
+        'acquisition_date', 'acquisition_cost', 'salvage_value', 'useful_life_months',
+        'funding_method', 'status', 'disposed_at', 'disposal_proceeds', 'created_by_user_id',
+        'bank_account_id', 'disposal_bank_account_id',
     ];
+
+    protected static function booted(): void
+    {
+        $dispatch = function (Asset $asset): void {
+            if (! $asset->business_id) {
+                return;
+            }
+
+            AssetChanged::dispatch($asset->business_id, $asset->id);
+        };
+
+        static::created($dispatch);
+        static::updated($dispatch);
+    }
 
     protected function casts(): array
     {
         return [
-            'purchase_date' => 'date',
-            'purchase_cost' => 'decimal:2',
-            'salvage_value' => 'decimal:2',
-            'useful_life_years' => 'integer',
-            'depreciation_rate_percent' => 'decimal:2',
-            'disposed_at' => 'datetime',
-            'disposal_value' => 'decimal:2',
-            'created_at' => 'datetime',
-            'updated_at' => 'datetime',
-            'deleted_at' => 'datetime',
+            'acquisition_date' => 'date',
+            'acquisition_cost' => 'decimal:4',
+            'salvage_value' => 'decimal:4',
+            'disposed_at' => 'date',
+            'disposal_proceeds' => 'decimal:4',
         ];
     }
 
-    /**
-     * Current book value as of $asOf (defaults to now). Mirrors
-     * smart_pos's core/assets/depreciation.dart exactly — this register
-     * shows "roughly what it's worth now," computed on the fly rather than
-     * stored per-period, so both sides must agree on the formula.
-     *
-     * @return array{book_value: float, accumulated_depreciation: float}
-     */
-    public function valuation(?Carbon $asOf = null): array
+    public function createdBy(): BelongsTo
     {
-        $cost = (float) $this->purchase_cost;
-        $salvage = min(max((float) $this->salvage_value, 0), $cost);
+        return $this->belongsTo(User::class, 'created_by_user_id');
+    }
 
-        if ($this->status === 'disposed') {
-            if ($this->disposal_value !== null) {
-                $disposalValue = (float) $this->disposal_value;
+    public function isActive(): bool
+    {
+        return $this->status === 'active';
+    }
 
-                return [
-                    'book_value' => $disposalValue,
-                    'accumulated_depreciation' => min(max($cost - $disposalValue, 0), $cost),
-                ];
-            }
-            if ($this->disposed_at !== null) {
-                $asOf = $this->disposed_at;
-            }
-        }
-
-        $asOf ??= now();
-        $yearsElapsed = max(0, $this->purchase_date->diffInDays($asOf, false) / 365.25);
-
-        return match ($this->depreciation_method) {
-            'straight_line' => $this->straightLineValuation($cost, $salvage, $yearsElapsed),
-            'reducing_balance' => $this->reducingBalanceValuation($cost, $salvage, $yearsElapsed),
-            default => ['book_value' => $cost, 'accumulated_depreciation' => 0.0],
-        };
+    public function depreciableBase(): float
+    {
+        return max(0, (float) $this->acquisition_cost - (float) $this->salvage_value);
     }
 
     /**
-     * @return array{book_value: float, accumulated_depreciation: float}
+     * Diminishing (reducing) balance rate, applied to the asset's current
+     * net book value each period rather than a fixed straight-line amount.
+     * No per-business/per-asset rate is configurable yet, so this uses the
+     * conventional "200% declining balance" rate — double the equivalent
+     * straight-line rate implied by useful_life_months — which is the
+     * standard default reducing-balance software uses absent an explicit
+     * rate. Capped at 100% so a 1—2 month useful life can't produce a
+     * rate above 1.
      */
-    private function straightLineValuation(float $cost, float $salvage, float $yearsElapsed): array
+    public function monthlyDepreciationRate(): float
     {
-        $life = $this->useful_life_years;
-        if (! $life || $life <= 0) {
-            return ['book_value' => $cost, 'accumulated_depreciation' => 0.0];
+        if ($this->useful_life_months <= 0) {
+            return 0.0;
         }
 
-        $annual = ($cost - $salvage) / $life;
-        $accumulated = min(max($annual * $yearsElapsed, 0), $cost - $salvage);
-
-        return ['book_value' => $cost - $accumulated, 'accumulated_depreciation' => $accumulated];
+        return min(1.0, 2 / $this->useful_life_months);
     }
 
     /**
-     * @return array{book_value: float, accumulated_depreciation: float}
+     * @param  string  $businessId  needed to read the asset's current net
+     *                              book value from the ledger — diminishing
+     *                              balance charges a rate against whatever
+     *                              is left, not a fixed dollar amount, so
+     *                              (unlike the old straight-line formula)
+     *                              this can no longer be computed from the
+     *                              asset's own columns alone.
      */
-    private function reducingBalanceValuation(float $cost, float $salvage, float $yearsElapsed): array
+    public function monthlyDepreciation(string $businessId): float
     {
-        $ratePercent = $this->depreciation_rate_percent;
-        if (! $ratePercent || $ratePercent <= 0) {
-            return ['book_value' => $cost, 'accumulated_depreciation' => 0.0];
+        if ($this->useful_life_months <= 0) {
+            return 0.0;
         }
 
-        $rate = (float) $ratePercent / 100;
-        $bookValue = max($cost * (1 - $rate) ** $yearsElapsed, $salvage);
+        $remaining = max(0, $this->bookValue($businessId) - (float) $this->salvage_value);
 
-        return ['book_value' => $bookValue, 'accumulated_depreciation' => $cost - $bookValue];
+        return round($remaining * $this->monthlyDepreciationRate(), 4);
+    }
+
+    /**
+     * Derived from general_ledger, never stored — same principle as
+     * GlAccount::balance() and PartyLedgerService, scoped to this one
+     * asset via party_type/party_id (the same columns those use for a
+     * customer or supplier, reused here rather than adding new ones).
+     */
+    public function accumulatedDepreciation(string $businessId): float
+    {
+        $account = GlAccount::where('business_id', $businessId)->where('code', '1510')->first();
+
+        if (! $account) {
+            return 0.0;
+        }
+
+        $totals = GeneralLedgerEntry::where('gl_account_id', $account->id)
+            ->where('party_type', 'asset')
+            ->where('party_id', $this->id)
+            ->selectRaw('COALESCE(SUM(credit), 0) as total_credit, COALESCE(SUM(debit), 0) as total_debit')
+            ->first();
+
+        return round((float) $totals->total_credit - (float) $totals->total_debit, 4);
+    }
+
+    public function bookValue(string $businessId): float
+    {
+        return round((float) $this->acquisition_cost - $this->accumulatedDepreciation($businessId), 4);
+    }
+
+    /**
+     * An asset's disposal (like a bank reconciliation's completion) can be
+     * recorded from any device — see the 'assets' case in SyncProcessor.
+     * Without this guard, a device that disposed an asset and went offline
+     * before pulling that back could resync its own stale 'active' snapshot
+     * afterwards, silently resurrecting a disposed asset — which the monthly
+     * depreciation sweep would then pick back up and keep depreciating.
+     * Mirrors StockTransfer::isValidTransition() exactly.
+     */
+    public const TERMINAL_STATUSES = ['disposed'];
+
+    /**
+     * @var array<string, array<int, string>>
+     */
+    public const ALLOWED_TRANSITIONS = [
+        'active' => ['disposed'],
+    ];
+
+    public static function isValidTransition(?string $from, string $to): bool
+    {
+        if ($from === null || $from === $to) {
+            return true;
+        }
+
+        if (in_array($from, self::TERMINAL_STATUSES, true)) {
+            return false;
+        }
+
+        return in_array($to, self::ALLOWED_TRANSITIONS[$from] ?? [], true);
     }
 }

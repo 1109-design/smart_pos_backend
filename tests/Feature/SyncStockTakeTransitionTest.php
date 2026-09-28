@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\Business;
 use App\Models\Device;
 use App\Models\Tenant;
 use App\Models\User;
@@ -123,5 +124,157 @@ class SyncStockTakeTransitionTest extends TestCase
             'id' => $stockTakeId,
             'status' => 'rejected',
         ]);
+    }
+
+    public function test_flagged_for_recount_reaches_the_device_via_pull(): void
+    {
+        // STC·08 — a device's own push payload never carries
+        // flagged_for_recount (it's server-computed); pull() only ever
+        // replays a SyncRecord's originally-stored payload, so without a
+        // fresh server-authored echo record the pushing device would never
+        // learn its own item got flagged. This proves that echo actually
+        // reaches pull(), including for the SAME device that pushed.
+        $tenantId = 'tenant-sync-recount-1';
+        $token = $this->actingDeviceToken($tenantId);
+
+        Business::create([
+            'id' => $tenantId, 'name' => $tenantId, 'currency_code' => 'USD',
+            'workflow_settings' => ['stock_take_variance_threshold_percent' => 5],
+        ]);
+        $stockTakeId = (string) Str::uuid();
+        $this->pushStockTake($token, $tenantId, $stockTakeId, 'in_progress')->assertOk();
+
+        $productId = (string) Str::uuid();
+        $itemId = (string) Str::uuid();
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'stock_take_items',
+                    'uuid' => $itemId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'stock_take_id' => $stockTakeId,
+                        'product_id' => $productId,
+                        'product_name' => 'Widget',
+                        'system_qty' => 100,
+                        'counted_qty' => 50, // 50% variance, well above the 5% threshold
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ])->assertOk();
+
+        $this->assertDatabaseHas('stock_take_items', ['id' => $itemId, 'flagged_for_recount' => true]);
+
+        $pull = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->getJson('/api/v1/sync/pull?'.http_build_query(['tables' => ['stock_take_items']]));
+
+        $pull->assertOk();
+        $records = collect($pull->json('records'))->where('record_uuid', $itemId);
+        $this->assertNotEmpty($records, 'the pushing device must still receive the server-computed flag back');
+        $this->assertTrue((bool) $records->last()['payload']['flagged_for_recount']);
+    }
+
+    /**
+     * The recount gate above was, until now, only enforced by
+     * StockTakesController::approve() (BackOffice) and the till's own
+     * stock_take_report_screen.dart::_approve() — neither of which is the
+     * only door into this status column. A device pushing straight to
+     * /api/v1/sync/push (bypassing the Flutter app entirely) hit no check
+     * at all here, so it could approve a stock take — and post its
+     * shrinkage/found-stock journal — while an item was still flagged and
+     * unresolved. Found live against a running dev server, not from
+     * reading the code; fixed with a gate in the 'stock_takes' case
+     * mirroring the requisition_issue gate on 'stock_movements'.
+     */
+    public function test_cannot_approve_via_sync_push_while_an_item_still_needs_recount(): void
+    {
+        $tenantId = 'tenant-sync-recount-gate-1';
+        $token = $this->actingDeviceToken($tenantId);
+
+        Business::create([
+            'id' => $tenantId, 'name' => $tenantId, 'currency_code' => 'USD',
+            'workflow_settings' => ['stock_take_variance_threshold_percent' => 5],
+        ]);
+        $stockTakeId = (string) Str::uuid();
+        $this->pushStockTake($token, $tenantId, $stockTakeId, 'in_progress')->assertOk();
+
+        $itemId = (string) Str::uuid();
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'stock_take_items',
+                    'uuid' => $itemId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'stock_take_id' => $stockTakeId,
+                        'product_id' => (string) Str::uuid(),
+                        'product_name' => 'Widget',
+                        'system_qty' => 100,
+                        'counted_qty' => 50, // 50% variance, well above the 5% threshold
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ])->assertOk();
+        $this->assertDatabaseHas('stock_take_items', ['id' => $itemId, 'flagged_for_recount' => true, 'recount_completed_at' => null]);
+
+        $this->pushStockTake($token, $tenantId, $stockTakeId, 'pending_approval')->assertOk();
+
+        $response = $this->pushStockTake($token, $tenantId, $stockTakeId, 'approved');
+
+        $response->assertOk();
+        $this->assertCount(0, $response->json('accepted'));
+        $this->assertSame(
+            'stock_takes: cannot approve while items still need a recount.',
+            $response->json('errors.0.reason'),
+        );
+        $this->assertDatabaseHas('stock_takes', ['id' => $stockTakeId, 'status' => 'pending_approval']);
+    }
+
+    public function test_can_approve_via_sync_push_once_the_recount_is_satisfied(): void
+    {
+        $tenantId = 'tenant-sync-recount-gate-2';
+        $token = $this->actingDeviceToken($tenantId);
+
+        Business::create([
+            'id' => $tenantId, 'name' => $tenantId, 'currency_code' => 'USD',
+            'workflow_settings' => ['stock_take_variance_threshold_percent' => 5],
+        ]);
+        $stockTakeId = (string) Str::uuid();
+        $this->pushStockTake($token, $tenantId, $stockTakeId, 'in_progress')->assertOk();
+
+        $productId = (string) Str::uuid();
+        $itemId = (string) Str::uuid();
+        $pushItem = fn (float $counted) => $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'stock_take_items',
+                    'uuid' => $itemId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'stock_take_id' => $stockTakeId,
+                        'product_id' => $productId,
+                        'product_name' => 'Widget',
+                        'system_qty' => 100,
+                        'counted_qty' => $counted,
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ])->assertOk();
+
+        $pushItem(50); // flags it
+        $pushItem(98); // a genuinely different recount, satisfies it
+        $this->assertDatabaseHas('stock_take_items', ['id' => $itemId, 'flagged_for_recount' => true]);
+        $this->assertDatabaseMissing('stock_take_items', ['id' => $itemId, 'recount_completed_at' => null]);
+
+        $this->pushStockTake($token, $tenantId, $stockTakeId, 'pending_approval')->assertOk();
+
+        $response = $this->pushStockTake($token, $tenantId, $stockTakeId, 'approved');
+
+        $response->assertOk();
+        $this->assertCount(1, $response->json('accepted'));
+        $this->assertDatabaseHas('stock_takes', ['id' => $stockTakeId, 'status' => 'approved']);
     }
 }

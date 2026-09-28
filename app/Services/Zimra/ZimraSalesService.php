@@ -106,8 +106,22 @@ class ZimraSalesService
             ];
         }
 
+        // A chain registers one fiscal device per branch (ZIMRA requires its
+        // own fiscal day/receipt sequence per till/branch). Prefer the device
+        // registered for this sale's location; fall back to a business-wide
+        // device (location_id null) for businesses that haven't split by
+        // branch yet — keeps single-location businesses working unchanged.
         $device = ZimraDevice::where('business_id', $transaction->business_id)
             ->where('is_active', true)
+            ->where(function ($query) use ($transaction) {
+                if ($transaction->location_id) {
+                    $query->where('location_id', $transaction->location_id)
+                        ->orWhereNull('location_id');
+                } else {
+                    $query->whereNull('location_id');
+                }
+            })
+            ->orderByRaw('location_id IS NULL')
             ->first();
 
         if (! $device) {
@@ -262,7 +276,20 @@ class ZimraSalesService
             }
 
             $receiptGlobalNo = (int) ($statusData['lastReceiptGlobalNo'] ?? 0) + 1;
-            $receiptCounter = (int) ($statusData['lastReceiptCounter'] ?? 0) + 1;
+
+            // ZIMRA GetStatus does not consistently return lastReceiptCounter (often
+            // only returning lastReceiptGlobalNo). When absent, compute it from the
+            // receipts recorded for this device in the current fiscal day.
+            $dayOpenedAt = $device->fiscal_day_opened_at ?? now()->startOfDay();
+            if (isset($statusData['lastReceiptCounter']) && (int) $statusData['lastReceiptCounter'] > 0) {
+                $receiptCounter = (int) $statusData['lastReceiptCounter'] + 1;
+            } else {
+                $dayReceiptsCount = ZimraSale::where('device_id', $device->device_id)
+                    ->whereNotNull('fiscalised_at')
+                    ->where('fiscalised_at', '>=', $dayOpenedAt)
+                    ->count();
+                $receiptCounter = $dayReceiptsCount + 1;
+            }
 
             // Hash chains are per fiscal day (spec §2.3): the previous hash is the
             // device signature hash of the last accepted receipt in THIS day only.

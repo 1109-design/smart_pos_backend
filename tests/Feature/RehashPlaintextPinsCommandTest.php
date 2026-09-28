@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\SyncRecord;
 use App\Models\Tenant;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -69,5 +70,35 @@ class RehashPlaintextPinsCommandTest extends TestCase
             ->assertSuccessful();
 
         $this->assertSame('9999', $user->fresh()->pin_hash);
+    }
+
+    public function test_rehash_creates_user_sync_record_for_devices(): void
+    {
+        $user = $this->makeUser('tenant-rehash-5', '4321');
+
+        $this->artisan('app:rehash-plaintext-pins')->assertSuccessful();
+
+        $fresh = $user->fresh();
+        $record = SyncRecord::where('table_name', 'users')
+            ->where('record_uuid', $user->id)
+            ->latest('id')
+            ->first();
+
+        $this->assertNotNull($record, 'Rehash must fan out a users sync record or devices strand.');
+        $this->assertSame($fresh->pin_hash, $record->payload['pin_hash']);
+        $this->assertSame('upsert', $record->operation);
+    }
+
+    public function test_dry_run_creates_no_sync_record(): void
+    {
+        $user = $this->makeUser('tenant-rehash-6', '8888');
+
+        $this->artisan('app:rehash-plaintext-pins --dry-run')->assertSuccessful();
+
+        $this->assertFalse(
+            SyncRecord::where('table_name', 'users')
+                ->where('record_uuid', $user->id)
+                ->exists()
+        );
     }
 }

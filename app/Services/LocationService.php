@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Events\StockLevelChanged;
 use App\Models\Location;
 use App\Models\Product;
 use App\Models\ProductStock;
@@ -148,6 +149,69 @@ class LocationService
     }
 
     /**
+     * Commit stock at the SOURCE of a dispatched transfer — distinct from
+     * reserveStock()/reserved_quantity (order-holds), so a transfer and a
+     * held order never fight over the same counter. Throws if insufficient
+     * available stock, same guard as reserveStock().
+     */
+    public function reserveInTransit(string $productId, string $locationId, float $qty): void
+    {
+        DB::transaction(function () use ($productId, $locationId, $qty) {
+            $this->getStock($productId, $locationId);
+
+            $row = ProductStock::where('product_id', $productId)
+                ->where('location_id', $locationId)
+                ->lockForUpdate()
+                ->first();
+
+            $available = max(0.0, (float) $row->quantity - (float) $row->reserved_quantity - (float) $row->in_transit_quantity);
+
+            if ($available < $qty) {
+                throw new \RuntimeException(
+                    "Insufficient stock to dispatch from location. Available: {$available}, requested: {$qty}."
+                );
+            }
+
+            ProductStock::where('product_id', $productId)
+                ->where('location_id', $locationId)
+                ->increment('in_transit_quantity', $qty);
+        });
+    }
+
+    /**
+     * Release a source location's in-transit commitment (transfer received or
+     * cancelled — the stock has either physically left or the dispatch never
+     * happened).
+     */
+    public function releaseInTransit(string $productId, string $locationId, float $qty): void
+    {
+        ProductStock::where('product_id', $productId)
+            ->where('location_id', $locationId)
+            ->decrement('in_transit_quantity', min($qty, $this->getStock($productId, $locationId)->in_transit_quantity));
+    }
+
+    /**
+     * Mark stock as incoming at the DESTINATION of a dispatched transfer — no
+     * availability guard (the destination isn't losing anything, only
+     * gaining visibility of what's on its way). Cleared the same way as the
+     * source side once the transfer is received or cancelled.
+     */
+    public function markIncoming(string $productId, string $locationId, float $qty): void
+    {
+        $this->getStock($productId, $locationId);
+
+        ProductStock::where('product_id', $productId)
+            ->where('location_id', $locationId)
+            ->increment('in_transit_quantity', $qty);
+    }
+
+    /** @see markIncoming() — the reverse, once the transfer resolves. */
+    public function clearIncoming(string $productId, string $locationId, float $qty): void
+    {
+        $this->releaseInTransit($productId, $locationId, $qty);
+    }
+
+    /**
      * Recompute a product's per-location stock from the movement ledger.
      * Called after syncing stock_movements to keep product_stock consistent.
      *
@@ -263,12 +327,21 @@ class LocationService
     {
         $stock = $this->getStock($productId, $locationId);
 
+        // SyncProcessor's product_stock case treats a missing key as an
+        // explicit null (`$payload['low_stock_threshold'] ?? null`), so this
+        // must always echo back the row's *current* override values — a
+        // payload that only carries quantity/reserved_quantity would silently
+        // wipe out a location's threshold/price override the next time
+        // anything (e.g. a transfer dispatch) calls this.
         $payload = [
             'business_id' => $businessId,
             'product_id' => $stock->product_id,
             'location_id' => $stock->location_id,
             'quantity' => (float) $stock->quantity,
             'reserved_quantity' => (float) $stock->reserved_quantity,
+            'in_transit_quantity' => (float) $stock->in_transit_quantity,
+            'low_stock_threshold' => $stock->low_stock_threshold !== null ? (float) $stock->low_stock_threshold : null,
+            'price_override' => $stock->price_override !== null ? (float) $stock->price_override : null,
         ];
 
         $this->processor->process('product_stock', $stock->id, 'upsert', $payload);
@@ -282,5 +355,13 @@ class LocationService
             'source_updated_at' => now(),
             'synced_at' => now(),
         ]);
+
+        // Every caller of publishStock() mutates reserved_quantity or
+        // in_transit_quantity via a query-builder increment()/decrement(),
+        // which never fires ProductStock's own Eloquent 'updated' event —
+        // so this is the one place that actually needs to broadcast those
+        // changes for Phase 9's real-time push to reach other devices
+        // instantly instead of on their next poll.
+        StockLevelChanged::dispatch($businessId, $stock->location_id, $stock->product_id);
     }
 }

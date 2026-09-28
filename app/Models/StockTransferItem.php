@@ -15,14 +15,16 @@ class StockTransferItem extends Model
     protected $fillable = [
         'id', 'stock_transfer_id', 'product_id', 'variant_id',
         'product_name', 'qty_requested', 'qty_sent', 'qty_received', 'notes',
+        // GLS·03
+        'sheet_lot_id',
     ];
 
     protected function casts(): array
     {
         return [
             'qty_requested' => 'decimal:4',
-            'qty_sent'      => 'decimal:4',
-            'qty_received'  => 'decimal:4',
+            'qty_sent' => 'decimal:4',
+            'qty_received' => 'decimal:4',
         ];
     }
 
@@ -39,5 +41,10 @@ class StockTransferItem extends Model
     public function variant(): BelongsTo
     {
         return $this->belongsTo(ProductVariant::class);
+    }
+
+    public function sheetLot(): BelongsTo
+    {
+        return $this->belongsTo(SheetLot::class);
     }
 }

@@ -4,16 +4,20 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\ActivationCode;
-use App\Models\Device;
 use App\Models\Location;
+use App\Models\RolePermission;
 use App\Models\Setting;
 use App\Models\SubscriptionHistory;
 use App\Models\Tenant;
+use App\Services\DeviceResolver;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 class SubscriptionController extends Controller
 {
+    public function __construct(private readonly DeviceResolver $deviceResolver) {}
+
     /**
      * Heartbeat — the device calls this periodically (piggybacked on sync)
      * to re-confirm its entitlement while online. The Flutter app persists
@@ -22,7 +26,7 @@ class SubscriptionController extends Controller
      */
     public function status(Request $request): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         if (! $device || $device->is_revoked) {
             return response()->json(['message' => 'Device revoked.'], 403);
@@ -70,7 +74,7 @@ class SubscriptionController extends Controller
      */
     public function updateName(Request $request): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         if (! $device || $device->is_revoked) {
             return response()->json(['message' => 'Device revoked.'], 403);
@@ -96,10 +100,27 @@ class SubscriptionController extends Controller
      * if an admin locks a location from the portal between the device
      * fetching its heartbeat and this call landing, that lock must win, not
      * a self-pick that's already stale by the time it arrives.
+     *
+     * `force: true` is the one exception: an Owner/Manager (or a Cashier
+     * explicitly granted the override permission — see
+     * permission_provider.dart's Permission.overrideLocationLock)
+     * re-pointing an already-locked device straight from the app instead of
+     * the web portal. That re-points the assignment itself, not just this
+     * session's pick, so it doesn't get flipped back on the next heartbeat.
+     *
+     * The device's bearer token has no notion of which staff member is
+     * *currently* signed in on it — cashiers switch on-device via local PIN
+     * without a fresh server login — so this can only re-check the role of
+     * whoever last authenticated this device with the server, same
+     * approximation SyncProcessor::handleUpsert() already relies on for its
+     * own manage_tills gate. That's still a real server-side floor: a bare
+     * holder of the bearer token can no longer force an override the last
+     * authenticated role was never granted, closing the gap where `force`
+     * used to be honored purely on the client's say-so.
      */
     public function reportSelfPickedLocation(Request $request): JsonResponse
     {
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         if (! $device || $device->is_revoked) {
             return response()->json(['message' => 'Device revoked.'], 403);
@@ -107,6 +128,7 @@ class SubscriptionController extends Controller
 
         $data = $request->validate([
             'location_id' => 'required|uuid|exists:locations,id',
+            'force' => 'sometimes|boolean',
         ]);
 
         $belongsToBusiness = Location::where('id', $data['location_id'])
@@ -114,11 +136,55 @@ class SubscriptionController extends Controller
             ->exists();
         abort_unless($belongsToBusiness, 403);
 
-        if ($device->location_id === null) {
+        $force = $data['force'] ?? false;
+        if ($force && ! $this->canOverrideLocationLock($request, $device->tenant_id)) {
+            Log::warning('Ignored unauthorized force:true device-location override', [
+                'device_id' => $device->id,
+                'tenant_id' => $device->tenant_id,
+                'attempted_location_id' => $data['location_id'],
+                'acting_user_id' => $request->user()?->id,
+            ]);
+            $force = false;
+        }
+
+        if ($device->location_id === null || $force) {
             $device->update(['location_id' => $data['location_id']]);
         }
 
         return response()->json(['location_id' => $device->location_id]);
+    }
+
+    /**
+     * Mirrors the till app's own (offline-editable) role_permissions table
+     * rather than the BackOffice-only backoffice_role_permissions one — see
+     * BackOfficePermission's class docblock for why those two are kept
+     * deliberately separate. Falls back to permission_provider.dart's own
+     * built-in defaults (Owner and Manager get this out of the box; every
+     * other role needs it explicitly granted) when no customization for
+     * this role has ever synced up from a device.
+     */
+    private function canOverrideLocationLock(Request $request, string $tenantId): bool
+    {
+        $user = $request->user();
+        if ($user === null) {
+            return false;
+        }
+
+        // The Dart UserRole.owner.key is 'owner', not Spatie's
+        // 'business_owner' — but the till app's own permission check
+        // (permission_provider.dart's permissionProvider) already grants
+        // Owner this unconditionally, matched here rather than looked up.
+        $role = $user->getRoleNames()->first();
+        if ($role === 'business_owner') {
+            return true;
+        }
+
+        $row = RolePermission::where('business_id', $tenantId)->where('role', $role)->first();
+        if ($row !== null) {
+            return in_array('overrideLocationLock', $row->permissions_json ?? [], true);
+        }
+
+        return $role === 'manager';
     }
 
     /**
@@ -133,7 +199,7 @@ class SubscriptionController extends Controller
             'activation_code' => 'required|string|max:16',
         ]);
 
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
 
         if (! $device || $device->is_revoked) {
             return response()->json(['message' => 'Device revoked.'], 403);
@@ -186,17 +252,5 @@ class SubscriptionController extends Controller
             'is_active' => $tenant->isSubscriptionActive(),
             'server_time' => now()->toIso8601String(),
         ]);
-    }
-
-    private function resolveDevice(Request $request): ?Device
-    {
-        $token = $request->bearerToken();
-        if (! $token) {
-            return null;
-        }
-
-        $tokenId = explode('|', $token)[0] ?? null;
-
-        return Device::where('token_id', $tokenId)->first();
     }
 }

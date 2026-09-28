@@ -79,6 +79,50 @@ class SyncConflictResolutionTest extends TestCase
         ]);
     }
 
+    public function test_push_auto_resolves_version_conflict_for_products(): void
+    {
+        $tenantId = 'tenant-sync-conflict-auto-1';
+        $token = $this->actingDeviceToken($tenantId);
+
+        SyncRecord::create([
+            'business_id' => $tenantId,
+            'table_name' => 'products',
+            'record_uuid' => '33333333-3333-4333-8333-333333333333',
+            'operation' => 'upsert',
+            'payload' => ['name' => 'Server Newer Product'],
+            'source_updated_at' => now()->addMinute(),
+            'synced_at' => now(),
+        ]);
+
+        $response = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'products',
+                    'uuid' => '33333333-3333-4333-8333-333333333333',
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'name' => 'Old Device Product',
+                        'updated_at' => now()->subMinute()->toIso8601String(),
+                    ],
+                    'updated_at' => now()->subMinute()->toIso8601String(),
+                ]],
+            ]);
+
+        $response->assertOk();
+        $response->assertJsonCount(0, 'conflicts');
+        $response->assertJsonCount(1, 'auto_resolved');
+
+        $this->assertDatabaseHas('sync_conflicts', [
+            'business_id' => $tenantId,
+            'table_name' => 'products',
+            'record_uuid' => '33333333-3333-4333-8333-333333333333',
+            'status' => 'resolved',
+            'conflict_type' => 'version_conflict',
+            'resolution_action' => 'accept_server',
+        ]);
+    }
+
     public function test_manager_can_resolve_conflict_with_retry_local_action(): void
     {
         $tenantId = 'tenant-sync-conflict-2';

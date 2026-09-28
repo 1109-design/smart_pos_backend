@@ -2,12 +2,15 @@
 
 namespace App\Models\Zimra;
 
+use App\Models\Location;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class ZimraDevice extends Model
 {
     protected $fillable = [
         'business_id',
+        'location_id',
         'tin',
         'device_id',
         'device_serial_no',
@@ -37,6 +40,12 @@ class ZimraDevice extends Model
             'fiscal_day_opened_at' => 'datetime',
             'last_sync_at' => 'datetime',
         ];
+    }
+
+    /** Null for a business-wide fallback device not tied to one branch. */
+    public function location(): BelongsTo
+    {
+        return $this->belongsTo(Location::class);
     }
 
     public function markAsActive(): void

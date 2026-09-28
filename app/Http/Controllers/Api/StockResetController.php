@@ -3,14 +3,16 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\Device;
 use App\Models\User;
+use App\Services\DeviceResolver;
 use App\Services\StockResetService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class StockResetController extends Controller
 {
+    public function __construct(private readonly DeviceResolver $deviceResolver) {}
+
     /**
      * A till's own "Reset All Stock" button calls this first, before doing
      * anything locally. It only claims the business's one-time token —
@@ -31,7 +33,7 @@ class StockResetController extends Controller
             'user_id' => ['required', 'string'],
         ]);
 
-        $device = $this->resolveDevice($request);
+        $device = $this->deviceResolver->fromRequest($request);
         if (! $device) {
             return response()->json(['message' => 'Device is not paired to a business.'], 403);
         }
@@ -62,17 +64,5 @@ class StockResetController extends Controller
             'claimed' => true,
             'at' => $claim['at']?->toIso8601String(),
         ]);
-    }
-
-    private function resolveDevice(Request $request): ?Device
-    {
-        $token = $request->bearerToken();
-        if (! $token) {
-            return null;
-        }
-
-        $tokenId = explode('|', $token)[0] ?? null;
-
-        return Device::where('token_id', $tokenId)->first();
     }
 }

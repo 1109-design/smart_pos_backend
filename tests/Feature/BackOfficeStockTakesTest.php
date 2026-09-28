@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Http\Middleware\AuthenticateBackOfficeUser;
+use App\Models\Business;
 use App\Models\Location;
 use App\Models\Product;
 use App\Models\ProductStock;
@@ -181,6 +182,63 @@ class BackOfficeStockTakesTest extends TestCase
 
         $this->get('/office/stocktakes')->assertForbidden();
         $this->post("/office/stocktakes/{$take->id}/approve")->assertForbidden();
+    }
+
+    public function test_approval_is_blocked_while_a_flagged_item_still_needs_a_recount(): void
+    {
+        $tenantId = 'tenant-stocktake-recount-1';
+        $this->actingBackOfficeSession($tenantId);
+
+        Business::create([
+            'id' => $tenantId, 'name' => $tenantId, 'currency_code' => 'USD',
+            'workflow_settings' => ['stock_take_variance_threshold_percent' => 10],
+        ]);
+
+        $location = Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Shop', 'type' => 'shop', 'is_active' => true]);
+        $product = Product::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Suspicious Widget',
+            'item_type' => 'product', 'price' => 5, 'track_stock' => true, 'stock_quantity' => 100,
+        ]);
+        $this->seedLocationStock($tenantId, $product->id, $location->id, 100);
+
+        $take = StockTake::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'location_id' => $location->id,
+            'title' => 'Big variance count', 'status' => 'pending_approval', 'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        // Pushed exactly the way the till/BackOffice sync path would —
+        // through SyncProcessor, so the threshold gate actually evaluates.
+        $itemId = (string) Str::uuid();
+        app(SyncProcessor::class)->process('stock_take_items', $itemId, 'upsert', [
+            'business_id' => $tenantId,
+            'stock_take_id' => $take->id,
+            'product_id' => $product->id,
+            'product_name' => $product->name,
+            'system_qty' => 100,
+            'counted_qty' => 50, // 50% variance, well above the 10% threshold
+        ]);
+
+        $item = StockTakeItem::find($itemId);
+        $this->assertTrue($item->flagged_for_recount);
+        $this->assertNull($item->recount_completed_at);
+
+        $response = $this->post("/office/stocktakes/{$take->id}/approve");
+        $response->assertSessionHasErrors('stock_take');
+        $this->assertSame('pending_approval', $take->fresh()->status);
+
+        // The recount lands with a different value — satisfies the gate.
+        app(SyncProcessor::class)->process('stock_take_items', $itemId, 'upsert', [
+            'business_id' => $tenantId,
+            'stock_take_id' => $take->id,
+            'product_id' => $product->id,
+            'product_name' => $product->name,
+            'system_qty' => 100,
+            'counted_qty' => 52,
+        ]);
+        $this->assertNotNull(StockTakeItem::find($itemId)->recount_completed_at);
+
+        $this->post("/office/stocktakes/{$take->id}/approve")->assertRedirect();
+        $this->assertSame('approved', $take->fresh()->status);
     }
 
     public function test_stock_takes_are_scoped_to_the_current_tenant(): void

@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
 use App\Models\Category;
 use App\Models\Device;
 use App\Models\Location;
@@ -12,8 +11,10 @@ use App\Models\ProductStock;
 use App\Models\StockMovement;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
+use App\Services\BackOfficeAuthorizer;
 use App\Services\LocationService;
 use App\Services\SyncProcessor;
+use App\Support\BackOfficePermission;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
@@ -26,11 +27,11 @@ use Inertia\Inertia;
 use Inertia\Response;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
-class ProductsController extends Controller
+class ProductsController extends BackOfficeController
 {
     /** Column order for the downloadable import template, before the stock column(s) — see template(). */
     private const IMPORT_BASE_COLUMNS = [
-        'name', 'item_type', 'price', 'cost_price', 'sku', 'barcode', 'category', 'unit', 'track_stock',
+        'name', 'item_type', 'price', 'cost_price', 'sku', 'barcode', 'category', 'unit', 'track_stock', 'taxable',
     ];
 
     private const IMPORT_ROW_LIMIT = 2000;
@@ -64,7 +65,7 @@ class ProductsController extends Controller
             ->orderBy('name')
             ->select([
                 'id', 'name', 'item_type', 'sku', 'barcode', 'price', 'cost_price',
-                'min_price', 'discount_percent', 'deposit_amount', 'expiry_date',
+                'min_price', 'discount_percent', 'deposit_amount', 'sheet_width', 'sheet_height', 'expiry_date',
                 'unit', 'track_stock', 'stock_quantity', 'low_stock_threshold',
                 'category_id', 'is_active', 'merged_into_product_id',
             ])
@@ -226,8 +227,8 @@ class ProductsController extends Controller
 
         $rows = [
             $columns,
-            array_merge(['Coca Cola 500ml', 'product', '1.50', '0.90', 'COKE500', '6001234567890', 'Beverages', 'piece', 'yes'], $productStockExample, ['10']),
-            array_merge(['Phone Screen Repair', 'service', '25.00', '', '', '', 'Repairs', '', 'no'], $serviceStockExample, ['']),
+            array_merge(['Coca Cola 500ml', 'product', '1.50', '0.90', 'COKE500', '6001234567890', 'Beverages', 'piece', 'yes', 'yes'], $productStockExample, ['10']),
+            array_merge(['Phone Screen Repair', 'service', '25.00', '', '', '', 'Repairs', '', 'no', 'yes'], $serviceStockExample, ['']),
         ];
 
         return response()->streamDownload(function () use ($rows) {
@@ -263,7 +264,7 @@ class ProductsController extends Controller
             ->where('is_active', true)
             ->whereIn('item_type', ['product', 'service'])
             ->orderBy('name')
-            ->get(['id', 'name', 'item_type', 'price', 'cost_price', 'sku', 'barcode', 'category_id', 'unit', 'track_stock', 'stock_quantity', 'low_stock_threshold']);
+            ->get(['id', 'name', 'item_type', 'price', 'cost_price', 'sku', 'barcode', 'category_id', 'unit', 'track_stock', 'is_taxable', 'stock_quantity', 'low_stock_threshold']);
 
         $categoryNamesById = Category::where('business_id', $tenantId)->pluck('name', 'id');
 
@@ -288,6 +289,7 @@ class ProductsController extends Controller
                     $product->category_id ? ($categoryNamesById->get($product->category_id) ?? '') : '',
                     $isService ? '' : $product->unit,
                     $isService ? '' : ($product->track_stock ? 'yes' : 'no'),
+                    $product->is_taxable ? 'yes' : 'no',
                 ];
 
                 if ($multiLocation) {
@@ -405,6 +407,7 @@ class ProductsController extends Controller
                 'sku' => ['nullable', 'string', 'max:100'],
                 'barcode' => ['nullable', 'string', 'max:100'],
                 'unit' => ['nullable', 'string', 'max:30'],
+                'taxable' => ['nullable', 'string'],
                 'stock_quantity' => ['nullable', 'numeric', 'min:0'],
                 'low_stock_threshold' => ['nullable', 'numeric', 'min:0'],
             ];
@@ -449,6 +452,7 @@ class ProductsController extends Controller
                 'cost_price' => $valid['cost_price'] ?? 0,
                 'unit' => $isService ? 'service' : (($data['unit'] ?? '') !== '' ? $data['unit'] : 'piece'),
                 'track_stock' => $isService ? false : $this->parseBoolean($data['track_stock'] ?? '', true),
+                'is_taxable' => $this->parseBoolean($data['taxable'] ?? '', true),
                 'low_stock_threshold' => $valid['low_stock_threshold'] ?? 5,
             ];
 
@@ -757,9 +761,13 @@ class ProductsController extends Controller
      * touches history. Owner-only given the blast radius (every till loses
      * every product from its sell screen at once).
      */
-    public function archiveAll(SyncProcessor $processor): RedirectResponse
+    public function archiveAll(SyncProcessor $processor, BackOfficeAuthorizer $authorizer): RedirectResponse
     {
-        abort_unless(session('backoffice.role') === 'business_owner', 403, 'Only the business owner can archive all items.');
+        abort_unless(
+            $authorizer->can($this->tenantId(), session('backoffice.role'), BackOfficePermission::ARCHIVE_ALL_PRODUCTS),
+            403,
+            'Only the business owner can archive all items.'
+        );
 
         $tenantId = $this->tenantId();
         $archived = 0;
@@ -809,6 +817,7 @@ class ProductsController extends Controller
             'image_path' => $product->image_path,
             'expiry_date' => $product->expiry_date?->toIso8601String(),
             'is_active' => $isActive,
+            'is_taxable' => (bool) $product->is_taxable,
         ];
 
         $processor->process('products', $product->id, 'upsert', $payload);
@@ -1062,6 +1071,7 @@ class ProductsController extends Controller
             'image_path' => $product->image_path,
             'expiry_date' => $product->expiry_date?->toIso8601String(),
             'is_active' => (bool) $product->is_active,
+            'is_taxable' => (bool) $product->is_taxable,
         ];
         $this->applyThroughSyncPipeline($processor, $product->id, $payload);
 
@@ -1092,6 +1102,53 @@ class ProductsController extends Controller
     }
 
     /**
+     * Set (or clear) this location's override for low-stock threshold and/or
+     * selling price. Null clears the override and falls back to the
+     * product's business-wide default — see ProductStock::resolvedPrice()/
+     * resolvedLowStockThreshold(). Unlike setOpeningBalance() this writes
+     * product_stock directly rather than posting a stock_movements delta:
+     * these two fields aren't ledger-derived quantities.
+     */
+    public function setLocationOverrides(Request $request, string $product, SyncProcessor $processor): RedirectResponse
+    {
+        $tenantId = $this->tenantId();
+
+        $data = $request->validate([
+            'location_id' => ['required', 'string', Rule::exists('locations', 'id')->where('business_id', $tenantId)],
+            'low_stock_threshold' => ['nullable', 'numeric', 'min:0'],
+            'price_override' => ['nullable', 'numeric', 'min:0'],
+        ]);
+
+        $existing = Product::where('business_id', $tenantId)->findOrFail($product);
+
+        $stock = ProductStock::firstOrNew([
+            'product_id' => $existing->id,
+            'location_id' => $data['location_id'],
+        ]);
+
+        $uuid = $stock->id ?? (string) Str::uuid();
+        $payload = [
+            'business_id' => $tenantId,
+            'product_id' => $existing->id,
+            'location_id' => $data['location_id'],
+            // Preserve every field this endpoint doesn't touch — SyncProcessor's
+            // product_stock case treats a missing key as an explicit reset
+            // (see LocationService::publishStock for the same footgun), so a
+            // partial payload here would silently wipe quantity/reservations.
+            'quantity' => (float) ($stock->quantity ?? 0),
+            'reserved_quantity' => (float) ($stock->reserved_quantity ?? 0),
+            'in_transit_quantity' => (float) ($stock->in_transit_quantity ?? 0),
+            'low_stock_threshold' => $data['low_stock_threshold'] ?? null,
+            'price_override' => $data['price_override'] ?? null,
+        ];
+
+        $processor->process('product_stock', $uuid, 'upsert', $payload);
+        $this->publishSyncRecord($uuid, $payload, table: 'product_stock');
+
+        return back()->with('success', 'Location overrides updated. Devices will receive it on their next sync.');
+    }
+
+    /**
      * Post a stock_movements entry for the *delta* between a location's live
      * ledger total and the desired figure — the single reconciliation
      * primitive behind setOpeningBalance() and the per-location breakdown on
@@ -1117,6 +1174,7 @@ class ProductsController extends Controller
             'product_id' => $product->id,
             'type' => 'opening_stock',
             'quantity_change' => $variance,
+            'unit_cost' => $product->cost_price,
             'reason' => 'Opening balance set via BackOffice',
             'user_id' => $this->userId(),
         ];
@@ -1132,8 +1190,14 @@ class ProductsController extends Controller
     {
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'item_type' => ['required', 'in:product,service,container'],
+            'item_type' => ['required', 'in:product,service,container,sheet'],
             'price' => ['required_unless:item_type,container', 'nullable', 'numeric', 'min:0'],
+            // GLS·01 — the default whole-sheet size; required only for
+            // item_type=sheet, used when receiving stock (see
+            // CostService.receiveStock() on the till, the only place that
+            // actually creates sheet_lots rows).
+            'sheet_width' => ['required_if:item_type,sheet', 'nullable', 'numeric', 'min:0.0001'],
+            'sheet_height' => ['required_if:item_type,sheet', 'nullable', 'numeric', 'min:0.0001'],
             'cost_price' => ['nullable', 'numeric', 'min:0'],
             'min_price' => ['nullable', 'numeric', 'min:0'],
             'discount_percent' => ['nullable', 'numeric', 'min:0', 'max:100'],
@@ -1148,6 +1212,7 @@ class ProductsController extends Controller
             'expiry_date' => ['nullable', 'date'],
             'location_id' => ['nullable', 'string', Rule::exists('locations', 'id')->where('business_id', $this->tenantId())],
             'is_active' => ['boolean'],
+            'is_taxable' => ['boolean'],
             // Returnable packaging: containers (by id) this product carries
             // when sold, and how many of each per unit. Only meaningful for
             // item_type=product — see applyContainerLinks().
@@ -1176,6 +1241,7 @@ class ProductsController extends Controller
 
         $isService = $validated['item_type'] === 'service';
         $isContainer = $validated['item_type'] === 'container';
+        $isSheet = $validated['item_type'] === 'sheet';
 
         // The current BackOffice form always sends these four, but they're
         // easy to leave out of a future minimal integration (as the old CSV
@@ -1195,6 +1261,13 @@ class ProductsController extends Controller
         $expiryDate = $request->has('expiry_date')
             ? ($validated['expiry_date'] ?? null)
             : $existing?->expiry_date?->toIso8601String();
+        // Not every product is taxable — the current form has no toggle for
+        // it (set via the CSV import's "taxable" column instead), so an
+        // update must carry the existing value forward rather than silently
+        // resetting a tax-exempt item back to taxable on every save.
+        $isTaxable = $request->has('is_taxable')
+            ? ($validated['is_taxable'] ?? true)
+            : ($existing?->is_taxable ?? true);
 
         return [
             'category_id' => $validated['category_id'] ?? null,
@@ -1210,15 +1283,22 @@ class ProductsController extends Controller
             'discount_percent' => $isContainer ? null : $discountPercent,
             'cost_price' => $validated['cost_price'] ?? 0,
             'deposit_amount' => $isContainer ? ($depositAmount ?? 0) : null,
-            'unit' => $isService ? 'service' : ($validated['unit'] ?? 'piece'),
+            'unit' => $isService ? 'service' : ($isSheet ? 'm²' : ($validated['unit'] ?? 'piece')),
+            'sheet_width' => $isSheet ? $validated['sheet_width'] : null,
+            'sheet_height' => $isSheet ? $validated['sheet_height'] : null,
             'track_stock' => $isService ? false : ($validated['track_stock'] ?? true),
-            'stock_quantity' => $isService ? 0 : ($validated['stock_quantity'] ?? 0),
+            // A sheet product's stock is entirely lot-driven (see
+            // sheet_lots) — opening stock here would create a flat number
+            // with no lot behind it, so it's always received properly
+            // instead, never set at creation time.
+            'stock_quantity' => ($isService || $isSheet) ? 0 : ($validated['stock_quantity'] ?? 0),
             'low_stock_threshold' => $validated['low_stock_threshold'] ?? 5,
             'expiry_date' => $isService ? null : $expiryDate,
             // Only meaningful on create — see store(); update() leaves stock
             // untouched and never sends this field.
             'location_id' => $isService ? null : ($validated['location_id'] ?? null),
             'is_active' => $validated['is_active'] ?? true,
+            'is_taxable' => $isTaxable,
             // Stripped off in store()/update() before the product payload is
             // built — not a Product column, handled by applyContainerLinks().
             'container_links' => $isContainer ? [] : ($validated['container_links'] ?? []),
@@ -1295,15 +1375,5 @@ class ProductsController extends Controller
             'source_updated_at' => now(),
             'synced_at' => now(),
         ]);
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
-    }
-
-    private function userId(): ?string
-    {
-        return session('backoffice')['user_id'] ?? null;
     }
 }

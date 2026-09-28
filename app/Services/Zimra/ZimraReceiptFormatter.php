@@ -303,13 +303,39 @@ class ZimraReceiptFormatter
 
     private static function getMoneyTypeCode(string $paymentMethod): string
     {
-        return match (strtolower($paymentMethod)) {
+        $method = strtolower(trim($paymentMethod));
+
+        // Exact matches first — every literal value this originally handled,
+        // preserved verbatim so no existing classification changes.
+        $exact = match ($method) {
             'cash' => 'Cash',
             'card', 'credit card', 'debit card' => 'Card',
             'ecocash', 'mobile_money', 'mobile money', 'mobile', 'mobile wallet' => 'MobileWallet',
             'bank_transfer', 'bank transfer', 'bank' => 'BankTransfer',
             'coupon', 'voucher' => 'Coupon',
             'credit', 'layby' => 'Credit',
+            default => null,
+        };
+        if ($exact !== null) {
+            return $exact;
+        }
+
+        // Fall back to substring matching for compound method strings the
+        // app writes with an extra tender detail baked in — e.g. "POS Swipe
+        // USD - ZB Bank" (a Card leg naming its settlement bank account) or
+        // "Mobile Money - EcoCash" (a provider-qualified label) — mirroring
+        // the same substring style every GL posting-account resolver already
+        // uses (SalePostingService::resolvePaymentAccount and its Dart/PHP
+        // twins). Without this, a swipe/bank-qualified method string fell
+        // through to the exact match's `default => 'Other'` and reported the
+        // wrong fiscal money type to ZIMRA.
+        return match (true) {
+            str_contains($method, 'card'), str_contains($method, 'swipe') => 'Card',
+            str_contains($method, 'mobile'), str_contains($method, 'ecocash') => 'MobileWallet',
+            str_contains($method, 'bank_transfer'), str_contains($method, 'bank transfer') => 'BankTransfer',
+            str_contains($method, 'cash') => 'Cash',
+            str_contains($method, 'coupon'), str_contains($method, 'voucher') => 'Coupon',
+            str_contains($method, 'credit'), str_contains($method, 'layby') => 'Credit',
             default => 'Other',
         };
     }

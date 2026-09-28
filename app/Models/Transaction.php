@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Events\TransactionRecorded;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -11,12 +12,31 @@ class Transaction extends Model
     use HasUuids;
 
     protected $fillable = [
-        'id', 'business_id', 'location_id', 'user_id', 'customer_id',
+        'id', 'business_id', 'location_id', 'user_id', 'customer_id', 'client_name',
         'subtotal', 'tax_total', 'discount_total', 'deposit_total',
         'surcharge_total', 'total',
-        'base_currency', 'status', 'sale_number', 'notes',
+        'base_currency', 'status', 'sale_number', 'notes', 'void_reason',
         'fiscal_status', 'fiscal_receipt_number', 'fiscal_qr_code',
     ];
+
+    protected static function booted(): void
+    {
+        static::created(function (Transaction $transaction): void {
+            if (! $transaction->business_id) {
+                return;
+            }
+
+            TransactionRecorded::dispatch($transaction->business_id, $transaction->location_id, $transaction->id);
+        });
+
+        static::updated(function (Transaction $transaction): void {
+            if (! $transaction->wasChanged('status') || ! $transaction->business_id) {
+                return;
+            }
+
+            TransactionRecorded::dispatch($transaction->business_id, $transaction->location_id, $transaction->id);
+        });
+    }
 
     protected function casts(): array
     {

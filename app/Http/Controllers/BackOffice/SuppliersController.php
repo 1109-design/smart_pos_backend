@@ -2,18 +2,24 @@
 
 namespace App\Http\Controllers\BackOffice;
 
-use App\Http\Controllers\Controller;
+use App\Models\Accounting\JournalHeader;
+use App\Models\Business;
 use App\Models\Supplier;
 use App\Models\SyncRecord;
+use App\Services\Accounting\PartyLedgerService;
+use App\Services\BackOfficeAuthorizer;
 use App\Services\SyncProcessor;
+use App\Support\BackOfficePermission;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Inertia\Inertia;
 use Inertia\Response;
 
-class SuppliersController extends Controller
+class SuppliersController extends BackOfficeController
 {
+    public function __construct(private readonly BackOfficeAuthorizer $authorizer) {}
+
     public function index(Request $request): Response
     {
         $this->authorizeManager();
@@ -32,6 +38,31 @@ class SuppliersController extends Controller
         return Inertia::render('BackOffice/Suppliers', [
             'suppliers' => $suppliers,
             'filters' => ['search' => $search->toString()],
+        ]);
+    }
+
+    public function show(string $supplier, PartyLedgerService $ledger): Response
+    {
+        $this->authorizeManager();
+
+        $tenantId = $this->tenantId();
+        $record = Supplier::where('business_id', $tenantId)->findOrFail($supplier);
+        $business = Business::find($tenantId);
+
+        return Inertia::render('BackOffice/SupplierShow', [
+            'supplier' => $record,
+            // Creditor ledger (Phase 11c) — derived from the general
+            // ledger, so it can never drift from the Accounts Payable
+            // control account. Empty/zero until purchasing/GRV posting
+            // (Phase 11d) exists to actually create supplier liabilities.
+            'statement' => $ledger->statement($tenantId, 'supplier', $record->id),
+            'aging' => $ledger->agingBuckets($tenantId, 'supplier', $record->id),
+            'accountingIsLive' => (bool) $business?->accountingIsLive(),
+            'hasOpeningBalance' => JournalHeader::where('business_id', $tenantId)
+                ->where('source_type', 'opening_balance_supplier')
+                ->where('source_id', $record->id)
+                ->where('status', '!=', 'reversed')
+                ->exists(),
         ]);
     }
 
@@ -121,15 +152,10 @@ class SuppliersController extends Controller
 
     private function authorizeManager(): void
     {
-        abort_if(
-            ! in_array(session('backoffice.role'), ['business_owner', 'manager']),
+        abort_unless(
+            $this->authorizer->can($this->tenantId(), session('backoffice.role'), BackOfficePermission::MANAGE_SUPPLIERS),
             403,
             'Access denied.'
         );
-    }
-
-    private function tenantId(): ?string
-    {
-        return session('backoffice')['tenant_id'] ?? null;
     }
 }

@@ -1,12 +1,16 @@
 <?php
 
 use App\Http\Controllers\Api\BackOfficeAccessController;
+use App\Http\Controllers\Api\BusinessBrandingController;
 use App\Http\Controllers\Api\DeviceAuthController;
+use App\Http\Controllers\Api\LocalSyncConflictController;
 use App\Http\Controllers\Api\LocationController;
 use App\Http\Controllers\Api\StockResetController;
 use App\Http\Controllers\Api\StockTransferController;
 use App\Http\Controllers\Api\SubscriptionController;
 use App\Http\Controllers\Api\SyncController;
+use App\Http\Controllers\Api\SyncHealthController;
+use App\Http\Controllers\Api\TillController;
 use App\Http\Controllers\Api\WebhookController;
 use Illuminate\Support\Facades\Route;
 
@@ -25,10 +29,15 @@ Route::prefix('v1')->middleware(['throttle:device-auth'])->group(function () {
 // Sync endpoints — business resolved from authenticated device token
 Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::post('sync/push', [SyncController::class, 'push']);
+    Route::post('sync/fiscalise/{transactionId}', [SyncController::class, 'fiscalise']);
     Route::get('sync/pull', [SyncController::class, 'pull']);
     Route::get('sync/status', [SyncController::class, 'status']);
     Route::get('sync/conflicts', [SyncController::class, 'conflicts']);
     Route::post('sync/conflicts/{id}/resolve', [SyncController::class, 'resolveConflict']);
+    Route::get('sync/oversells', [SyncController::class, 'oversells']);
+    Route::get('sync/health', [SyncHealthController::class, 'index']);
+    Route::post('sync/local-conflicts', [LocalSyncConflictController::class, 'store']);
+    Route::get('sync/local-conflicts', [LocalSyncConflictController::class, 'index']);
 
     // Back Office access — portal details + owner/manager password set/reset
     Route::get('backoffice/info', [BackOfficeAccessController::class, 'info']);
@@ -42,6 +51,13 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     // confirm which till they're on)
     Route::put('device/name', [SubscriptionController::class, 'updateName']);
 
+    // Business branding — a device uploads its locally-picked logo so it
+    // fans out to every other device and the BackOffice web app
+    Route::post('business/logo', [BusinessBrandingController::class, 'uploadLogo']);
+    Route::post('business/letterhead', [BusinessBrandingController::class, 'uploadLetterhead']);
+    Route::post('business/footer-image', [BusinessBrandingController::class, 'uploadFooterImage']);
+    Route::put('business/footer-text', [BusinessBrandingController::class, 'updateFooterText']);
+
     // Reports back a location a cashier picked on-device (the fallback
     // prompt shown when no admin assignment exists) so the web portal's
     // Devices page reflects it too, instead of staying silently unaudited.
@@ -52,17 +68,23 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::post('locations', [LocationController::class, 'store']);
     Route::get('locations/{id}', [LocationController::class, 'show']);
     Route::patch('locations/{id}', [LocationController::class, 'update']);
-    Route::get('locations/{id}/stock', [LocationController::class, 'stock']);
-    Route::get('products/{productId}/stock-by-location', [LocationController::class, 'productStock']);
+    Route::get('locations/{id}/tills', [TillController::class, 'index']);
 
-    // Stock transfers
-    Route::get('transfers', [StockTransferController::class, 'index']);
-    Route::post('transfers', [StockTransferController::class, 'store']);
-    Route::get('transfers/{id}', [StockTransferController::class, 'show']);
-    Route::post('transfers/{id}/approve', [StockTransferController::class, 'approve']);
-    Route::post('transfers/{id}/dispatch', [StockTransferController::class, 'dispatch']);
-    Route::post('transfers/{id}/receive', [StockTransferController::class, 'receive']);
-    Route::post('transfers/{id}/cancel', [StockTransferController::class, 'cancel']);
+    // DEPRECATED / DECOMMISSIONED: Category C Procedural Operational Endpoints
+    // Under the Flutter-First architecture, Flutter is the operational application.
+    // Stock levels, stock transfers, approvals, dispatches, and receipts are performed
+    // locally on the device (Drift DB) and synchronized via /api/v1/sync/push and /api/v1/sync/pull.
+    // Direct procedural command APIs on Laravel violate this architectural contract.
+    //
+    // Route::get('locations/{id}/stock', [LocationController::class, 'stock']);
+    // Route::get('products/{productId}/stock-by-location', [LocationController::class, 'productStock']);
+    // Route::get('transfers', [StockTransferController::class, 'index']);
+    // Route::post('transfers', [StockTransferController::class, 'store']);
+    // Route::get('transfers/{id}', [StockTransferController::class, 'show']);
+    // Route::post('transfers/{id}/approve', [StockTransferController::class, 'approve']);
+    // Route::post('transfers/{id}/dispatch', [StockTransferController::class, 'dispatch']);
+    // Route::post('transfers/{id}/receive', [StockTransferController::class, 'receive']);
+    // Route::post('transfers/{id}/cancel', [StockTransferController::class, 'cancel']);
 
     // Owner-only, one-time: claims the business's single "reset all stock"
     // token (see StockResetService). The till itself does the zeroing and

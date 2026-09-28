@@ -2,6 +2,8 @@
 
 namespace Tests\Feature;
 
+use App\Models\Accounting\GlAccount;
+use App\Models\ApprovalRuleSet;
 use App\Models\User;
 use App\Services\BusinessProvisioner;
 use Database\Seeders\RolesAndPermissionsSeeder;
@@ -47,7 +49,10 @@ class BusinessProvisionerTest extends TestCase
         ]);
         $this->assertNotEmpty($tenant->pairing_code);
         $this->assertDatabaseHas('domains', ['tenant_id' => $tenant->id]);
-
+        $this->assertDatabaseHas('businesses', [
+            'id' => $tenant->id,
+            'name' => 'Acme Retail',
+        ]);
         $tenant->run(function () use ($tenant) {
             $owner = User::first();
 
@@ -57,6 +62,33 @@ class BusinessProvisionerTest extends TestCase
             $this->assertTrue($owner->hasRole('business_owner'));
             $this->assertTrue(Hash::check('4321', $owner->pin_hash));
         });
+    }
+
+    public function test_provision_seeds_a_chart_of_accounts_for_the_new_business(): void
+    {
+        $tenant = $this->provision();
+
+        $this->assertGreaterThan(0, GlAccount::where('business_id', $tenant->id)->count());
+        $this->assertDatabaseHas('gl_accounts', ['business_id' => $tenant->id, 'code' => '1000', 'name' => 'Cash']);
+    }
+
+    /**
+     * Central Approval Stage Engine: provisioning briefly auto-seeded
+     * DefaultApprovalRulesSeeder's role-based rules (see git history for
+     * that short-lived fix), but the stage engine's whole premise is that a
+     * process with zero configured stages is ungated — no PIN prompt, no
+     * gate — until an owner explicitly opts in via the till's approval-
+     * config screen and assigns named approver groups. Auto-seeding here
+     * would silently gate every new business on processes nobody
+     * configured, so provisioning intentionally leaves this empty now.
+     * DefaultApprovalRulesSeeder itself still exists for manual/test use —
+     * see ApprovalRuleBasedAuthorityTest, which seeds it explicitly.
+     */
+    public function test_provision_does_not_auto_seed_any_approval_rules(): void
+    {
+        $tenant = $this->provision();
+
+        $this->assertSame(0, ApprovalRuleSet::where('business_id', $tenant->id)->count());
     }
 
     public function test_duplicate_business_names_receive_unique_domains(): void

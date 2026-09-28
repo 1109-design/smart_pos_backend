@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\Business;
 use App\Models\StockTransfer;
 use App\Models\StockTransferItem;
 use App\Models\SyncRecord;
@@ -94,6 +95,14 @@ class TransferService
                 throw new \RuntimeException("Transfer {$transfer->transfer_number} cannot be dispatched in its current status.");
             }
 
+            // Opt-in gate: a business that has never configured this (or has
+            // explicitly turned it off) keeps today's behavior — pending
+            // dispatches straight through, no approval step required.
+            $business = Business::find($transfer->business_id);
+            if ($business?->workflowRequiresApproval('stock_transfer_requires_approval') && $transfer->status === 'pending') {
+                throw new \RuntimeException("Transfer {$transfer->transfer_number} must be approved before it can be dispatched.");
+            }
+
             $qtySentMap = collect($itemQtys)->keyBy('item_id');
 
             foreach ($transfer->items as $item) {
@@ -103,12 +112,17 @@ class TransferService
                     continue;
                 }
 
-                // Reserve the stock being sent at the source location. Reservations
-                // aren't ledger events (nothing has physically moved yet), so this
-                // touches product_stock.reserved_quantity directly and is broadcast
+                // Commit the stock being sent at the source (in_transit_quantity,
+                // not reserved_quantity — that field is order-holds only) and
+                // give the destination visibility of what's on its way before it
+                // physically arrives. Neither is a ledger event yet (nothing has
+                // moved), so both touch product_stock directly and are broadcast
                 // by hand rather than via a stock_movement recompute.
-                $this->stock->reserveStock($item->product_id, $transfer->from_location_id, $qtySent);
+                $this->stock->reserveInTransit($item->product_id, $transfer->from_location_id, $qtySent);
                 $this->stock->publishStock($item->product_id, $transfer->from_location_id, $transfer->business_id);
+
+                $this->stock->markIncoming($item->product_id, $transfer->to_location_id, $qtySent);
+                $this->stock->publishStock($item->product_id, $transfer->to_location_id, $transfer->business_id);
 
                 $this->syncUpsert('stock_transfer_items', $item->id, $this->itemPayload($item, $transfer->business_id, [
                     'qty_sent' => $qtySent,
@@ -156,9 +170,12 @@ class TransferService
                     continue;
                 }
 
-                // Release the full reservation and remove the full dispatched qty from
-                // source — it physically left the premises regardless of how much arrived.
-                $this->stock->releaseReservation($item->product_id, $transfer->from_location_id, $qtySent);
+                // Release the source's in-transit commitment and the destination's
+                // incoming marker — the stock has now either physically arrived
+                // (full or partial) or been lost in transit; either way it's no
+                // longer "in transit" on either side.
+                $this->stock->releaseInTransit($item->product_id, $transfer->from_location_id, $qtySent);
+                $this->stock->clearIncoming($item->product_id, $transfer->to_location_id, $qtySent);
 
                 $this->recordMovement($transfer, $item->product_id, 'transfer_out', $transfer->from_location_id, -$qtySent, $receivedByUserId, "Transfer {$transfer->transfer_number}", $transfer->to_location_id);
 
@@ -170,9 +187,10 @@ class TransferService
                     $this->recordMovement($transfer, $item->product_id, 'transfer_loss', $transfer->to_location_id, 0, $receivedByUserId, "Transfer {$transfer->transfer_number}: {$shortfall} short on receipt");
                 }
 
-                // reserved_quantity at source just changed but isn't part of the
-                // ledger recompute above — broadcast it explicitly.
+                // in_transit_quantity at both ends just changed but isn't part of
+                // the ledger recompute above — broadcast both explicitly.
                 $this->stock->publishStock($item->product_id, $transfer->from_location_id, $transfer->business_id);
+                $this->stock->publishStock($item->product_id, $transfer->to_location_id, $transfer->business_id);
 
                 $this->syncUpsert('stock_transfer_items', $item->id, $this->itemPayload($item, $transfer->business_id, [
                     'qty_received' => $qtyReceived,
@@ -190,7 +208,10 @@ class TransferService
 
     /**
      * Cancel a transfer (pending or approved only — cannot cancel in_transit).
-     * Releases any reservations that may have been set.
+     * Releases any in-transit commitment that may have been set (defensive:
+     * qty_sent is only ever set by dispatch(), which moves status to
+     * in_transit and is therefore excluded by the guard above — but release
+     * the correct field regardless of how that invariant might change).
      */
     public function cancel(string $transferId): StockTransfer
     {
@@ -203,8 +224,10 @@ class TransferService
 
             foreach ($transfer->items as $item) {
                 if ((float) $item->qty_sent > 0) {
-                    $this->stock->releaseReservation($item->product_id, $transfer->from_location_id, (float) $item->qty_sent);
+                    $this->stock->releaseInTransit($item->product_id, $transfer->from_location_id, (float) $item->qty_sent);
+                    $this->stock->clearIncoming($item->product_id, $transfer->to_location_id, (float) $item->qty_sent);
                     $this->stock->publishStock($item->product_id, $transfer->from_location_id, $transfer->business_id);
+                    $this->stock->publishStock($item->product_id, $transfer->to_location_id, $transfer->business_id);
                 }
             }
 

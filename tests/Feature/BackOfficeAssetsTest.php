@@ -3,160 +3,150 @@
 namespace Tests\Feature;
 
 use App\Http\Middleware\AuthenticateBackOfficeUser;
+use App\Models\Accounting\GlAccount;
 use App\Models\Asset;
+use App\Models\Business;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Services\Accounting\ChartOfAccountsSeeder;
+use App\Services\Accounting\JournalService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
+/**
+ * Phase 9 / Phase 11d — the BackOffice side of the asset register: creating
+ * an asset (which posts its acquisition), disposing of one, and the
+ * owner-only permission gate on both.
+ */
 class BackOfficeAssetsTest extends TestCase
 {
     use RefreshDatabase;
 
-    private function actingBackOfficeSession(string $tenantId, string $role = 'business_owner'): User
+    private string $tenantId = 'tenant-assets-1';
+
+    private function actingBackOfficeSession(string $role = 'business_owner'): User
     {
         $this->withoutMiddleware(AuthenticateBackOfficeUser::class);
 
-        Tenant::firstOrCreate(['id' => $tenantId], ['business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com', 'pairing_code' => substr(md5($tenantId), 0, 6)]);
+        Tenant::firstOrCreate(['id' => $this->tenantId], ['business_name' => $this->tenantId, 'owner_email' => $this->tenantId.'@example.com', 'pairing_code' => substr(md5($this->tenantId), 0, 6)]);
+        Business::firstOrCreate(['id' => $this->tenantId], ['name' => $this->tenantId, 'currency_code' => 'USD', 'accounting_go_live_date' => '2026-01-01']);
+        (new ChartOfAccountsSeeder)->seedForBusiness($this->tenantId);
 
         $user = User::factory()->create([
-            'id' => (string) Str::uuid(),
-            'business_id' => $tenantId,
-            'email' => $tenantId.'-user@example.com',
-            'is_active' => true,
+            'id' => (string) Str::uuid(), 'business_id' => $this->tenantId,
+            'email' => $this->tenantId.'-user@example.com', 'is_active' => true,
         ]);
 
-        session([
-            'backoffice' => [
-                'tenant_id' => $tenantId,
-                'user_id' => $user->id,
-                'user_name' => $user->name,
-                'user_email' => $user->email,
-                'role' => $role,
-                'business_name' => $tenantId,
-                'currency_code' => 'USD',
-            ],
-        ]);
+        session(['backoffice' => [
+            'tenant_id' => $this->tenantId, 'user_id' => $user->id, 'user_name' => $user->name,
+            'user_email' => $user->email, 'role' => $role, 'business_name' => $this->tenantId,
+            'currency_code' => 'USD',
+        ]]);
 
         return $user;
     }
 
-    public function test_create_and_update_an_asset(): void
+    private function account(string $code): GlAccount
     {
-        $tenantId = 'tenant-assets-1';
-        $this->actingBackOfficeSession($tenantId);
-
-        $this->post('/office/assets', [
-            'name' => 'Delivery Van',
-            'category' => 'Vehicle',
-            'purchase_date' => '2024-01-01',
-            'purchase_cost' => 20000,
-            'salvage_value' => 2000,
-            'depreciation_method' => 'straight_line',
-            'useful_life_years' => 5,
-        ])->assertRedirect();
-
-        $asset = Asset::where('business_id', $tenantId)->first();
-        $this->assertNotNull($asset);
-        $this->assertSame('Delivery Van', $asset->name);
-        $this->assertSame('active', $asset->status);
-        $this->assertDatabaseHas('sync_records', ['table_name' => 'assets', 'record_uuid' => $asset->id]);
-
-        $this->put("/office/assets/{$asset->id}", [
-            'name' => 'Delivery Van (Toyota)',
-            'category' => 'Vehicle',
-            'purchase_date' => '2024-01-01',
-            'purchase_cost' => 20000,
-            'salvage_value' => 2000,
-            'depreciation_method' => 'straight_line',
-            'useful_life_years' => 5,
-        ])->assertRedirect();
-        $this->assertSame('Delivery Van (Toyota)', $asset->fresh()->name);
-
-        $this->get('/office/assets')->assertOk();
+        return GlAccount::where('business_id', $this->tenantId)->where('code', $code)->firstOrFail();
     }
 
-    public function test_straight_line_valuation_depreciates_toward_salvage(): void
+    private function fundCash(float $amount): void
     {
-        $asset = Asset::create([
-            'id' => (string) Str::uuid(),
-            'business_id' => 'tenant-x',
-            'name' => 'Fridge',
-            'category' => 'Equipment',
-            'purchase_date' => now()->subYears(2),
-            'purchase_cost' => 1000,
-            'salvage_value' => 100,
-            'depreciation_method' => 'straight_line',
-            'useful_life_years' => 4,
-            'status' => 'active',
+        $journals = app(JournalService::class);
+        $header = $journals->createDraft($this->tenantId, '2026-01-01', 'capital', (string) Str::uuid());
+        $journals->addLine($header, ['gl_account_id' => $this->account('1000')->id, 'debit' => $amount]);
+        $journals->addLine($header, ['gl_account_id' => $this->account('3000')->id, 'credit' => $amount]);
+        $journals->post($header);
+    }
+
+    public function test_owner_can_register_an_asset_and_it_posts_the_acquisition(): void
+    {
+        $this->actingBackOfficeSession();
+        $this->fundCash(20000);
+
+        $response = $this->post('/office/assets', [
+            'name' => 'Delivery Van',
+            'acquisition_date' => '2026-02-01',
+            'acquisition_cost' => 12000,
+            'useful_life_months' => 24,
+            'funding_method' => 'cash',
         ]);
 
-        $valuation = $asset->valuation();
+        $response->assertRedirect();
+        $response->assertSessionHas('success');
 
-        // 2 of 4 years elapsed: half of (1000-100) depreciated = 450, book value ~550.
-        $this->assertEqualsWithDelta(550, $valuation['book_value'], 5);
-        $this->assertEqualsWithDelta(450, $valuation['accumulated_depreciation'], 5);
+        $this->assertDatabaseHas('assets', ['business_id' => $this->tenantId, 'name' => 'Delivery Van', 'status' => 'active']);
+        $this->assertSame(12000.0, $this->account('1500')->balance());
+        $this->assertSame(8000.0, $this->account('1000')->balance());
     }
 
-    public function test_dispose_freezes_the_asset_value(): void
+    public function test_index_reports_book_value_for_each_asset(): void
     {
-        $tenantId = 'tenant-assets-2';
-        $this->actingBackOfficeSession($tenantId);
+        $this->actingBackOfficeSession();
+        $this->fundCash(20000);
 
         $this->post('/office/assets', [
-            'name' => 'Till Register',
-            'category' => 'Equipment',
-            'purchase_date' => '2023-01-01',
-            'purchase_cost' => 500,
-            'depreciation_method' => 'none',
-        ])->assertRedirect();
-        $asset = Asset::where('business_id', $tenantId)->first();
+            'name' => 'Laptop',
+            'acquisition_date' => '2026-02-01',
+            'acquisition_cost' => 1000,
+            'useful_life_months' => 10,
+            'funding_method' => 'cash',
+        ]);
 
-        $this->post("/office/assets/{$asset->id}/dispose", [
-            'disposed_at' => now()->toDateString(),
-            'disposal_value' => 50,
-        ])->assertRedirect();
+        $response = $this->get('/office/assets');
 
-        $asset->refresh();
-        $this->assertSame('disposed', $asset->status);
-        $this->assertEquals(50, $asset->disposal_value);
-        $this->assertSame(50.0, $asset->valuation()['book_value']);
+        $response->assertOk();
+        $response->assertInertia(fn ($page) => $page
+            ->where('assets.0.name', 'Laptop')
+            ->where('assets.0.book_value', 1000)
+        );
     }
 
-    public function test_cashier_cannot_manage_assets(): void
+    public function test_owner_can_dispose_of_an_asset(): void
     {
-        $tenantId = 'tenant-assets-3';
-        $this->actingBackOfficeSession($tenantId, 'cashier');
+        $this->actingBackOfficeSession();
+        $this->fundCash(20000);
+
+        $this->post('/office/assets', [
+            'name' => 'Old Fridge', 'acquisition_date' => '2026-01-01',
+            'acquisition_cost' => 500, 'useful_life_months' => 12, 'funding_method' => 'cash',
+        ]);
+        $asset = Asset::where('business_id', $this->tenantId)->firstOrFail();
+
+        $response = $this->post("/office/assets/{$asset->id}/dispose", [
+            'disposed_at' => '2026-03-01',
+            'disposal_proceeds' => 500,
+        ]);
+
+        $response->assertRedirect();
+        $this->assertSame('disposed', $asset->fresh()->status);
+        $this->assertSame(0.0, $this->account('1500')->balance());
+    }
+
+    public function test_a_disposed_asset_cannot_be_disposed_of_again(): void
+    {
+        $this->actingBackOfficeSession();
+        $this->fundCash(20000);
+
+        $asset = Asset::create([
+            'id' => (string) Str::uuid(), 'business_id' => $this->tenantId, 'name' => 'Old Fridge',
+            'acquisition_date' => '2026-01-01', 'acquisition_cost' => 500, 'salvage_value' => 0,
+            'useful_life_months' => 12, 'funding_method' => 'cash', 'status' => 'disposed',
+            'disposed_at' => '2026-02-01', 'disposal_proceeds' => 100, 'created_by_user_id' => (string) Str::uuid(),
+        ]);
+
+        $this->post("/office/assets/{$asset->id}/dispose", [
+            'disposed_at' => '2026-03-01', 'disposal_proceeds' => 100,
+        ])->assertStatus(422);
+    }
+
+    public function test_manager_cannot_manage_assets_by_default(): void
+    {
+        $this->actingBackOfficeSession('manager');
 
         $this->get('/office/assets')->assertForbidden();
         $this->post('/office/assets', ['name' => 'Nope'])->assertForbidden();
-    }
-
-    public function test_assets_are_scoped_to_the_current_tenant(): void
-    {
-        $otherTenantId = 'tenant-assets-other';
-        Tenant::firstOrCreate(['id' => $otherTenantId], ['business_name' => $otherTenantId, 'owner_email' => $otherTenantId.'@example.com', 'pairing_code' => 'YYYYYY']);
-        $foreignAsset = Asset::create([
-            'id' => (string) Str::uuid(),
-            'business_id' => $otherTenantId,
-            'name' => 'Their Asset',
-            'category' => 'Equipment',
-            'purchase_date' => now(),
-            'purchase_cost' => 100,
-            'status' => 'active',
-        ]);
-
-        $tenantId = 'tenant-assets-4';
-        $this->actingBackOfficeSession($tenantId);
-
-        $this->put("/office/assets/{$foreignAsset->id}", [
-            'name' => 'Hijacked',
-            'category' => 'Equipment',
-            'purchase_date' => now()->toDateString(),
-            'purchase_cost' => 100,
-            'depreciation_method' => 'none',
-        ])->assertNotFound();
-        $this->assertSame('Their Asset', $foreignAsset->fresh()->name);
     }
 }

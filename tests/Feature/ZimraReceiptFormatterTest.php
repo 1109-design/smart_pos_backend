@@ -135,6 +135,62 @@ class ZimraReceiptFormatterTest extends TestCase
         );
     }
 
+    public function test_swipe_payment_method_resolves_to_card_money_type(): void
+    {
+        $device = $this->makeDevice();
+        $business = Business::create(['id' => 'biz-1', 'name' => 'Test Shop']);
+
+        $transaction = Transaction::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => 'biz-1',
+            'user_id' => (string) Str::uuid(),
+            'subtotal' => 100,
+            'tax_total' => 15,
+            'total' => 115,
+            'base_currency' => 'USD',
+            'status' => 'completed',
+        ]);
+
+        $item = new TransactionItem([
+            'transaction_id' => $transaction->id,
+            'product_name' => 'Widget',
+            'quantity' => 1,
+            'unit_price' => 115,
+            'tax_amount' => 15.00,
+            'line_total' => 115.00,
+        ]);
+
+        // A "POS Swipe <currency> · <bank name>" tender (see
+        // payment_sheet.dart's per-bank-account Swipe buttons) must still
+        // report as ZIMRA's "Card" money type, not fall through to "Other"
+        // just because it isn't the exact literal string "card".
+        $payment = new Payment([
+            'transaction_id' => $transaction->id,
+            'method' => 'POS Swipe USD - ZB Bank',
+            'amount' => 115.00,
+        ]);
+
+        $result = ZimraReceiptFormatter::formatReceipt(
+            $transaction,
+            [$item],
+            [$payment],
+            $business,
+            null,
+            $device,
+            null,
+            44,
+            9,
+            $device->tax_codes,
+            $device->applicable_taxes,
+            'DOC-44'
+        );
+
+        $this->assertSame(
+            [['moneyTypeCode' => 'Card', 'paymentAmount' => 115.0]],
+            $result['receipt']['receiptPayments']
+        );
+    }
+
     public function test_zero_rated_items_resolve_to_zero_rated_tax_id(): void
     {
         $resolved = ZimraReceiptFormatter::resolveTax(0.0, [
