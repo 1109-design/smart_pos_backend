@@ -18,6 +18,7 @@ use App\Http\Controllers\BackOffice\FinancialStatementsController as BackOfficeF
 use App\Http\Controllers\BackOffice\JournalEntriesController as BackOfficeJournalEntries;
 use App\Http\Controllers\BackOffice\LocationsController as BackOfficeLocations;
 use App\Http\Controllers\BackOffice\ProcurementBudgetsController as BackOfficeProcurementBudgets;
+use App\Http\Controllers\BackOffice\ProductRequestsController as BackOfficeProductRequests;
 use App\Http\Controllers\BackOffice\ProductsController as BackOfficeProducts;
 use App\Http\Controllers\BackOffice\ProjectsController as BackOfficeProjects;
 use App\Http\Controllers\BackOffice\PurchaseOrdersController as BackOfficePurchaseOrders;
@@ -261,6 +262,11 @@ Route::prefix('office')->name('office.')->group(function () {
         Route::get('customers', [BackOfficeCustomers::class, 'index'])->name('customers.index');
         Route::get('customers/{customer}', [BackOfficeCustomers::class, 'show'])->name('customers.show');
         Route::put('customers/{customer}', [BackOfficeCustomers::class, 'update'])->name('customers.update');
+
+        Route::get('product-requests', [BackOfficeProductRequests::class, 'index'])->name('product-requests.index');
+        Route::post('product-requests', [BackOfficeProductRequests::class, 'store'])->name('product-requests.store');
+        Route::patch('product-requests/{productRequest}/toggle-status', [BackOfficeProductRequests::class, 'toggleStatus'])->name('product-requests.toggle-status');
+        Route::delete('product-requests/{productRequest}', [BackOfficeProductRequests::class, 'destroy'])->name('product-requests.destroy');
 
         Route::get('storeman', [BackOfficeStoreman::class, 'index'])->name('storeman.index');
         Route::post('storeman/suggested-transfer', [BackOfficeStoreman::class, 'createSuggestedTransfer'])->name('storeman.suggested-transfer');
