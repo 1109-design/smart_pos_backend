@@ -68,6 +68,7 @@ use App\Models\ProductPriceTier;
 use App\Models\ProductSellableLocation;
 use App\Models\ProductStock;
 use App\Models\ProductTaxRate;
+use App\Models\ProductBarcode;
 use App\Models\ProductUnit;
 use App\Models\ProductVariant;
 use App\Models\ProductVariantStock;
@@ -297,6 +298,7 @@ class SyncProcessor
         'invoice_payments' => [InvoicePayment::class, 'invoice_id'],
         'credit_note_items' => [CreditNoteItem::class, 'credit_note_id'],
         'product_units' => [ProductUnit::class, 'product_id'],
+        'product_barcodes' => [ProductBarcode::class, 'product_id'],
         'product_price_tiers' => [ProductPriceTier::class, 'product_id'],
         'project_milestones' => [ProjectMilestone::class, 'project_id'],
         'milestone_tasks' => [MilestoneTask::class, 'milestone_id'],
@@ -334,6 +336,10 @@ class SyncProcessor
     {
         $this->assertOwnership($table, $uuid, $payload);
 
+        // Idempotent — SyncController already applies this before storing the
+        // SyncRecord; repeated here for every other caller.
+        ['operation' => $operation, 'payload' => $payload] = $this->resolveBarcodeConflict($table, $uuid, $operation, $payload);
+
         if ($operation === 'delete') {
             $this->handleDelete($table, $uuid);
 
@@ -341,6 +347,68 @@ class SyncProcessor
         }
 
         $this->handleUpsert($table, $uuid, $payload, $trusted, $actingUser);
+    }
+
+    /**
+     * Barcodes are unique per business across products, product_barcodes and
+     * product_variants (see BarcodeRegistry). When an incoming upsert carries
+     * a barcode something else already owns, the server's current value for
+     * this row wins instead of rejecting the whole record — the rest of the
+     * row (price, stock, name...) still applies, and because the caller
+     * stores the *resolved* payload as the SyncRecord, every device
+     * (including the one that pushed it) pulls the corrected row. A new
+     * product_barcodes row with nothing to fall back on becomes a delete.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array{operation: string, payload: array<string, mixed>, conflict: ?string}
+     */
+    public function resolveBarcodeConflict(string $table, string $uuid, string $operation, array $payload): array
+    {
+        $unchanged = ['operation' => $operation, 'payload' => $payload, 'conflict' => null];
+        $type = BarcodeRegistry::OWNER_TYPES[$table] ?? null;
+        if ($type === null || $operation === 'delete' || ! array_key_exists('barcode', $payload)) {
+            return $unchanged;
+        }
+
+        $code = BarcodeRegistry::normalize($payload['barcode']);
+        $businessId = $table === 'products'
+            ? ($payload['business_id'] ?? null)
+            : Product::whereKey($payload['product_id'] ?? null)->value('business_id');
+        if ($code === null || $businessId === null) {
+            return $unchanged;
+        }
+
+        $registry = app(BarcodeRegistry::class);
+        $isMine = fn (?array $owner) => $owner !== null && $owner['type'] === $type && $owner['id'] === $uuid;
+
+        $owner = $registry->ownerOf($businessId, $code);
+        if ($owner === null || $isMine($owner)) {
+            $payload['barcode'] = $code;
+
+            return ['operation' => $operation, 'payload' => $payload, 'conflict' => null];
+        }
+
+        $modelClass = match ($table) {
+            'products' => Product::class,
+            'product_barcodes' => ProductBarcode::class,
+            'product_variants' => ProductVariant::class,
+        };
+        $current = $modelClass::whereKey($uuid)->value('barcode');
+        $keep = $current !== null && $isMine($registry->ownerOf($businessId, $current)) ? $current : null;
+
+        $taken = $registry->describeOwner($businessId, $code) ?? 'another item';
+        $conflict = "Barcode '{$code}' is already used by {$taken}; kept "
+            .($keep === null ? 'no barcode' : "'{$keep}'")." for this {$type}.";
+        Log::warning("SyncProcessor: {$table}/{$uuid}: {$conflict}");
+
+        if ($table === 'product_barcodes' && $keep === null) {
+            // business_id stays — assertOwnership() needs it for the delete.
+            return ['operation' => 'delete', 'payload' => ['business_id' => $payload['business_id'] ?? null], 'conflict' => $conflict];
+        }
+
+        $payload['barcode'] = $keep;
+
+        return ['operation' => $operation, 'payload' => $payload, 'conflict' => $conflict];
     }
 
     /**
@@ -434,7 +502,7 @@ class SyncProcessor
     protected function resolveParentOwner(string $table, string $parentId): ?string
     {
         return match ($table) {
-            'product_stock', 'product_variants', 'product_units', 'product_price_tiers' => Product::where('id', $parentId)->value('business_id'),
+            'product_stock', 'product_variants', 'product_units', 'product_price_tiers', 'product_barcodes' => Product::where('id', $parentId)->value('business_id'),
             'product_variant_stock' => Product::query()
                 ->join('product_variants', 'product_variants.product_id', '=', 'products.id')
                 ->where('product_variants.id', $parentId)
@@ -1259,6 +1327,16 @@ class SyncProcessor
                         'unit_name' => $payload['unit_name'] ?? '',
                         'conversion_factor' => $payload['conversion_factor'] ?? 1,
                         'is_base_unit' => $payload['is_base_unit'] ?? false,
+                    ]
+                );
+                break;
+
+            case 'product_barcodes':
+                ProductBarcode::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'product_id' => $payload['product_id'] ?? null,
+                        'barcode' => $payload['barcode'] ?? '',
                     ]
                 );
                 break;
@@ -4258,6 +4336,7 @@ class SyncProcessor
             'supplier_banks' => SupplierBank::class,
             'recurring_invoice_schedules' => RecurringInvoiceSchedule::class,
             'product_units' => ProductUnit::class,
+            'product_barcodes' => ProductBarcode::class,
             'product_price_tiers' => ProductPriceTier::class,
             'procurement_budgets' => ProcurementBudget::class,
             'milestone_tasks' => MilestoneTask::class,
@@ -4279,6 +4358,12 @@ class SyncProcessor
             } else {
                 $modelMap[$table]::where('id', $uuid)->delete();
             }
+        }
+
+        // The query-builder delete above skips model events, so free the
+        // barcode claim explicitly (see BarcodeRegistry).
+        if ($table === 'product_barcodes') {
+            app(BarcodeRegistry::class)->release('product_barcode', $uuid);
         }
 
         // Special case: product_tax_rates composite key
