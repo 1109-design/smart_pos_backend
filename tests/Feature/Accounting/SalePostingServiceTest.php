@@ -363,4 +363,99 @@ class SalePostingServiceTest extends TestCase
         $this->assertSame(0.0, $this->account($businessId, '1000')->balance());
         $this->assertSame(0.0, $this->account($businessId, '4000')->balance());
     }
+
+    private function addStockMovement(Transaction $tx, string $type, float $quantityChange, float $runningAvgCost): StockMovement
+    {
+        return StockMovement::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $tx->business_id,
+            'product_id' => (string) Str::uuid(),
+            'type' => $type,
+            'quantity_change' => $quantityChange,
+            'running_avg_cost' => $runningAvgCost,
+            'reference_id' => $tx->id,
+            'user_id' => $tx->user_id,
+        ]);
+    }
+
+    private function makeExchange(string $businessId, float $total): Transaction
+    {
+        $tx = $this->makeSale($businessId, $total, 0, $total);
+        $tx->forceFill(['exchange_of_transaction_id' => (string) Str::uuid()])->save();
+
+        return $tx->fresh();
+    }
+
+    public function test_an_even_swap_exchange_posts_without_waiting_for_a_payment(): void
+    {
+        $businessId = $this->makeLiveBusiness();
+        // Returned $40 kettle (cost 25) swapped for a $40 toaster (cost 35).
+        $tx = $this->makeExchange($businessId, 0);
+        $this->addItem($tx, -40);
+        $this->addItem($tx, 40);
+        $this->addStockMovement($tx, 'return', 1, 25);
+        $this->addStockMovement($tx, 'sale', -1, 35);
+
+        $this->posting->postIfReady($tx);
+
+        $journal = JournalHeader::where('source_type', 'sale')->where('source_id', $tx->id)->first();
+        $this->assertNotNull($journal);
+        $this->assertSame('posted', $journal->status);
+        $this->assertSame(0.0, $this->account($businessId, '1000')->balance());
+        $this->assertSame(10.0, $this->account($businessId, '5000')->balance());
+        $this->assertSame(-10.0, $this->account($businessId, '1200')->balance());
+    }
+
+    public function test_a_same_cost_like_for_like_exchange_leaves_no_empty_draft_behind(): void
+    {
+        $businessId = $this->makeLiveBusiness();
+        $tx = $this->makeExchange($businessId, 0);
+        $this->addItem($tx, -40);
+        $this->addItem($tx, 40);
+        $this->addStockMovement($tx, 'return', 1, 25);
+        $this->addStockMovement($tx, 'sale', -1, 25);
+
+        $this->posting->postIfReady($tx);
+
+        $this->assertNull(JournalHeader::where('source_type', 'sale')->where('source_id', $tx->id)->first());
+    }
+
+    public function test_an_exchange_with_a_payout_credits_cash_and_reverses_the_returned_cogs(): void
+    {
+        $businessId = $this->makeLiveBusiness();
+        // Cash in the till from the original $40 sale.
+        $original = $this->makeSale($businessId, 40, 0, 40);
+        $this->addItem($original, 40);
+        $this->addPayment($original, 40);
+        $this->posting->postIfReady($original);
+
+        // Returned $40 kettle (cost 25) for a $10 mug (cost 4): $30 paid back.
+        $tx = $this->makeExchange($businessId, -30);
+        $this->addItem($tx, -40);
+        $this->addItem($tx, 10);
+        $this->addPayment($tx, -30);
+        $this->addStockMovement($tx, 'return', 1, 25);
+        $this->addStockMovement($tx, 'sale', -1, 4);
+
+        $this->posting->postIfReady($tx);
+
+        $journal = JournalHeader::where('source_type', 'sale')->where('source_id', $tx->id)->first();
+        $this->assertSame('posted', $journal->status);
+        $this->assertSame(10.0, $this->account($businessId, '1000')->balance());
+        $this->assertSame(10.0, $this->account($businessId, '4000')->balance());
+        // Net stock value back in: +25 kettle, -4 mug.
+        $this->assertSame(21.0, $this->account($businessId, '1200')->balance());
+        $this->assertSame(-21.0, $this->account($businessId, '5000')->balance());
+    }
+
+    public function test_a_zero_total_plain_sale_still_waits_for_its_payment(): void
+    {
+        $businessId = $this->makeLiveBusiness();
+        $tx = $this->makeSale($businessId, 0, 0, 0);
+        $this->addItem($tx, 0);
+
+        $this->posting->postIfReady($tx);
+
+        $this->assertNull(JournalHeader::where('source_type', 'sale')->where('source_id', $tx->id)->first());
+    }
 }

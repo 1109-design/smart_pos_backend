@@ -16,6 +16,7 @@ class Transaction extends Model
         'subtotal', 'tax_total', 'discount_total', 'deposit_total',
         'surcharge_total', 'total',
         'base_currency', 'status', 'sale_number', 'notes', 'void_reason',
+        'exchange_of_transaction_id',
         'fiscal_status', 'fiscal_receipt_number', 'fiscal_qr_code',
     ];
 

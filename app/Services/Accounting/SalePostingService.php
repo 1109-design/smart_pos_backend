@@ -23,7 +23,7 @@ use Throwable;
  * the sweep that catches whatever this misses on the first pass.
  *
  * Known simplification: COGS is computed from whatever `stock_movements`
- * rows (type='sale', reference_id=transaction) exist at posting time. These
+ * rows (type 'sale'/'return', reference_id=transaction) exist at posting time. These
  * normally sync in the same push as the transaction/items, but if they
  * arrive later, the sale can post with understated COGS. Revisit if that
  * proves to matter in practice.
@@ -86,7 +86,11 @@ class SalePostingService
         $items = TransactionItem::where('transaction_id', $transaction->id)->get();
         $payments = Payment::where('transaction_id', $transaction->id)->get();
 
-        if ($items->isEmpty() || $payments->isEmpty()) {
+        // An even-swap exchange (see Transaction::exchange_of_transaction_id)
+        // legitimately has no payment at all — nothing to wait for there.
+        $expectsPayment = ! ($transaction->exchange_of_transaction_id && abs((float) $transaction->total) <= 0.005);
+
+        if ($items->isEmpty() || ($expectsPayment && $payments->isEmpty())) {
             return; // not everything for this sale has synced yet
         }
 
@@ -119,6 +123,28 @@ class SalePostingService
         }
 
         try {
+            // Signed, over both 'sale' (stock out, negative) and 'return'
+            // (stock back in, positive) movements — mirrors
+            // sale_posting_service.dart. A plain sale only has 'sale'
+            // movements, so it posts exactly as before; an exchange nets its
+            // returned units' COGS reversal against its replacements' COGS,
+            // and a refund's own 'return' movements reverse COGS too.
+            $signedCogs = (float) StockMovement::where('reference_id', $transaction->id)
+                ->whereIn('type', ['sale', 'return'])
+                ->get()
+                ->sum(fn ($m) => (float) $m->quantity_change * (float) ($m->running_avg_cost ?? 0));
+
+            // A like-for-like exchange at the same cost moves no money and no
+            // stock value — there's nothing to journal, and an empty draft
+            // can never post (JournalService::post() refuses one), so it
+            // would just sit in the review queue forever.
+            if ($transaction->exchange_of_transaction_id
+                && abs((float) $transaction->total) <= 0.005
+                && abs((float) $transaction->tax_total) <= 0.005
+                && abs($signedCogs) <= 0.005) {
+                return;
+            }
+
             $header = $this->journals->createDraft(
                 $transaction->business_id,
                 ($transaction->created_at ?? now())->toDateString(),
@@ -210,14 +236,12 @@ class SalePostingService
             // shortfall the till collected less than the exact price.
             $this->addSignedLine($header, $accounts['rounding'], $roundingTotal);
 
-            $cogs = (float) StockMovement::where('reference_id', $transaction->id)
-                ->where('type', 'sale')
-                ->get()
-                ->sum(fn ($m) => abs((float) $m->quantity_change) * (float) ($m->running_avg_cost ?? 0));
-
-            if ($cogs > 0.005) {
-                $this->journals->addLine($header, ['gl_account_id' => $accounts['cogs']->id, 'debit' => $cogs]);
-                $this->journals->addLine($header, ['gl_account_id' => $accounts['inventory']->id, 'credit' => $cogs]);
+            if ($signedCogs < -0.005) {
+                $this->journals->addLine($header, ['gl_account_id' => $accounts['cogs']->id, 'debit' => -$signedCogs]);
+                $this->journals->addLine($header, ['gl_account_id' => $accounts['inventory']->id, 'credit' => -$signedCogs]);
+            } elseif ($signedCogs > 0.005) {
+                $this->journals->addLine($header, ['gl_account_id' => $accounts['inventory']->id, 'debit' => $signedCogs]);
+                $this->journals->addLine($header, ['gl_account_id' => $accounts['cogs']->id, 'credit' => $signedCogs]);
             }
 
             if (! $this->journals->isBalanced($header)) {

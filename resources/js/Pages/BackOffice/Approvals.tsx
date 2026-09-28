@@ -38,6 +38,7 @@ const STATUS_STYLE: Record<ApprovalStatus, { label: string; variant: 'amber' | '
 const ACTION_LABELS: Record<string, string> = {
     void_transaction: 'Void sale',
     refund_transaction: 'Refund',
+    exchange_transaction: 'Exchange',
     change_exchange_rate: 'Exchange rate change',
     approve_purchase_order: 'Purchase order over threshold',
 };

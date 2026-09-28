@@ -1367,6 +1367,17 @@ class SyncProcessor
                     }
                 }
 
+                // A product exchange is born 'completed', so the status gate
+                // above never sees it — but it takes goods back and can pay
+                // money out, exactly like a refund. Gate its creation on an
+                // approved exchange_transaction request for the SAME original
+                // sale it claims to exchange.
+                $exchangeOf = $payload['exchange_of_transaction_id'] ?? null;
+                if (! $trusted && ! $txExists && $exchangeOf
+                    && ! $this->hasApprovedExchange($payload['business_id'] ?? null, $exchangeOf, $payload['approval_request_id'] ?? null)) {
+                    throw new \RuntimeException('transactions: an exchange requires an approved approval request.');
+                }
+
                 $txData = [
                     'business_id' => $payload['business_id'] ?? null,
                     'location_id' => $payload['location_id'] ?? null,
@@ -1385,6 +1396,12 @@ class SyncProcessor
                     'notes' => $payload['notes'] ?? null,
                     'void_reason' => $payload['void_reason'] ?? null,
                 ];
+                // Only ever set when the row is first created (and only
+                // after the approval gate above): a later upsert can neither
+                // attach an existing sale to an exchange nor detach one.
+                if (! $txExists && $exchangeOf) {
+                    $txData['exchange_of_transaction_id'] = $exchangeOf;
+                }
                 $tx = Transaction::updateOrCreate(['id' => $uuid], $txData);
 
                 if (! $txExists && isset($payload['created_at'])) {
@@ -1424,7 +1441,11 @@ class SyncProcessor
                 // fiscal_status is 'fiscalised' or ZIMRA has already accepted
                 // the receipt — so this only ever queues real transitions,
                 // never a duplicate submission.
-                if ($tx->status === 'completed' && $previousStatus !== 'completed') {
+                //
+                // Exchanges are skipped: their negative returned lines aren't
+                // a valid fiscal invoice, and returns (refunds included) have
+                // no ZIMRA credit-note flow yet.
+                if ($tx->status === 'completed' && $previousStatus !== 'completed' && $tx->exchange_of_transaction_id === null) {
                     app(ZimraSalesService::class)->queueFiscalisation($tx);
                 }
 
@@ -3887,6 +3908,27 @@ class SyncProcessor
      * @param  array<string, mixed>  $payload
      * @param  string[]  $actions
      */
+    /**
+     * Whether an exchange of $originalTransactionId was approved. Stricter
+     * than hasApprovedRequest(): the approval's subject must be that exact
+     * original sale even when the device names the request id, so one
+     * approval can't be replayed to authorise an exchange on another sale.
+     */
+    private function hasApprovedExchange(?string $businessId, string $originalTransactionId, ?string $approvalRequestId): bool
+    {
+        if (empty($businessId)) {
+            return false;
+        }
+
+        return ApprovalRequest::where('business_id', $businessId)
+            ->where('status', 'approved')
+            ->where('action', 'exchange_transaction')
+            ->where('subject_type', 'Transaction')
+            ->where('subject_id', $originalTransactionId)
+            ->when($approvalRequestId, fn ($query) => $query->where('id', $approvalRequestId))
+            ->exists();
+    }
+
     private function hasApprovedRequest(?string $businessId, string $subjectType, string $subjectId, array $actions, array $payload): bool
     {
         if (empty($businessId)) {
