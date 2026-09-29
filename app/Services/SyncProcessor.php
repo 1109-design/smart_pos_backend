@@ -3008,7 +3008,9 @@ class SyncProcessor
                         'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
                         'approved_at' => $payload['approved_at'] ?? null,
                         'review_comment' => $payload['review_comment'] ?? null,
-                    ]
+                    ] + $this->presentStockTakeColumns($payload, [
+                        'scope_type', 'scope_bin_ids', 'scope_label',
+                    ])
                 );
                 break;
 
@@ -3035,7 +3037,10 @@ class SyncProcessor
                         'notes' => $payload['notes'] ?? null,
                         'flagged_for_recount' => $flagged,
                         'recount_completed_at' => $recountCompletedAt,
-                    ]
+                    ] + $this->presentStockTakeColumns($payload, [
+                        'damaged_qty', 'damage_breakdown', 'counted_at',
+                        'counted_by_user_id', 'warehouse_bin_id',
+                    ])
                 );
 
                 // A device's own push payload never carries
@@ -3062,6 +3067,11 @@ class SyncProcessor
                             'notes' => $stockTakeItem->notes,
                             'flagged_for_recount' => $stockTakeItem->flagged_for_recount,
                             'recount_completed_at' => $stockTakeItem->recount_completed_at?->toIso8601String(),
+                            'damaged_qty' => $stockTakeItem->damaged_qty !== null ? (float) $stockTakeItem->damaged_qty : null,
+                            'damage_breakdown' => $stockTakeItem->damage_breakdown,
+                            'counted_at' => $stockTakeItem->counted_at?->toIso8601String(),
+                            'counted_by_user_id' => $stockTakeItem->counted_by_user_id,
+                            'warehouse_bin_id' => $stockTakeItem->warehouse_bin_id,
                         ],
                         'source_updated_at' => now(),
                         'synced_at' => now(),
@@ -4470,6 +4480,42 @@ class SyncProcessor
         if (! in_array($actingRole, ['business_owner', 'manager'], true)) {
             throw new \RuntimeException("{$context} requires the owner or manager role.");
         }
+    }
+
+    /**
+     * Stock-take v2 columns (scope, damage, counted-by and warehouse bin)
+     * are only written when the payload actually carries the key, so a
+     * push from an older app build (which doesn't know them) can't null
+     * out values another device already recorded. JSON columns are stored
+     * as text — an already-decoded array is re-encoded.
+     *
+     * @param  array<string, mixed>  $payload
+     * @param  array<int, string>  $columns
+     * @return array<string, mixed>
+     */
+    private function presentStockTakeColumns(array $payload, array $columns): array
+    {
+        $attributes = [];
+
+        foreach ($columns as $column) {
+            if (! array_key_exists($column, $payload)) {
+                continue;
+            }
+
+            $value = $payload[$column];
+
+            if (is_array($value)) {
+                $value = json_encode($value);
+            }
+
+            if ($column === 'scope_type' && ($value === null || $value === '')) {
+                $value = 'all';
+            }
+
+            $attributes[$column] = $value;
+        }
+
+        return $attributes;
     }
 
     /**

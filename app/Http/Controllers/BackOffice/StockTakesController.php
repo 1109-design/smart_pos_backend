@@ -205,6 +205,9 @@ class StockTakesController extends BackOfficeController
             'approved_by_user_id' => $take->approved_by_user_id,
             'approved_at' => $take->approved_at?->toIso8601String(),
             'review_comment' => $take->review_comment,
+            'scope_type' => $take->scope_type,
+            'scope_bin_ids' => $take->scope_bin_ids,
+            'scope_label' => $take->scope_label,
         ];
     }
 

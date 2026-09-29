@@ -15,6 +15,9 @@ class StockTake extends Model
     protected $fillable = [
         'id', 'business_id', 'location_id', 'title', 'status', 'notes',
         'created_by_user_id', 'approved_by_user_id', 'approved_at', 'review_comment',
+        // scope_bin_ids is JSON text (array of warehouse_bins ids), kept
+        // uncast so it round-trips to the device verbatim.
+        'scope_type', 'scope_bin_ids', 'scope_label',
     ];
 
     protected static function booted(): void
