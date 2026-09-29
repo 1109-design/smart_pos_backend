@@ -277,4 +277,80 @@ class SyncStockTakeTransitionTest extends TestCase
         $this->assertCount(1, $response->json('accepted'));
         $this->assertDatabaseHas('stock_takes', ['id' => $stockTakeId, 'status' => 'approved']);
     }
+
+    /**
+     * 2026-09-29 sync audit finding C4: a device that creates, counts (which
+     * flags a real variance), and approves a stock take entirely offline
+     * syncs everything in one batch once it reconnects. stock_takes and
+     * stock_take_items are each their own independent group, run in their
+     * own DB transaction, in whatever order the records array lists them —
+     * so if the approval happened to be listed before the flagging item
+     * (exactly what this test forces), the gate's query found nothing
+     * flagged yet and let the approval straight through, bypassing the
+     * recount review entirely. Fixed by having SyncController::
+     * groupPushRecords() stably sort every stock_take_items record ahead of
+     * every stock_takes record, so a stock take's own items are always
+     * fully applied — flags included — before its approval is evaluated,
+     * regardless of what order the client listed them in.
+     */
+    public function test_cannot_approve_when_the_flagging_item_is_listed_after_the_approval_in_the_same_batch(): void
+    {
+        $tenantId = 'tenant-sync-recount-gate-order';
+        $token = $this->actingDeviceToken($tenantId);
+
+        Business::create([
+            'id' => $tenantId, 'name' => $tenantId, 'currency_code' => 'USD',
+            'workflow_settings' => ['stock_take_variance_threshold_percent' => 5],
+        ]);
+        $stockTakeId = (string) Str::uuid();
+        $this->pushStockTake($token, $tenantId, $stockTakeId, 'in_progress')->assertOk();
+        $this->pushStockTake($token, $tenantId, $stockTakeId, 'pending_approval')->assertOk();
+
+        $itemId = (string) Str::uuid();
+
+        // A single batch, approval FIRST in the array — the exact ordering
+        // the fix must not depend on the client avoiding.
+        $response = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [
+                    [
+                        'table' => 'stock_takes',
+                        'uuid' => $stockTakeId,
+                        'operation' => 'upsert',
+                        'payload' => [
+                            'business_id' => $tenantId,
+                            'title' => 'Weekly Count',
+                            'status' => 'approved',
+                            'created_by_user_id' => '99999999-9999-4999-9999-999999999999',
+                            'updated_at' => now()->toIso8601String(),
+                        ],
+                        'updated_at' => now()->toIso8601String(),
+                    ],
+                    [
+                        'table' => 'stock_take_items',
+                        'uuid' => $itemId,
+                        'operation' => 'upsert',
+                        'payload' => [
+                            'business_id' => $tenantId,
+                            'stock_take_id' => $stockTakeId,
+                            'product_id' => (string) Str::uuid(),
+                            'product_name' => 'Widget',
+                            'system_qty' => 100,
+                            'counted_qty' => 50, // 50% variance, well above the 5% threshold
+                        ],
+                        'updated_at' => now()->toIso8601String(),
+                    ],
+                ],
+            ]);
+
+        $response->assertOk();
+        $this->assertCount(1, $response->json('accepted'), 'the item upsert must still go through');
+        $this->assertCount(1, $response->json('errors'), 'the approval must be rejected, not silently let through by ordering');
+        $this->assertSame(
+            'stock_takes: cannot approve while items still need a recount.',
+            $response->json('errors.0.reason'),
+        );
+        $this->assertDatabaseHas('stock_takes', ['id' => $stockTakeId, 'status' => 'pending_approval']);
+        $this->assertDatabaseHas('stock_take_items', ['id' => $itemId, 'flagged_for_recount' => true, 'recount_completed_at' => null]);
+    }
 }

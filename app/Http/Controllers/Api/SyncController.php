@@ -1113,8 +1113,33 @@ class SyncController extends Controller
         return Carbon::parse($raw);
     }
 
+    // 2026-09-29 sync audit finding C4: 'stock_takes' status:'approved'
+    // (case 'stock_takes' in SyncProcessor) blocks while any sibling
+    // stock_take_item still needs a recount — but stock_takes and
+    // stock_take_items are each their own independent group (below), run in
+    // their own DB transaction, in whatever order the RECORDS ARRAY happens
+    // to list them. A device that creates, counts (triggering a recount
+    // flag), and approves a stock take entirely offline, then syncs
+    // everything in one batch, could have its 'stock_takes' approval group
+    // processed — and its gate evaluated against the DB — before any of
+    // that same stock take's 'stock_take_items' groups have landed, at
+    // which point the gate's query finds nothing flagged yet and lets the
+    // approval straight through. A stable sort (guaranteed by PHP 8+
+    // usort()) moving every stock_take_items record ahead of every
+    // stock_takes record — without disturbing relative order otherwise —
+    // guarantees a stock take's own items are always fully applied, flags
+    // included, before its approval is evaluated, regardless of what order
+    // the client originally listed them in.
+    private const PUSH_PROCESSING_PRIORITY = [
+        'stock_take_items' => -1,
+        'stock_takes' => 1,
+    ];
+
     private function groupPushRecords(array $records): array
     {
+        usort($records, fn (array $a, array $b) => (self::PUSH_PROCESSING_PRIORITY[$a['table'] ?? ''] ?? 0)
+            <=> (self::PUSH_PROCESSING_PRIORITY[$b['table'] ?? ''] ?? 0));
+
         $groups = [];
 
         foreach ($records as $record) {
