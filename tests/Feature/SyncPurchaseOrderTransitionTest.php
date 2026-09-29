@@ -146,4 +146,212 @@ class SyncPurchaseOrderTransitionTest extends TestCase
             'status' => 'sent',
         ]);
     }
+
+    public function test_concurrent_po_receiving_derives_received_qty_from_stock_movements_ledger(): void
+    {
+        $tenantId = 'tenant-po-ledger';
+        $token = $this->actingDeviceToken($tenantId);
+        $poId = (string) Str::uuid();
+        $productId = (string) Str::uuid();
+        $poItemId = (string) Str::uuid();
+
+        // 1. Create product and PO
+        \App\Models\Product::create([
+            'id' => $productId,
+            'business_id' => $tenantId,
+            'name' => 'Test Widget',
+            'stock_quantity' => 0,
+            'price' => 20,
+            'track_stock' => true,
+        ]);
+
+        $this->pushPo($token, $tenantId, $poId, 'sent')->assertOk();
+
+        // Initial PO item: 100 ordered, 0 received
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'purchase_order_items',
+                    'uuid' => $poItemId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'purchase_order_id' => $poId,
+                        'product_id' => $productId,
+                        'product_name' => 'Test Widget',
+                        'ordered_qty' => 100,
+                        'received_qty' => 0,
+                        'unit_cost' => 10,
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ])->assertOk();
+
+        // Device A receives 50: pushes stock_movement (50) and stale po_item (received_qty: 50)
+        $movementAId = (string) Str::uuid();
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [
+                    [
+                        'table' => 'stock_movements',
+                        'uuid' => $movementAId,
+                        'operation' => 'upsert',
+                        'payload' => [
+                            'business_id' => $tenantId,
+                            'product_id' => $productId,
+                            'type' => 'receive',
+                            'quantity_change' => 50,
+                            'reference_id' => $poId,
+                            'unit_cost' => 10,
+                        ],
+                        'updated_at' => now()->toIso8601String(),
+                    ],
+                    [
+                        'table' => 'purchase_order_items',
+                        'uuid' => $poItemId,
+                        'operation' => 'upsert',
+                        'payload' => [
+                            'purchase_order_id' => $poId,
+                            'product_id' => $productId,
+                            'product_name' => 'Test Widget',
+                            'ordered_qty' => 100,
+                            'received_qty' => 50,
+                            'unit_cost' => 10,
+                        ],
+                        'updated_at' => now()->toIso8601String(),
+                    ],
+                ],
+            ])->assertOk();
+
+        $this->assertDatabaseHas('purchase_order_items', [
+            'id' => $poItemId,
+            'received_qty' => 50,
+        ]);
+        $this->assertDatabaseHas('purchase_orders', [
+            'id' => $poId,
+            'total_received' => 500,
+            'status' => 'partial',
+        ]);
+
+        // Device B also receives 50 offline: pushes stock_movement (50), but its local po_item
+        // was computed from its own stale base (0 + 50 = 50).
+        $movementBId = (string) Str::uuid();
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [
+                    [
+                        'table' => 'stock_movements',
+                        'uuid' => $movementBId,
+                        'operation' => 'upsert',
+                        'payload' => [
+                            'business_id' => $tenantId,
+                            'product_id' => $productId,
+                            'type' => 'receive',
+                            'quantity_change' => 50,
+                            'reference_id' => $poId,
+                            'unit_cost' => 10,
+                        ],
+                        'updated_at' => now()->toIso8601String(),
+                    ],
+                    [
+                        'table' => 'purchase_order_items',
+                        'uuid' => $poItemId,
+                        'operation' => 'upsert',
+                        'payload' => [
+                            'purchase_order_id' => $poId,
+                            'product_id' => $productId,
+                            'product_name' => 'Test Widget',
+                            'ordered_qty' => 100,
+                            'received_qty' => 50, // stale local claim!
+                            'unit_cost' => 10,
+                        ],
+                        'updated_at' => now()->toIso8601String(),
+                    ],
+                ],
+            ])->assertOk();
+
+        // Crucial assert: received_qty must be 100 (derived from 50 + 50 movements), NOT overwritten with 50!
+        $this->assertDatabaseHas('purchase_order_items', [
+            'id' => $poItemId,
+            'received_qty' => 100,
+        ]);
+        $this->assertDatabaseHas('purchase_orders', [
+            'id' => $poId,
+            'total_received' => 1000,
+            'status' => 'received',
+        ]);
+    }
+
+    public function test_po_item_arriving_before_stock_movements_updates_when_movement_lands(): void
+    {
+        $tenantId = 'tenant-po-order-arrival';
+        $token = $this->actingDeviceToken($tenantId);
+        $poId = (string) Str::uuid();
+        $productId = (string) Str::uuid();
+        $poItemId = (string) Str::uuid();
+
+        \App\Models\Product::create([
+            'id' => $productId,
+            'business_id' => $tenantId,
+            'name' => 'Widget 2',
+            'stock_quantity' => 0,
+            'price' => 20,
+            'track_stock' => true,
+        ]);
+
+        $this->pushPo($token, $tenantId, $poId, 'sent')->assertOk();
+
+        // 1. PO item arrives first with received_qty: 0
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'purchase_order_items',
+                    'uuid' => $poItemId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'purchase_order_id' => $poId,
+                        'product_id' => $productId,
+                        'product_name' => 'Widget 2',
+                        'ordered_qty' => 50,
+                        'received_qty' => 0,
+                        'unit_cost' => 10,
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ])->assertOk();
+
+        // 2. Stock movement arrives later with quantity_change: 50
+        $movementId = (string) Str::uuid();
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [
+                    [
+                        'table' => 'stock_movements',
+                        'uuid' => $movementId,
+                        'operation' => 'upsert',
+                        'payload' => [
+                            'business_id' => $tenantId,
+                            'product_id' => $productId,
+                            'type' => 'receive',
+                            'quantity_change' => 50,
+                            'reference_id' => $poId,
+                            'unit_cost' => 10,
+                        ],
+                        'updated_at' => now()->toIso8601String(),
+                    ],
+                ],
+            ])->assertOk();
+
+        // Assert PO item updated from movement
+        $this->assertDatabaseHas('purchase_order_items', [
+            'id' => $poItemId,
+            'received_qty' => 50,
+        ]);
+        $this->assertDatabaseHas('purchase_orders', [
+            'id' => $poId,
+            'total_received' => 500,
+            'status' => 'received',
+        ]);
+    }
 }
+
+

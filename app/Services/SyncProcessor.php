@@ -314,6 +314,24 @@ class SyncProcessor
         'customer_reconciliation_items' => [CustomerReconciliationItem::class, 'customer_reconciliation_id'],
     ];
 
+    // Tables in TENANT_SCOPED_MODELS above (they carry their own business_id,
+    // so they're guarded there, not via CHILD_SCOPED_MODELS) that ALSO carry a
+    // required FK to another synced table's row: table => [FK column, parent
+    // model]. TENANT_SCOPED_MODELS' branch below returns before ever reaching
+    // CHILD_SCOPED_MODELS' resolveParentOwner() check, so without this a
+    // device pushing the child before its parent has landed (e.g. two devices
+    // each auto-provisioning a rule set + its rules offline, in different
+    // orders) hits a raw DB foreign-key violation instead of the graceful
+    // MissingParentRecordException deferral every CHILD_SCOPED_MODELS table
+    // gets automatically. See assertOwnership()'s TENANT_SCOPED_MODELS branch.
+    private const TENANT_SCOPED_PARENT_CHECKS = [
+        'approval_rules' => ['rule_set_id', ApprovalRuleSet::class],
+        'approval_group_members' => ['group_id', ApprovalGroup::class],
+        'approval_request_stage_decisions' => ['approval_request_id', ApprovalRequest::class],
+        'supplier_banks' => ['supplier_id', Supplier::class],
+        'salary_payments' => ['employee_id', Employee::class],
+    ];
+
     // Deliberately unguarded, and why:
     //  - currencies: shared reference data, keyed by currency code, not owned by any one business.
     //  - role_permissions: updateOrCreate() is keyed on (business_id, role) together, so a mismatched
@@ -388,6 +406,8 @@ class SyncProcessor
                 throw new \RuntimeException("{$table}: record belongs to a different business.");
             }
 
+            $this->assertTenantScopedParentExists($table, $payload, $businessId);
+
             return;
         }
 
@@ -429,6 +449,37 @@ class SyncProcessor
             if ((string) $targetOwner !== (string) $businessId) {
                 throw new \RuntimeException("{$table}: referenced parent does not belong to this business.");
             }
+        }
+    }
+
+    /**
+     * TENANT_SCOPED_PARENT_CHECKS' half of the CHILD_SCOPED_MODELS logic
+     * just above (steps 1/2 don't apply here — a tenant-scoped table's own
+     * business_id already governs re-parenting/hijacking, checked by the
+     * caller before this runs). This only needs the "has the referenced
+     * parent landed yet, and does it belong to this business" half.
+     */
+    protected function assertTenantScopedParentExists(string $table, array $payload, ?string $businessId): void
+    {
+        [$fkColumn, $parentModel] = self::TENANT_SCOPED_PARENT_CHECKS[$table] ?? [null, null];
+        if ($fkColumn === null) {
+            return;
+        }
+
+        $parentId = $payload[$fkColumn] ?? null;
+        if (! $parentId) {
+            return;
+        }
+
+        $parentBusinessId = $parentModel::where('id', $parentId)->value('business_id');
+        if ($parentBusinessId === null) {
+            // Same distinction as resolveParentOwner()'s callers: this is a
+            // genuine out-of-order push (the parent hasn't synced yet), not
+            // a rejection — SyncController::push() defers it automatically.
+            throw new MissingParentRecordException($table);
+        }
+        if ((string) $parentBusinessId !== (string) $businessId) {
+            throw new \RuntimeException("{$table}: referenced parent does not belong to this business.");
         }
     }
 
@@ -1624,6 +1675,13 @@ class SyncProcessor
                     $this->recomputeProductStock($payload['product_id']);
                 }
 
+                // If this is a 'receive' movement referencing a PurchaseOrder,
+                // recompute the PO item's received_qty from the stock_movements ledger
+                // so concurrent receipts from multiple devices sum correctly.
+                if (($movement->type ?? null) === 'receive' && ! empty($movement->reference_id) && ! empty($movement->product_id)) {
+                    $this->recomputePurchaseOrderItemReceivedQty($movement->reference_id, $movement->product_id);
+                }
+
                 // Purchasing & Cash Vault Blueprint, part A — a 'receive'
                 // movement that references a real PurchaseOrder (a known
                 // supplier) gets a GRV and a GL posting; walk-in receiving
@@ -2356,21 +2414,41 @@ class SyncProcessor
                 break;
 
             case 'purchase_order_items':
+                $poId = $payload['purchase_order_id'] ?? null;
+                $productId = $payload['product_id'] ?? null;
+                $receivedQty = (float) ($payload['received_qty'] ?? 0);
+
+                if (! empty($poId) && ! empty($productId)) {
+                    $hasMovements = DB::table('stock_movements')
+                        ->where('reference_id', $poId)
+                        ->where('product_id', $productId)
+                        ->where('type', 'receive')
+                        ->exists();
+
+                    if ($hasMovements) {
+                        $receivedQty = (float) DB::table('stock_movements')
+                            ->where('reference_id', $poId)
+                            ->where('product_id', $productId)
+                            ->where('type', 'receive')
+                            ->sum('quantity_change');
+                    }
+                }
+
                 PurchaseOrderItem::updateOrCreate(
                     ['id' => $uuid],
                     [
-                        'purchase_order_id' => $payload['purchase_order_id'] ?? null,
-                        'product_id' => $payload['product_id'] ?? null,
+                        'purchase_order_id' => $poId,
+                        'product_id' => $productId,
                         'product_name' => $payload['product_name'] ?? '',
                         'ordered_qty' => $payload['ordered_qty'] ?? 0,
-                        'received_qty' => $payload['received_qty'] ?? 0,
+                        'received_qty' => $receivedQty,
                         'unit_cost' => $payload['unit_cost'] ?? 0,
                         'received_unit_cost' => $payload['received_unit_cost'] ?? null,
                     ]
                 );
                 // Recompute the parent PO totals from all its items.
-                if (! empty($payload['purchase_order_id'])) {
-                    $this->recomputePurchaseOrderTotals($payload['purchase_order_id']);
+                if (! empty($poId)) {
+                    $this->recomputePurchaseOrderTotals($poId);
                 }
                 break;
 
@@ -2770,6 +2848,14 @@ class SyncProcessor
                 break;
 
             case 'employees':
+                // Employees hold sensitive payroll rates (pay_type, salary_amount)
+                // and banking/personal details. Same class of fraud vector as
+                // 'salary_payments': untrusted push without business_owner or
+                // manager privileges could silently inflate payroll inputs.
+                if (! $trusted && ! ($actingUser?->hasRole(['business_owner', 'manager']) ?? false)) {
+                    throw new \RuntimeException('employees: creating or modifying employee records requires owner or manager access.');
+                }
+
                 Employee::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -3934,6 +4020,39 @@ class SyncProcessor
     }
 
     /**
+     * Recompute a PurchaseOrderItem's received_qty from the stock_movements ledger.
+     * Same pattern as recomputeProductStock() and recomputeInvoiceAmountPaid():
+     * never trust a device's locally-computed overwrite when an authoritative
+     * ledger exists. Multiple devices receiving 50/100 units offline both compute
+     * off a stale local base and push received_qty: 50. Deriving from the
+     * stock_movements ledger ensures the server sums them to 100.
+     */
+    protected function recomputePurchaseOrderItemReceivedQty(string $poId, string $productId): void
+    {
+        $hasMovements = DB::table('stock_movements')
+            ->where('reference_id', $poId)
+            ->where('product_id', $productId)
+            ->where('type', 'receive')
+            ->exists();
+
+        if (! $hasMovements) {
+            return;
+        }
+
+        $computedReceived = (float) DB::table('stock_movements')
+            ->where('reference_id', $poId)
+            ->where('product_id', $productId)
+            ->where('type', 'receive')
+            ->sum('quantity_change');
+
+        PurchaseOrderItem::where('purchase_order_id', $poId)
+            ->where('product_id', $productId)
+            ->update(['received_qty' => $computedReceived]);
+
+        $this->recomputePurchaseOrderTotals($poId);
+    }
+
+    /**
      * Recompute purchase_orders.total_ordered and total_received from their line items.
      * Called after every purchase_order_items upsert so concurrent receiving from
      * multiple devices sums correctly instead of last-write-winning.
@@ -3952,10 +4071,24 @@ class SyncProcessor
             return $i->received_qty * $cost;
         });
 
-        PurchaseOrder::where('id', $poId)->update([
-            'total_ordered' => $totalOrdered,
-            'total_received' => $totalReceived,
-        ]);
+        $po = PurchaseOrder::find($poId);
+        if ($po) {
+            $updates = [
+                'total_ordered' => $totalOrdered,
+                'total_received' => $totalReceived,
+            ];
+
+            if (in_array($po->status, ['sent', 'partial'], true)) {
+                $allReceived = $items->every(fn ($i) => $i->ordered_qty > 0 && $i->received_qty >= $i->ordered_qty);
+                if ($allReceived) {
+                    $updates['status'] = 'received';
+                } elseif ($totalReceived > 0) {
+                    $updates['status'] = 'partial';
+                }
+            }
+
+            $po->update($updates);
+        }
     }
 
     /**
@@ -4410,6 +4543,9 @@ class SyncProcessor
             if (in_array($table, $softDeleteIsActive)) {
                 $modelMap[$table]::where('id', $uuid)->update(['is_active' => false]);
             } elseif ($table === 'employees') {
+                if (! $trusted && ! ($actingUser?->hasRole(['business_owner', 'manager']) ?? false)) {
+                    throw new \RuntimeException('employees: deactivating an employee requires owner or manager access.');
+                }
                 $modelMap[$table]::where('id', $uuid)->update(['status' => 'inactive']);
             } else {
                 if (! $trusted && in_array($table, self::UNTRUSTED_HARD_DELETE_BLOCKED, true)) {

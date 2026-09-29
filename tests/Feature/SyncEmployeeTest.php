@@ -174,4 +174,75 @@ class SyncEmployeeTest extends TestCase
         $this->assertEquals('monthly', $employee->pay_type);
         $this->assertEquals('active', $employee->status);
     }
+
+    public function test_untrusted_push_without_manager_or_owner_role_is_rejected(): void
+    {
+        $id = (string) \Illuminate\Support\Str::uuid();
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('employees: creating or modifying employee records requires owner or manager access.');
+
+        $this->processor->process(
+            'employees',
+            $id,
+            'upsert',
+            [
+                'business_id' => 'biz-001',
+                'name' => 'Fraud Employee',
+                'salary_amount' => 100000,
+            ],
+            trusted: false,
+            actingUser: null,
+        );
+    }
+
+    public function test_untrusted_push_with_manager_role_succeeds(): void
+    {
+        \Spatie\Permission\Models\Role::firstOrCreate(['name' => 'manager', 'guard_name' => 'web']);
+        $user = \App\Models\User::factory()->create();
+        $user->assignRole('manager');
+
+        $id = (string) \Illuminate\Support\Str::uuid();
+        $this->processor->process(
+            'employees',
+            $id,
+            'upsert',
+            [
+                'business_id' => 'biz-001',
+                'name' => 'Legit Employee',
+                'salary_amount' => 500,
+            ],
+            trusted: false,
+            actingUser: $user,
+        );
+
+        $this->assertDatabaseHas('employees', [
+            'id' => $id,
+            'name' => 'Legit Employee',
+            'salary_amount' => 500,
+        ]);
+    }
+
+    public function test_untrusted_delete_without_role_is_rejected(): void
+    {
+        $id = (string) \Illuminate\Support\Str::uuid();
+        Employee::create([
+            'id' => $id,
+            'business_id' => 'biz-001',
+            'name' => 'Existing Employee',
+            'salary_amount' => 100,
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('employees: deactivating an employee requires owner or manager access.');
+
+        $this->processor->process(
+            'employees',
+            $id,
+            'delete',
+            ['business_id' => 'biz-001'],
+            trusted: false,
+            actingUser: null,
+        );
+    }
 }
+

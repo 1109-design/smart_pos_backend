@@ -64,6 +64,18 @@ class SyncController extends Controller
             $recordsToProcess = [];
 
             foreach ($groupRecords as $record) {
+                // Rewrite any FK this record carries toward a parent-table
+                // UUID that a prior duplicate resolution (this same push, or
+                // an earlier one — see recordConflict()'s persisted
+                // 'accept_server_duplicate' rows) already discarded in favor
+                // of a kept winner row. Must run before anything else touches
+                // the payload, so every downstream check (ownership, version
+                // conflict, processing) sees the live id, not a dead one.
+                $record['payload'] = $this->remapDuplicateParentReferences(
+                    $record['table'],
+                    $record['payload'] ?? []
+                );
+
                 // Normalize insert/update to upsert — the processor treats them identically
                 if (in_array($record['operation'], ['insert', 'update'])) {
                     $record['operation'] = 'upsert';
@@ -296,18 +308,33 @@ class SyncController extends Controller
                 // its dependency lands (see resolvePendingRecords()), without
                 // requiring the client to notice the failure and retry.
                 foreach ($recordsToProcess as $item) {
-                    $pending = PendingSyncRecord::create([
-                        'business_id' => $device?->tenant_id,
-                        'device_id' => $device?->id,
-                        'acting_user_id' => $actingUser?->id,
-                        'table_name' => $item['record']['table'],
-                        'record_uuid' => $item['record']['uuid'],
-                        'operation' => $item['record']['operation'],
-                        'payload' => $item['record']['payload'] ?? [],
-                        'source_updated_at' => $item['incomingUpdatedAt'],
-                        'last_error' => $e->getMessage(),
-                        'last_attempt_at' => now(),
-                    ]);
+                    $pending = PendingSyncRecord::firstOrCreate(
+                        [
+                            'business_id' => $device?->tenant_id,
+                            'table_name' => $item['record']['table'],
+                            'record_uuid' => $item['record']['uuid'],
+                        ],
+                        [
+                            'device_id' => $device?->id,
+                            'acting_user_id' => $actingUser?->id,
+                            'operation' => $item['record']['operation'],
+                            'payload' => $item['record']['payload'] ?? [],
+                            'source_updated_at' => $item['incomingUpdatedAt'],
+                            'last_error' => $e->getMessage(),
+                            'last_attempt_at' => now(),
+                        ]
+                    );
+
+                    if (! $pending->wasRecentlyCreated) {
+                        $pending->update([
+                            'device_id' => $device?->id ?? $pending->device_id,
+                            'acting_user_id' => $actingUser?->id ?? $pending->acting_user_id,
+                            'payload' => $item['record']['payload'] ?? $pending->payload,
+                            'source_updated_at' => $item['incomingUpdatedAt'] ?? $pending->source_updated_at,
+                            'last_error' => $e->getMessage(),
+                            'last_attempt_at' => now(),
+                        ]);
+                    }
                     $deferred[] = [
                         'id' => $pending->id,
                         'table' => $item['record']['table'],
@@ -917,6 +944,29 @@ class SyncController extends Controller
      */
     private const DUPLICATE_AUTO_RESOLVE_TABLES = [
         'units_of_measure' => [],
+        // Note: account_role_mappings was audited as a candidate for this
+        // list (the Flutter client mints a fresh uuid on a local-lookup
+        // miss, the same shape as the tables below) but verified NOT to
+        // need it — SyncProcessor's 'account_role_mappings' case already
+        // upserts keyed on (business_id, role), not id, so a colliding push
+        // updates the existing row in place (gated by its own owner-only
+        // check) and can never raise a raw 1062 duplicate to begin with.
+        // approval_rule_sets: the till only ever auto-provisions a rule
+        // set's own default RULES (approval_rules.rule_set_id) offline
+        // before either has synced — verified live, that's the only FK.
+        // remapDuplicateParentReferences() below rewrites any not-yet-
+        // processed approval_rules push in this same (or a later) request
+        // from the discarded loser id to the kept winner id, so those
+        // children don't end up permanently deferred behind a parent that
+        // was deliberately never created.
+        'approval_rule_sets' => ['approval_rules.rule_set_id'],
+        // tills: every till list screen auto-creates "Till 1" for a location
+        // with no tills yet, purely from the device's own local (possibly
+        // stale/empty) list — two devices onboarding around the same time
+        // can each mint one for the same location+register_number. Verified
+        // live: these three columns are the only app-level references to a
+        // till's id (no DB-level FK exists on any of them).
+        'tills' => ['till_cash_movements.till_id', 'till_location_audits.till_id', 'shifts.till_id'],
     ];
 
     /**
@@ -987,6 +1037,55 @@ class SyncController extends Controller
             'table' => $table,
             'uuid' => $record['uuid'] ?? '',
         ];
+    }
+
+    /**
+     * Companion to tryAutoResolveDuplicate(): every table in
+     * DUPLICATE_AUTO_RESOLVE_TABLES with a non-empty `referencedBy` list has
+     * children that hold its id as a foreign key. When Rule B discards a
+     * loser row in favor of the server's existing (winner) row, those
+     * children — if pushed with the loser's id, whether in this same
+     * request (a device syncing a parent + its children together) or a
+     * later one (the parent's duplicate was resolved on a previous push) —
+     * would otherwise reference an id that was deliberately never created,
+     * which (after the TENANT_SCOPED_PARENT_CHECKS fix in SyncProcessor)
+     * defers them into pending_sync_records forever instead of erroring
+     * loudly. This rewrites the FK to the winner's id before the child is
+     * ever processed, using the resolved conflict recordConflict() already
+     * persisted — no separate remap table needed, and it works across
+     * requests for free since SyncConflict rows survive the request.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    private function remapDuplicateParentReferences(string $table, array $payload): array
+    {
+        foreach (self::DUPLICATE_AUTO_RESOLVE_TABLES as $parentTable => $referencedBy) {
+            foreach ($referencedBy as $reference) {
+                [$refTable, $refColumn] = explode('.', $reference, 2) + [null, null];
+                if ($refTable !== $table || $refColumn === null) {
+                    continue;
+                }
+
+                $loserId = $payload[$refColumn] ?? null;
+                if (! $loserId) {
+                    continue;
+                }
+
+                $resolved = SyncConflict::where('table_name', $parentTable)
+                    ->where('record_uuid', $loserId)
+                    ->where('resolution_action', 'accept_server_duplicate')
+                    ->latest('resolved_at')
+                    ->first();
+                $winnerId = $resolved?->server_payload['id'] ?? null;
+
+                if ($winnerId !== null && (string) $winnerId !== (string) $loserId) {
+                    $payload[$refColumn] = $winnerId;
+                }
+            }
+        }
+
+        return $payload;
     }
 
     /**
