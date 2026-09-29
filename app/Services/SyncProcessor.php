@@ -116,6 +116,9 @@ use App\Models\Transaction;
 use App\Models\TransactionItem;
 use App\Models\TransactionTax;
 use App\Models\UnitOfMeasure;
+use App\Models\PendingCollection;
+use App\Models\PendingCollectionEvent;
+use App\Models\PendingCollectionUsedOtp;
 use App\Models\User;
 use App\Models\WarehouseBin;
 use App\Services\Accounting\AssetPostingService;
@@ -154,6 +157,12 @@ class SyncProcessor
         'sheet_loss_records',
         // Goods inspection at receiving — a permanent record of each check.
         'receipt_inspections',
+        // Pending Book: the tills never delete an entry (it's cancelled
+        // instead), its history is append-only, and a used OTP must stay
+        // used forever.
+        'pending_collections',
+        'pending_collection_events',
+        'pending_collection_used_otps',
         // GLS·03 — no delete UI exists for a bin; safer to leave an
         // orphaned one than strand a sheet_lots.warehouse_bin_id reference.
         'warehouse_bins',
@@ -199,6 +208,7 @@ class SyncProcessor
     // inert for push()/pull() and this explicit check is the real protection
     // there.
     private const TENANT_SCOPED_MODELS = [
+        'pending_collections' => PendingCollection::class,
         'locations' => Location::class,
         'categories' => Category::class,
         'tax_rates' => TaxRate::class,
@@ -300,6 +310,7 @@ class SyncProcessor
         'po_audit_logs' => [PoAuditLog::class, 'po_id'],
         'po_receipt_variances' => [PoReceiptVariance::class, 'purchase_order_id'],
         'receipt_inspections' => [ReceiptInspection::class, 'purchase_order_id'],
+        'pending_collection_events' => [PendingCollectionEvent::class, 'collection_id'],
         'quotation_items' => [QuotationItem::class, 'quotation_id'],
         'invoice_items' => [InvoiceItem::class, 'invoice_id'],
         'invoice_payments' => [InvoicePayment::class, 'invoice_id'],
@@ -557,6 +568,122 @@ class SyncProcessor
         }
     }
 
+    /**
+     * Pending Book entry from a till. The device bumps `version` on every
+     * change and sends the version its change was built on (`base_version`).
+     * A change is only accepted on top of the version the server holds —
+     * otherwise another till changed the entry first (e.g. both confirmed
+     * the same OTP while offline from each other), and this push is refused
+     * as a conflict for a manager to review; the losing till re-pulls the
+     * server's copy.
+     */
+    protected function upsertPendingCollection(string $uuid, array $payload): void
+    {
+        $existing = PendingCollection::lockForUpdate()->find($uuid);
+        $incomingVersion = (int) ($payload['version'] ?? 0);
+        $baseVersion = (int) ($payload['base_version'] ?? 0);
+        $status = $payload['status'] ?? 'pending';
+
+        if ($existing) {
+            if ($incomingVersion === (int) $existing->version) {
+                // Re-sent push of what the server already holds — fine.
+                // Same version number with different content is two tills
+                // each making "the next" change: the later one loses.
+                if ($existing->status === $status
+                    && (string) $existing->items_json === (string) ($payload['items_json'] ?? '')
+                    && (string) $existing->otp_code === (string) ($payload['otp_code'] ?? '')) {
+                    return;
+                }
+                throw new \RuntimeException(
+                    "pending_collections: entry {$uuid} was changed on another device at the same time (v{$incomingVersion})."
+                );
+            }
+            if ($baseVersion !== (int) $existing->version) {
+                throw new \RuntimeException(
+                    "pending_collections: entry {$uuid} changed on another device first (server v{$existing->version}, "
+                    ."this change was based on v{$baseVersion})."
+                );
+            }
+        }
+
+        if (! PendingCollection::isValidTransition($existing?->status, $status)) {
+            throw new \RuntimeException(
+                "pending_collections: invalid status change '".($existing?->status ?? 'new')."' -> '{$status}'."
+            );
+        }
+
+        PendingCollection::updateOrCreate(
+            ['id' => $uuid],
+            [
+                'business_id' => $payload['business_id'] ?? $existing?->business_id,
+                'transaction_id' => $payload['transaction_id'] ?? $existing?->transaction_id ?? '',
+                'location_id' => ($payload['location_id'] ?? null) ?: null,
+                'collector_name' => $payload['collector_name'] ?? '',
+                'collector_phone' => $payload['collector_phone'] ?? '',
+                'collector_id_number' => ($payload['collector_id_number'] ?? null) ?: null,
+                'vehicle_registration' => ($payload['vehicle_registration'] ?? null) ?: null,
+                'status' => $status,
+                'notes' => $payload['notes'] ?? null,
+                'items_json' => $payload['items_json'] ?? null,
+                'expected_collection_date' => $payload['expected_collection_date'] ?? null,
+                'reminder_days_before' => (int) ($payload['reminder_days_before'] ?? 1),
+                'reminder_sent' => (bool) ($payload['reminder_sent'] ?? false),
+                'otp_code' => ($payload['otp_code'] ?? null) ?: null,
+                'otp_sent_at' => $payload['otp_sent_at'] ?? null,
+                'otp_expires_at' => $payload['otp_expires_at'] ?? null,
+                'confirmed_by_user_id' => ($payload['confirmed_by_user_id'] ?? null) ?: null,
+                'collected_at' => $payload['collected_at'] ?? null,
+                'cancelled_by_user_id' => ($payload['cancelled_by_user_id'] ?? null) ?: null,
+                'cancellation_reason' => ($payload['cancellation_reason'] ?? null) ?: null,
+                'cancelled_at' => $payload['cancelled_at'] ?? null,
+                'sms_message_id' => ($payload['sms_message_id'] ?? null) ?: null,
+                'reversal_count' => (int) ($payload['reversal_count'] ?? 0),
+                'last_reversed_at' => $payload['last_reversed_at'] ?? null,
+                'version' => $incomingVersion,
+                'device_id' => $existing?->device_id ?? (($payload['device_id'] ?? null) ?: null),
+                'created_at' => $payload['created_at'] ?? $existing?->created_at ?? now(),
+                'updated_at' => $payload['updated_at'] ?? now(),
+            ]
+        );
+    }
+
+    /**
+     * An OTP issued by a till. A code is issued once per business, ever: the
+     * same code arriving again for the same entry is a harmless re-send; for
+     * a different entry it means two tills drew the same code while out of
+     * touch — refused, so a manager sees it.
+     */
+    protected function recordPendingUsedOtp(string $uuid, array $payload): void
+    {
+        $businessId = $payload['business_id'] ?? null;
+        $otp = (string) ($payload['otp'] ?? '');
+        if ($businessId === null || $otp === '') {
+            throw new \RuntimeException('pending_collection_used_otps: business_id and otp are required.');
+        }
+
+        $existing = PendingCollectionUsedOtp::where('business_id', $businessId)
+            ->where('otp', $otp)
+            ->lockForUpdate()
+            ->first();
+        if ($existing) {
+            if ($existing->collection_id !== ($payload['collection_id'] ?? null)) {
+                throw new \RuntimeException(
+                    "pending_collection_used_otps: code already issued for another entry ({$existing->collection_id})."
+                );
+            }
+
+            return;
+        }
+
+        PendingCollectionUsedOtp::create([
+            'id' => $uuid,
+            'business_id' => $businessId,
+            'otp' => $otp,
+            'collection_id' => $payload['collection_id'] ?? null,
+            'issued_at' => $payload['issued_at'] ?? now(),
+        ]);
+    }
+
     protected function resolveParentOwner(string $table, string $parentId): ?string
     {
         return match ($table) {
@@ -573,6 +700,7 @@ class SyncProcessor
             'transaction_items', 'transaction_taxes', 'payments' => Transaction::where('id', $parentId)->value('business_id'),
             'loyalty_transactions', 'credit_transactions' => Customer::where('id', $parentId)->value('business_id'),
             'purchase_order_items', 'po_audit_logs', 'po_receipt_variances', 'receipt_inspections' => PurchaseOrder::where('id', $parentId)->value('business_id'),
+            'pending_collection_events' => PendingCollection::where('id', $parentId)->value('business_id'),
             'stock_take_items' => StockTake::where('id', $parentId)->value('business_id'),
             'quotation_items' => Quotation::where('id', $parentId)->value('business_id'),
             'invoice_items', 'invoice_payments' => Invoice::where('id', $parentId)->value('business_id'),
@@ -2557,6 +2685,35 @@ class SyncProcessor
                         'rejection_reason' => $payload['rejection_reason'] ?? null,
                     ]
                 );
+                break;
+
+            case 'pending_collections':
+                $this->upsertPendingCollection($uuid, $payload);
+                break;
+
+            case 'pending_collection_events':
+                // Append-only: the first push wins (a reversal decision
+                // recorded on two devices shares one deterministic id).
+                PendingCollectionEvent::firstOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'collection_id' => $payload['collection_id'] ?? null,
+                        'business_id' => $payload['business_id'] ?? null,
+                        'event_type' => $payload['event_type'] ?? '',
+                        'from_status' => $payload['from_status'] ?? null,
+                        'to_status' => $payload['to_status'] ?? null,
+                        'actor_user_id' => $payload['actor_user_id'] ?? null,
+                        'approver_user_id' => $payload['approver_user_id'] ?? null,
+                        'approval_request_id' => $payload['approval_request_id'] ?? null,
+                        'reason' => $payload['reason'] ?? null,
+                        'data_json' => $payload['data_json'] ?? null,
+                        'created_at' => $payload['created_at'] ?? now(),
+                    ]
+                );
+                break;
+
+            case 'pending_collection_used_otps':
+                $this->recordPendingUsedOtp($uuid, $payload);
                 break;
 
             case 'receipt_inspections':
