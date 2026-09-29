@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Events\ProductPriceChanged;
+use App\Services\BarcodeRegistry;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -24,6 +25,17 @@ class Product extends Model
 
     protected static function booted(): void
     {
+        // Barcode uniqueness claim — see BarcodeRegistry. Only on an actual
+        // barcode change, so stock/price saves never touch the registry.
+        static::saved(function (Product $product): void {
+            if ($product->wasRecentlyCreated || $product->wasChanged(['barcode', 'business_id'])) {
+                app(BarcodeRegistry::class)->claim($product->business_id, $product->barcode, 'product', $product->id);
+            }
+        });
+        static::deleted(function (Product $product): void {
+            app(BarcodeRegistry::class)->release('product', $product->id);
+        });
+
         static::updated(function (Product $product): void {
             if (! $product->wasChanged(['price', 'min_price', 'discount_percent', 'is_active']) || ! $product->business_id) {
                 return;
@@ -61,6 +73,12 @@ class Product extends Model
     public function units(): HasMany
     {
         return $this->hasMany(ProductUnit::class);
+    }
+
+    /** Additional barcodes beyond the primary `barcode` column. */
+    public function barcodes(): HasMany
+    {
+        return $this->hasMany(ProductBarcode::class);
     }
 
     /** Quantity-break prices, always keyed in the product's base unit — see PricingService. */

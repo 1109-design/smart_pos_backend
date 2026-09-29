@@ -13,6 +13,7 @@ use App\Models\SyncCursor;
 use App\Models\SyncRecord;
 use App\Services\BackOfficeAuthorizer;
 use App\Services\LocationService;
+use App\Services\BarcodeRegistry;
 use App\Services\SyncProcessor;
 use App\Support\BackOfficePermission;
 use Illuminate\Http\RedirectResponse;
@@ -1203,7 +1204,12 @@ class ProductsController extends BackOfficeController
             'discount_percent' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'deposit_amount' => ['nullable', 'numeric', 'min:0'],
             'sku' => ['nullable', 'string', 'max:100'],
-            'barcode' => ['nullable', 'string', 'max:100'],
+            'barcode' => ['nullable', 'string', 'max:100', function (string $attribute, mixed $value, \Closure $fail) use ($existing): void {
+                $owner = app(BarcodeRegistry::class)->describeOwner($this->tenantId(), $value, $existing?->id);
+                if ($owner !== null) {
+                    $fail("This barcode is already used by {$owner}.");
+                }
+            }],
             'category_id' => ['nullable', 'string', 'exists:categories,id'],
             'unit' => ['nullable', 'string', 'max:30'],
             'track_stock' => ['boolean'],

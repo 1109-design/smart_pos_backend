@@ -1,0 +1,98 @@
+name,item_type,price,cost_price,sku,barcode,category,unit,track_stock,stock: Main Bar,stock: Small Bar,stock: Warehouse,low_stock_threshold
+Detroit,product,2.00,1.33,SKU-056,6.0098E+12,,piece,yes,30.00,0.00,24.00,5.00
+4th Steet,product,5.00,4.00,,6.0098E+12,,piece,yes,1.00,0.00,13.00,5.00
+Amarula,product,20.00,12.00,SKU-051,,,piece,yes,0.00,0.00,0.00,5.00
+Appletizer,product,1.50,1.20,SKU-060,,,piece,yes,0.00,0.00,0.00,5.00
+Ascot,product,0.05,0.04,SKU-041,,,piece,yes,185.00,0.00,4400.00,10.00
+Biscuits,product,0.50,0.38,SKU-074,,,piece,yes,0.00,0.00,0.00,5.00
+Black Label 375ml,product,1.00,0.66,SKU-008,,,piece,yes,68.00,0.00,1080.00,5.00
+Black Label 750ml,product,1.50,1.08,SKU-009,,,piece,yes,187.00,186.00,1836.00,20.00
+Black Label Can 330mls,product,1.00,0.66,SKU-010,,,piece,yes,0.00,0.00,0.00,5.00
+Blacklabel Dump,product,1.00,0.75,,,,piece,yes,0.00,0.00,0.00,5.00
+BohlingerQ,product,2.00,1.25,SKU-016,,,piece,yes,0.00,0.00,0.00,10.00
+Breeze,product,0.05,0.04,SKU-068,,,piece,yes,40.00,0.00,0.00,5.00
+Brutal,product,2.00,1.38,,,,piece,yes,9.00,14.00,86.00,5.00
+Burchells Gin,product,10.00,7.69,SKU-077,,,piece,yes,2.00,2.00,0.00,5.00
+Can Soft Drinks,product,1.00,0.77,SKU-034,,,piece,yes,0.00,0.00,0.00,5.00
+Cape Hope 200ml,product,1.00,0.83,SKU-036,,,piece,yes,33.00,8.00,144.00,5.00
+Cape Hope 750ml,product,5.00,4.00,SKU-032,,,piece,yes,0.00,1.00,43.00,5.00
+Cape to Rio,product,5.00,3.85,SKU-044,,,piece,yes,1.00,3.00,2.00,5.00
+Captain,product,1.00,0.50,SKU-062,,,piece,yes,7.00,10.00,120.00,5.00
+Castle Dump,product,1.00,0.77,SKU-061,,,piece,yes,2.00,10.00,24.00,5.00
+Castle Lager 375ml Pint,product,1.00,0.58,SKU-003,,,piece,yes,11.00,16.00,144.00,5.00
+Castle Lager 750ml,product,1.50,1.08,SKU-004,,,piece,yes,44.00,23.00,624.00,5.00
+Castle Lager Can 330mls,product,1.50,1.15,SKU-005,,,piece,yes,0.00,0.00,0.00,5.00
+Castle Lite 750ml (Qt),product,2.00,1.54,SKU-021,,,piece,yes,6.00,12.00,168.00,5.00
+Castle Lite Can 330mls,product,1.00,0.77,SKU-064,,,piece,yes,21.00,14.00,384.00,5.00
+Castle Lite Can 500mls,product,1.50,1.00,,,,piece,yes,39.00,0.00,336.00,5.00
+Castle Lite Dump,product,1.50,0.83,,,,piece,yes,2.00,12.00,426.00,5.00
+Castle Lite Pint,product,1.00,0.00,,,,piece,yes,0.00,0.00,0.00,5.00
+Chateau 750ml,product,6.00,4.62,SKU-030,,,piece,yes,2.00,3.00,3.00,5.00
+Cherikoff 750ml,product,5.00,4.30,SKU-055,,,piece,yes,2.00,,10.00,5.00
+Coca Cola 300ml,product,1.00,0.50,,1234567890,,piece,yes,0.00,0.00,0.00,5.00
+Corona,product,2.00,1.54,SKU-066,,,piece,yes,0.00,7.00,240.00,5.00
+Discovery 200ml,product,1.00,0.77,SKU-038,,,piece,yes,22.00,19.00,156.00,5.00
+Discovery 750ml,product,5.00,2.69,SKU-039,,,piece,yes,0.00,1.00,16.00,5.00
+Dragon,product,1.00,0.77,SKU-035,,,piece,yes,6.00,16.00,480.00,5.00
+Eagle Lager 750ml,product,1.00,0.77,SKU-020,,,piece,yes,11.00,0.00,204.00,5.00
+Eagle Pint,product,0.50,0.38,,,,piece,yes,24.00,0.00,336.00,5.00
+Everest,product,0.10,0.08,SKU-040,,,piece,yes,0.00,231.00,4600.00,20.00
+Fizzi 2L,product,0.50,1.15,SKU-071,,,piece,yes,9.00,2.00,24.00,5.00
+Fizzi 500ml,product,0.50,0.83,SKU-070,,,piece,yes,0.00,0.00,12.00,5.00
+Flame,product,0.03,0.00,,,,piece,yes,0.00,0.00,0.00,5.00
+Flying Fish,product,2.00,1.54,SKU-057,,,piece,yes,0.00,0.00,0.00,5.00
+Frimax,product,2.00,0.00,,, ,piece,yes,24.00,12.00,96.00,5.00
+Gilbert Gin,product,7.00,6.00,SKU-017,,,piece,yes,2.00,0.00,0.00,5.00
+Gold Blend 200ml,product,1.50,1.00,SKU-027,,,piece,yes,11.00,3.00,0.00,5.00
+Gold Blend 750ml,product,6.00,4.62,SKU-028,,,piece,yes,2.00,0.00,0.00,5.00
+Gordons,product,10.00,6.00,,,,piece,yes,2.00,0.00,14.00,5.00
+Heinken,product,2.00,1.38,,,,piece,yes,0.00,15.00,60.00,5.00
+Hunters / Redds,product,2.00,1.54,SKU-024,,,piece,yes,21.00,20.00,900.00,5.00
+Hunters Qt,product,3.00,2.31,SKU-065,,,piece,yes,0.00,3.00,12.00,5.00
+Kambucha,product,1.00,0.63,SKU-002,,,piece,yes,8.00,23.00,47.00,5.00
+Kingcurls,product,0.50,0.38,SKU-073,,,piece,yes,0.00,0.00,0.00,5.00
+Madison 20,product,0.10,0.08,SKU-037,,,piece,yes,13.00,149.00,3200.00,10.00
+Maheu,product,0.50,0.41,SKU-029,,,piece,yes,0.00,0.00,0.00,5.00
+Lighter ,product,0.50,0.38,SKU-042,,,piece,yes,0.00,32.00,0.00,10.00
+Mayfair,product,2.00,1.33,SKU-025,,,piece,yes,15.00,23.00,,5.00
+Mint,product,0.03,0.02,,,,piece,yes,0.00,0.00,0.00,5.00
+Minute Maid,product,1.00,0.66,,,,piece,yes,0.00,11.00,0.00,5.00
+Nikolia Vodka,product,7.00,3.96,SKU-054,,,piece,yes,1.00,2.00,1.00,5.00
+Number 9 200ml,product,2.00,0.52,SKU-048,,,piece,yes,0.00,0.00,0.00,5.00
+Number 9 750ml,product,6.00,4.62,SKU-046,,,piece,yes,0.00,0.00,0.00,5.00
+Nuts,product,1.00,0.77,SKU-050,,,piece,yes,0.00,0.00,0.00,5.00
+Pegasus,product,0.03,0.02,,,,piece,yes,40.00,200.00,400.00,5.00
+Pilsner 375ml (Pint),product,1.00,0.75,SKU-014,,,piece,yes,0.00,0.00,0.00,5.00
+Pilsner 750ml (Q),product,2.00,1.25,SKU-015,,,piece,yes,11.00,2.00,72.00,10.00
+Power,product,2.00,1.42,,,,piece,yes,0.00,0.00,0.00,5.00
+Pushkin,product,7.00,4.43,,,,piece,yes,0.00,2.00,2.00,5.00
+Red Bull,product,1.50,1.15,SKU-069,,,piece,yes,0.00,0.00,0.00,5.00
+Redlabel,product,25.00,17.00,,,,piece,yes,2.00,2.00,2.00,5.00
+Russian Bear 750ml,product,10.00,7.69,SKU-006,,,piece,yes,1.00,0.00,6.00,5.00
+Sable 750ml(Q),product,1.50,1.00,SKU-049,,,piece,yes,0.00,10.00,0.00,5.00
+Savannah,product,2.00,1.54,SKU-026,,,piece,yes,2.00,17.00,174.00,5.00
+Scud Chibuku,product,1.00,0.75,,,,piece,yes,43.00,237.00,1260.00,5.00
+Star Can,product,1.00,0.77,SKU-018,,,piece,yes,0.00,0.00,0.00,5.00
+Starbrandy,product,1.00,0.00,,,,piece,yes,3.00,24.00,72.00,5.00
+Stella,product,1.50,1.04,SKU-075,,,piece,yes,6.00,17.00,96.00,5.00
+Sting (Pepsi),product,0.50,0.38,SKU-052,,,piece,yes,61.00,26.00,904.00,10.00
+Storm,product,0.05,0.08,SKU-067,,,piece,yes,0.00,0.00,0.00,5.00
+Strettons,product,10.00,8.00,,,,piece,yes,2.00,2.00,19.00,5.00
+Strongbow,product,1.50,1.20,SKU-045,,,piece,yes,0.00,5.00,12.00,5.00
+Super Chibuku,product,1.00,0.77,SKU-001,,,piece,yes,43.00,237.00,1260.00,5.00
+Sweetlips,product,6.00,4.00,SKU-043,,,piece,yes,1.00,2.00,10.00,5.00
+Tonic Water,product,0.50,0.77,SKU-063,,,piece,yes,0.00,0.00,0.00,5.00
+Tshengu,product,0.50,0.38,SKU-019,,,piece,yes,11.00,123.00,3300.00,10.00
+Two Keys 200ml,product,1.50,1.15,SKU-031,,,piece,yes,24.00,29.00,24.00,5.00
+Two Keys 750ml,product,7.00,5.38,SKU-023,,,piece,yes,2.00,1.00,70.00,5.00
+Viceroy 200ml,product,2.50,1.92,SKU-059,,,piece,yes,4.00,7.00,24.00,5.00
+Viceroy 750ml,product,12.00,7.20,SKU-033,,,piece,yes,2.00,1.00,20.00,5.00
+Water,product,0.50,0.38,SKU-076,,,piece,yes,7.00,1.00,364.00,5.00
+Wellington 750ml,product,8.00,6.50,SKU-007,,,piece,yes,1.00,2.00,10.00,5.00
+Whitestone 750ml,product,7.00,5.38,SKU-022,,,piece,yes,2.00,2.00,18.00,5.00
+Windhoek,product,2.50,1.92,SKU-058,,,piece,yes,6.00,27.00,0.00,5.00
+Zambezi 375ml (Pint),product,1.00,0.77,SKU-011,,,piece,yes,74.00,30.00,1632.00,10.00
+Zambezi 750ml (Qt),product,2.00,1.54,SKU-012,,,piece,yes,40.00,24.00,576.00,5.00
+Zambezi C330,product,1.00,0.00,,,,piece,yes,18.00,13.00,1056.00,5.00
+Zambezi Can 500mls,product,1.50,1.00,,,,piece,yes,14.00,0.00,528.00,5.00
+Zapnax,product,0.50,0.38,SKU-072,,,piece,yes,0.00,0.00,0.00,5.00

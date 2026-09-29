@@ -61,13 +61,16 @@ use App\Models\MilestoneTask;
 use App\Models\Payment;
 use App\Models\PoAuditLog;
 use App\Models\PoReceiptVariance;
+use App\Models\ReceiptInspection;
 use App\Models\ProcurementBudget;
 use App\Models\Product;
 use App\Models\ProductContainerLink;
+use App\Models\ProductRequest;
 use App\Models\ProductPriceTier;
 use App\Models\ProductSellableLocation;
 use App\Models\ProductStock;
 use App\Models\ProductTaxRate;
+use App\Models\ProductBarcode;
 use App\Models\ProductUnit;
 use App\Models\ProductVariant;
 use App\Models\ProductVariantStock;
@@ -149,6 +152,8 @@ class SyncProcessor
         // is corrected by a reversing adjustment elsewhere, same convention
         // as general_ledger below.
         'sheet_loss_records',
+        // Goods inspection at receiving — a permanent record of each check.
+        'receipt_inspections',
         // GLS·03 — no delete UI exists for a bin; safer to leave an
         // orphaned one than strand a sheet_lots.warehouse_bin_id reference.
         'warehouse_bins',
@@ -221,6 +226,7 @@ class SyncProcessor
         'users' => User::class,
         'container_deposit_ledger' => ContainerDepositLedger::class,
         'change_owed_ledger' => ChangeOwedLedger::class,
+        'product_requests' => ProductRequest::class,
         'tills' => Till::class,
         'till_cash_movements' => TillCashMovement::class,
         'quotations' => Quotation::class,
@@ -293,11 +299,13 @@ class SyncProcessor
         'stock_take_items' => [StockTakeItem::class, 'stock_take_id'],
         'po_audit_logs' => [PoAuditLog::class, 'po_id'],
         'po_receipt_variances' => [PoReceiptVariance::class, 'purchase_order_id'],
+        'receipt_inspections' => [ReceiptInspection::class, 'purchase_order_id'],
         'quotation_items' => [QuotationItem::class, 'quotation_id'],
         'invoice_items' => [InvoiceItem::class, 'invoice_id'],
         'invoice_payments' => [InvoicePayment::class, 'invoice_id'],
         'credit_note_items' => [CreditNoteItem::class, 'credit_note_id'],
         'product_units' => [ProductUnit::class, 'product_id'],
+        'product_barcodes' => [ProductBarcode::class, 'product_id'],
         'product_price_tiers' => [ProductPriceTier::class, 'product_id'],
         'project_milestones' => [ProjectMilestone::class, 'project_id'],
         'milestone_tasks' => [MilestoneTask::class, 'milestone_id'],
@@ -353,6 +361,10 @@ class SyncProcessor
     {
         $this->assertOwnership($table, $uuid, $payload);
 
+        // Idempotent — SyncController already applies this before storing the
+        // SyncRecord; repeated here for every other caller.
+        ['operation' => $operation, 'payload' => $payload] = $this->resolveBarcodeConflict($table, $uuid, $operation, $payload);
+
         if ($operation === 'delete') {
             $this->handleDelete($table, $uuid, $trusted, $actingUser);
 
@@ -360,6 +372,68 @@ class SyncProcessor
         }
 
         $this->handleUpsert($table, $uuid, $payload, $trusted, $actingUser);
+    }
+
+    /**
+     * Barcodes are unique per business across products, product_barcodes and
+     * product_variants (see BarcodeRegistry). When an incoming upsert carries
+     * a barcode something else already owns, the server's current value for
+     * this row wins instead of rejecting the whole record — the rest of the
+     * row (price, stock, name...) still applies, and because the caller
+     * stores the *resolved* payload as the SyncRecord, every device
+     * (including the one that pushed it) pulls the corrected row. A new
+     * product_barcodes row with nothing to fall back on becomes a delete.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array{operation: string, payload: array<string, mixed>, conflict: ?string}
+     */
+    public function resolveBarcodeConflict(string $table, string $uuid, string $operation, array $payload): array
+    {
+        $unchanged = ['operation' => $operation, 'payload' => $payload, 'conflict' => null];
+        $type = BarcodeRegistry::OWNER_TYPES[$table] ?? null;
+        if ($type === null || $operation === 'delete' || ! array_key_exists('barcode', $payload)) {
+            return $unchanged;
+        }
+
+        $code = BarcodeRegistry::normalize($payload['barcode']);
+        $businessId = $table === 'products'
+            ? ($payload['business_id'] ?? null)
+            : Product::whereKey($payload['product_id'] ?? null)->value('business_id');
+        if ($code === null || $businessId === null) {
+            return $unchanged;
+        }
+
+        $registry = app(BarcodeRegistry::class);
+        $isMine = fn (?array $owner) => $owner !== null && $owner['type'] === $type && $owner['id'] === $uuid;
+
+        $owner = $registry->ownerOf($businessId, $code);
+        if ($owner === null || $isMine($owner)) {
+            $payload['barcode'] = $code;
+
+            return ['operation' => $operation, 'payload' => $payload, 'conflict' => null];
+        }
+
+        $modelClass = match ($table) {
+            'products' => Product::class,
+            'product_barcodes' => ProductBarcode::class,
+            'product_variants' => ProductVariant::class,
+        };
+        $current = $modelClass::whereKey($uuid)->value('barcode');
+        $keep = $current !== null && $isMine($registry->ownerOf($businessId, $current)) ? $current : null;
+
+        $taken = $registry->describeOwner($businessId, $code) ?? 'another item';
+        $conflict = "Barcode '{$code}' is already used by {$taken}; kept "
+            .($keep === null ? 'no barcode' : "'{$keep}'")." for this {$type}.";
+        Log::warning("SyncProcessor: {$table}/{$uuid}: {$conflict}");
+
+        if ($table === 'product_barcodes' && $keep === null) {
+            // business_id stays — assertOwnership() needs it for the delete.
+            return ['operation' => 'delete', 'payload' => ['business_id' => $payload['business_id'] ?? null], 'conflict' => $conflict];
+        }
+
+        $payload['barcode'] = $keep;
+
+        return ['operation' => $operation, 'payload' => $payload, 'conflict' => $conflict];
     }
 
     /**
@@ -486,7 +560,7 @@ class SyncProcessor
     protected function resolveParentOwner(string $table, string $parentId): ?string
     {
         return match ($table) {
-            'product_stock', 'product_variants', 'product_units', 'product_price_tiers' => Product::where('id', $parentId)->value('business_id'),
+            'product_stock', 'product_variants', 'product_units', 'product_price_tiers', 'product_barcodes' => Product::where('id', $parentId)->value('business_id'),
             'product_variant_stock' => Product::query()
                 ->join('product_variants', 'product_variants.product_id', '=', 'products.id')
                 ->where('product_variants.id', $parentId)
@@ -498,7 +572,7 @@ class SyncProcessor
             'product_container_links' => Product::where('id', $parentId)->value('business_id'),
             'transaction_items', 'transaction_taxes', 'payments' => Transaction::where('id', $parentId)->value('business_id'),
             'loyalty_transactions', 'credit_transactions' => Customer::where('id', $parentId)->value('business_id'),
-            'purchase_order_items', 'po_audit_logs', 'po_receipt_variances' => PurchaseOrder::where('id', $parentId)->value('business_id'),
+            'purchase_order_items', 'po_audit_logs', 'po_receipt_variances', 'receipt_inspections' => PurchaseOrder::where('id', $parentId)->value('business_id'),
             'stock_take_items' => StockTake::where('id', $parentId)->value('business_id'),
             'quotation_items' => Quotation::where('id', $parentId)->value('business_id'),
             'invoice_items', 'invoice_payments' => Invoice::where('id', $parentId)->value('business_id'),
@@ -1348,6 +1422,16 @@ class SyncProcessor
                         'unit_name' => $payload['unit_name'] ?? '',
                         'conversion_factor' => $payload['conversion_factor'] ?? 1,
                         'is_base_unit' => $payload['is_base_unit'] ?? false,
+                    ]
+                );
+                break;
+
+            case 'product_barcodes':
+                ProductBarcode::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'product_id' => $payload['product_id'] ?? null,
+                        'barcode' => $payload['barcode'] ?? '',
                     ]
                 );
                 break;
@@ -2475,6 +2559,29 @@ class SyncProcessor
                 );
                 break;
 
+            case 'receipt_inspections':
+                // Append-only: the first push wins, a re-sent record never
+                // rewrites the inspection that was recorded.
+                ReceiptInspection::firstOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'purchase_order_id' => $payload['purchase_order_id'] ?? null,
+                        'purchase_order_item_id' => $payload['purchase_order_item_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'product_name' => $payload['product_name'] ?? '',
+                        'delivered_qty' => $payload['delivered_qty'] ?? 0,
+                        'accepted_qty' => $payload['accepted_qty'] ?? 0,
+                        'rejected_qty' => $payload['rejected_qty'] ?? 0,
+                        'result' => $payload['result'] ?? 'passed',
+                        'notes' => $payload['notes'] ?? null,
+                        'inspected_by_user_id' => $payload['inspected_by_user_id'] ?? '',
+                        'inspected_by_name' => $payload['inspected_by_name'] ?? '',
+                        'inspected_at' => $payload['inspected_at'] ?? now(),
+                    ]
+                );
+                break;
+
             case 'coupons':
                 // Non-numeric fields: safe to overwrite.
                 // uses_count: take the MAX of what's on the server vs what's incoming
@@ -2685,6 +2792,22 @@ class SyncProcessor
                 );
 
                 app(ExpensePostingService::class)->postIfReady($expense);
+                break;
+
+            case 'product_requests':
+                ProductRequest::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'requested_by_user_id' => $payload['requested_by_user_id'] ?? null,
+                        'product_name' => $payload['product_name'] ?? '',
+                        'note' => $payload['note'] ?? null,
+                        'status' => $payload['status'] ?? 'open',
+                        'created_at' => $payload['created_at'] ?? now(),
+                        'deleted_at' => $payload['deleted_at'] ?? null,
+                    ]
+                );
                 break;
 
             case 'stock_takes':
@@ -4514,6 +4637,7 @@ class SyncProcessor
             'stock_takes' => StockTake::class,
             'employees' => Employee::class,
             'salary_payments' => SalaryPayment::class,
+            'product_requests' => ProductRequest::class,
             'tills' => Till::class,
             'quotations' => Quotation::class,
             'quotation_items' => QuotationItem::class,
@@ -4526,6 +4650,7 @@ class SyncProcessor
             'supplier_banks' => SupplierBank::class,
             'recurring_invoice_schedules' => RecurringInvoiceSchedule::class,
             'product_units' => ProductUnit::class,
+            'product_barcodes' => ProductBarcode::class,
             'product_price_tiers' => ProductPriceTier::class,
             'procurement_budgets' => ProcurementBudget::class,
             'milestone_tasks' => MilestoneTask::class,
@@ -4553,6 +4678,12 @@ class SyncProcessor
                 }
                 $modelMap[$table]::where('id', $uuid)->delete();
             }
+        }
+
+        // The query-builder delete above skips model events, so free the
+        // barcode claim explicitly (see BarcodeRegistry).
+        if ($table === 'product_barcodes') {
+            app(BarcodeRegistry::class)->release('product_barcode', $uuid);
         }
 
         // Special case: product_tax_rates composite key

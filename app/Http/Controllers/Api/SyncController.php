@@ -130,14 +130,20 @@ class SyncController extends Controller
                                     $enrichedMerge['business_id'] = $device->tenant_id;
                                 }
 
-                                $processor->process($record['table'], $record['uuid'], 'upsert', $enrichedMerge, trusted: false, actingUser: $actingUser);
+                                [$resolved, $enrichedMerge] = $this->resolveBarcodes(
+                                    $processor,
+                                    [...$record, 'operation' => 'upsert', 'payload' => $merged],
+                                    $enrichedMerge,
+                                );
+
+                                $processor->process($record['table'], $record['uuid'], $resolved['operation'], $enrichedMerge, trusted: false, actingUser: $actingUser);
 
                                 SyncRecord::create([
                                     'business_id' => $device?->tenant_id,
                                     'table_name' => $record['table'],
                                     'record_uuid' => $record['uuid'],
-                                    'operation' => 'upsert',
-                                    'payload' => $merged,
+                                    'operation' => $resolved['operation'],
+                                    'payload' => $resolved['payload'],
                                     'source_updated_at' => $incomingUpdatedAt,
                                     'synced_at' => now(),
                                     'device_id' => $device?->id,
@@ -270,6 +276,15 @@ class SyncController extends Controller
                         // omits one — closes that regardless of what the payload claims.
                         if ($device?->tenant_id) {
                             $enrichedPayload['business_id'] = $device->tenant_id;
+                        }
+
+                        [$record, $enrichedPayload, $barcodeConflict] = $this->resolveBarcodes($processor, $record, $enrichedPayload);
+                        if ($barcodeConflict !== null) {
+                            $this->recordConflict($device, $record, $barcodeConflict, 'barcode_conflict')->update([
+                                'status' => 'resolved',
+                                'resolution_action' => 'accept_server',
+                                'resolved_at' => now(),
+                            ]);
                         }
 
                         $processor->process(
@@ -448,10 +463,17 @@ class SyncController extends Controller
                     DB::transaction(function () use ($row, $processor, $actingUser) {
                         $enrichedPayload = array_merge(['business_id' => $row->business_id], $row->payload ?? []);
 
+                        [$resolved, $enrichedPayload] = $this->resolveBarcodes($processor, [
+                            'table' => $row->table_name,
+                            'uuid' => $row->record_uuid,
+                            'operation' => $row->operation,
+                            'payload' => $row->payload ?? [],
+                        ], $enrichedPayload);
+
                         $processor->process(
                             $row->table_name,
                             $row->record_uuid,
-                            $row->operation,
+                            $resolved['operation'],
                             $enrichedPayload,
                             trusted: false,
                             actingUser: $actingUser,
@@ -461,8 +483,8 @@ class SyncController extends Controller
                             'business_id' => $row->business_id,
                             'table_name' => $row->table_name,
                             'record_uuid' => $row->record_uuid,
-                            'operation' => $row->operation,
-                            'payload' => $row->payload ?? [],
+                            'operation' => $resolved['operation'],
+                            'payload' => $resolved['payload'],
                             'source_updated_at' => $row->source_updated_at ?? now(),
                             'synced_at' => now(),
                             'device_id' => $row->device_id,
@@ -857,14 +879,21 @@ class SyncController extends Controller
                     $enrichedPayload['business_id'] = $device->tenant_id;
                 }
 
-                $processor->process($conflict->table_name, $conflict->record_uuid, 'upsert', $enrichedPayload, trusted: false, actingUser: $actingUser);
+                [$resolved, $enrichedPayload] = $this->resolveBarcodes($processor, [
+                    'table' => $conflict->table_name,
+                    'uuid' => $conflict->record_uuid,
+                    'operation' => 'upsert',
+                    'payload' => $payload,
+                ], $enrichedPayload);
+
+                $processor->process($conflict->table_name, $conflict->record_uuid, $resolved['operation'], $enrichedPayload, trusted: false, actingUser: $actingUser);
 
                 SyncRecord::create([
                     'business_id' => $device?->tenant_id,
                     'table_name' => $conflict->table_name,
                     'record_uuid' => $conflict->record_uuid,
-                    'operation' => 'upsert',
-                    'payload' => $payload,
+                    'operation' => $resolved['operation'],
+                    'payload' => $resolved['payload'],
                     'source_updated_at' => isset($data['updated_at'])
                         ? Carbon::parse($data['updated_at'])
                         : now(),
@@ -882,14 +911,21 @@ class SyncController extends Controller
                     $enrichedPayload['business_id'] = $device->tenant_id;
                 }
 
-                $processor->process($conflict->table_name, $conflict->record_uuid, 'upsert', $enrichedPayload, trusted: false, actingUser: $actingUser);
+                [$resolved, $enrichedPayload] = $this->resolveBarcodes($processor, [
+                    'table' => $conflict->table_name,
+                    'uuid' => $conflict->record_uuid,
+                    'operation' => 'upsert',
+                    'payload' => $payload,
+                ], $enrichedPayload);
+
+                $processor->process($conflict->table_name, $conflict->record_uuid, $resolved['operation'], $enrichedPayload, trusted: false, actingUser: $actingUser);
 
                 SyncRecord::create([
                     'business_id' => $device?->tenant_id,
                     'table_name' => $conflict->table_name,
                     'record_uuid' => $conflict->record_uuid,
-                    'operation' => 'upsert',
-                    'payload' => $payload,
+                    'operation' => $resolved['operation'],
+                    'payload' => $resolved['payload'],
                     'source_updated_at' => isset($data['updated_at'])
                         ? Carbon::parse($data['updated_at'])
                         : now(),
@@ -1257,6 +1293,29 @@ class SyncController extends Controller
         }
 
         return array_values($groups);
+    }
+
+    /**
+     * Applies SyncProcessor::resolveBarcodeConflict() to a push record so the
+     * SyncRecord stored (and pulled by every device, the pusher included)
+     * carries the resolved barcode, not the conflicting one the device sent.
+     *
+     * @param  array{table: string, uuid: string, operation: string, payload?: array}  $record
+     * @param  array<string, mixed>  $enrichedPayload
+     * @return array{0: array, 1: array<string, mixed>, 2: ?string}
+     */
+    private function resolveBarcodes(SyncProcessor $processor, array $record, array $enrichedPayload): array
+    {
+        $resolved = $processor->resolveBarcodeConflict($record['table'], $record['uuid'], $record['operation'], $enrichedPayload);
+
+        $record['operation'] = $resolved['operation'];
+        if ($resolved['operation'] === 'delete') {
+            $record['payload'] = [];
+        } elseif (array_key_exists('barcode', $resolved['payload'])) {
+            $record['payload'] = [...($record['payload'] ?? []), 'barcode' => $resolved['payload']['barcode']];
+        }
+
+        return [$record, $resolved['payload'], $resolved['conflict']];
     }
 
     private function recordConflict(?Device $device, array $record, string $reason, string $type, ?array $serverPayload = null): SyncConflict
