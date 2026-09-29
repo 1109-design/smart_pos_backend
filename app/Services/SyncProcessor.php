@@ -87,6 +87,8 @@ use App\Models\RolePermission;
 use App\Models\SalaryPayment;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
+use App\Models\SalesReturn;
+use App\Models\SalesReturnItem;
 use App\Models\SheetCut;
 use App\Models\SheetLossRecord;
 use App\Models\SheetLot;
@@ -195,6 +197,9 @@ class SyncProcessor
         // an edit or delete — same reasoning as 'supplier_payments' itself.
         'supplier_payment_allocations',
         'supplier_credit_note_lines',
+        // A customer return, once approved on the till, is a financial fact
+        // — its money/stock already moved in transactions/stock_movements.
+        'sales_returns', 'sales_return_items',
         // AP module — a reconciliation session's own line items are a
         // frozen snapshot of what was found at that point in time, never
         // edited after the fact (matches 'credit_note_items' above).
@@ -286,6 +291,7 @@ class SyncProcessor
         'ar_promises_to_pay' => ArPromiseToPay::class,
         'ar_disputes' => ArDispute::class,
         'customer_reconciliations' => CustomerReconciliation::class,
+        'sales_returns' => SalesReturn::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -331,6 +337,7 @@ class SyncProcessor
         'delivery_note_items' => [DeliveryNoteItem::class, 'delivery_note_id'],
         'customer_debit_note_items' => [CustomerDebitNoteItem::class, 'customer_debit_note_id'],
         'customer_reconciliation_items' => [CustomerReconciliationItem::class, 'customer_reconciliation_id'],
+        'sales_return_items' => [SalesReturnItem::class, 'sales_return_id'],
     ];
 
     // Tables in TENANT_SCOPED_MODELS above (they carry their own business_id,
@@ -721,6 +728,7 @@ class SyncProcessor
             'delivery_note_items' => DeliveryNote::where('id', $parentId)->value('business_id'),
             'customer_debit_note_items' => CustomerDebitNote::where('id', $parentId)->value('business_id'),
             'customer_reconciliation_items' => CustomerReconciliation::where('id', $parentId)->value('business_id'),
+            'sales_return_items' => SalesReturn::where('id', $parentId)->value('business_id'),
             default => null,
         };
     }
@@ -2520,6 +2528,64 @@ class SyncProcessor
                         'explanation' => $payload['explanation'] ?? null,
                         'is_resolved' => $payload['is_resolved'] ?? false,
                         'resolution_action' => $payload['resolution_action'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'sales_returns':
+                SalesReturn::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'return_number' => $payload['return_number'] ?? '',
+                        'original_transaction_id' => $payload['original_transaction_id'] ?? null,
+                        'return_transaction_id' => $payload['return_transaction_id'] ?? null,
+                        'exchange_transaction_id' => $payload['exchange_transaction_id'] ?? null,
+                        'outcome' => $payload['outcome'] ?? 'refund',
+                        'returned_value' => $payload['returned_value'] ?? 0,
+                        'new_items_value' => $payload['new_items_value'] ?? 0,
+                        'net_amount' => $payload['net_amount'] ?? 0,
+                        'settlement_method' => $payload['settlement_method'] ?? null,
+                        'reason' => $payload['reason'] ?? '',
+                        'requested_by_user_id' => $payload['requested_by_user_id'] ?? null,
+                        'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
+                        'approval_request_id' => $payload['approval_request_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'sales_return_items':
+                SalesReturnItem::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'sales_return_id' => $payload['sales_return_id'] ?? null,
+                        'original_transaction_item_id' => $payload['original_transaction_item_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'product_name' => $payload['product_name'] ?? '',
+                        'quantity' => $payload['quantity'] ?? 0,
+                        'unit_value' => $payload['unit_value'] ?? 0,
+                        'tax_amount' => $payload['tax_amount'] ?? 0,
+                        'line_value' => $payload['line_value'] ?? 0,
+                        'condition' => $payload['condition'] ?? 'resellable',
+                    ]
+                );
+                break;
+
+            case 'sales_return_settings':
+                // business_id is this table's own primary key (see
+                // ap_tolerance_settings below), so a device can only ever
+                // touch its own row. The return period is the owner's call.
+                if (! $trusted && ! ($actingUser?->hasRole(['business_owner']) ?? false)) {
+                    throw new \RuntimeException('sales_return_settings: only the business owner can change the return period.');
+                }
+
+                DB::table('sales_return_settings')->updateOrInsert(
+                    ['business_id' => $uuid],
+                    [
+                        'return_window_days' => max(0, (int) ($payload['return_window_days'] ?? 0)),
+                        'updated_at' => now(),
                     ]
                 );
                 break;

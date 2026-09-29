@@ -164,6 +164,14 @@ class ChartOfAccountsSeeder
         ]);
     }
 
+    /**
+     * Holds the value of goods a customer hands back in an exchange for the
+     * instant between the return and the replacement sale — Cr on the
+     * return, Dr on the new sale, always netting to zero. See
+     * SalePostingService's 'exchange_credit' tender.
+     */
+    public const EXCHANGE_CLEARING = ['code' => '2045', 'name' => 'Exchange Clearing'];
+
     private const CHART = [
         [
             'name' => 'Assets', 'code' => 1000, 'is_debit_normal' => true, 'statement_type' => 'balance_sheet',
@@ -195,6 +203,7 @@ class ChartOfAccountsSeeder
                     ['code' => '2015', 'name' => 'Withholding Tax Payable'],
                     ['code' => '2020', 'name' => 'Deposits Held'],
                     ['code' => '2030', 'name' => 'Tax Payable'],
+                    self::EXCHANGE_CLEARING,
                 ]],
                 ['name' => 'Long-Term Liabilities', 'accounts' => [
                     ['code' => '2040', 'name' => 'Loans'],
