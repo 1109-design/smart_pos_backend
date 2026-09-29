@@ -1563,6 +1563,36 @@ class SyncProcessor
                     }
                 }
 
+                // 2026-09-29 sync audit finding C3: transfer_detail_screen.
+                // dart::_confirmReceive() is gated only by local button
+                // visibility (transfer.status == 'in_transit') — two staff
+                // devices at the destination, both offline, both still
+                // showing 'in_transit' locally, can each independently
+                // confirm receipt and push their own transfer_out/transfer_in
+                // pair (fresh, unrelated uuids) for the same transfer item,
+                // doubling real stock deducted/added for one physical
+                // transfer. stock_movements is the ledger of record (append-
+                // only, uuid-keyed insert), so a genuine retry of the SAME
+                // movement is already safe via updateOrCreate-by-id; this
+                // only rejects a SECOND, differently-uuid'd movement of the
+                // same transfer direction for the same product — a transfer
+                // item is received exactly once, so no legitimate flow ever
+                // produces two. Unconditional (not fenced by $trusted): even
+                // a server-authored write should never duplicate this.
+                // Mirrors the requisition_issue gate just above.
+                if (in_array($payload['type'] ?? null, ['transfer_out', 'transfer_in'], true)
+                    && ! empty($payload['reference_id']) && ! empty($payload['product_id'])) {
+                    $duplicateTransferMovement = StockMovement::where('reference_id', $payload['reference_id'])
+                        ->where('type', $payload['type'])
+                        ->where('product_id', $payload['product_id'])
+                        ->where('id', '!=', $uuid)
+                        ->exists();
+
+                    if ($duplicateTransferMovement) {
+                        throw new \RuntimeException("stock_movements: a {$payload['type']} movement already exists for this transfer — refusing to post a duplicate.");
+                    }
+                }
+
                 $movement = StockMovement::updateOrCreate(
                     ['id' => $uuid],
                     [
