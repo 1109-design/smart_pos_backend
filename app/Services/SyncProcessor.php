@@ -4195,14 +4195,24 @@ class SyncProcessor
         $cardSales = 0.0;
         $mobileSales = 0.0;
         $creditSales = 0.0;
-        // Payment-method breakdown deliberately scoped to `completed` only,
-        // same as the client — a refund's cash/card payout has no Payments
-        // row of its own, so widening this to refunded/partial_refund
-        // originals would count cash that's since left the till.
-        $payments = Payment::whereIn('transaction_id', $completed->pluck('id'))->get();
+        // Payment-method breakdown: the money that actually moved through
+        // the drawer — mirrors shift_close_provider.dart's drawerStatuses /
+        // drawerMovement(). Every sale that happened (even if later
+        // refunded) counts its legs as taken; a refund reversal row
+        // (negative total, not an exchange) records its payout legs as
+        // positive amounts, so they're flipped to money out; an exchange's
+        // single leg is already signed. Scoping this to `completed` alone
+        // dropped a partially refunded sale's kept cash and never subtracted
+        // a payout for a sale rung up in an earlier shift.
+        $drawerTransactions = $transactions
+            ->filter(fn (Transaction $t) => in_array($t->status, $originalSaleStatuses, true))
+            ->keyBy('id');
+        $payments = Payment::whereIn('transaction_id', $drawerTransactions->keys())->get();
         foreach ($payments as $payment) {
             $method = strtolower($payment->method);
-            $amount = (float) $payment->base_equivalent;
+            $paymentTransaction = $drawerTransactions[$payment->transaction_id];
+            $isRefundReversal = (float) $paymentTransaction->total < 0 && $paymentTransaction->exchange_of_transaction_id === null;
+            $amount = $isRefundReversal ? -abs((float) $payment->base_equivalent) : (float) $payment->base_equivalent;
             if (str_contains($method, 'cash')) {
                 $cashSales += $amount;
             } elseif (str_contains($method, 'card') || str_contains($method, 'swipe')) {

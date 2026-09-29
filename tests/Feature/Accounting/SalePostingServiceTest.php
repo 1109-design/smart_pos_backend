@@ -458,4 +458,32 @@ class SalePostingServiceTest extends TestCase
 
         $this->assertNull(JournalHeader::where('source_type', 'sale')->where('source_id', $tx->id)->first());
     }
+
+    /**
+     * The till writes a refund's payout legs as positive amounts on the
+     * negative-total reversal row; taken at face value they debited Cash
+     * and left the journal unbalanced as a stuck draft.
+     */
+    public function test_a_refund_with_positive_payout_legs_as_sent_by_the_till_still_credits_cash(): void
+    {
+        $businessId = $this->makeLiveBusiness();
+
+        $original = $this->makeSale($businessId, 100, 0, 100);
+        $this->addItem($original, 100);
+        $this->addPayment($original, 100);
+        $this->posting->postIfReady($original);
+
+        $refund = $this->makeSale($businessId, -40, 0, -40, status: 'refunded');
+        $this->addItem($refund, -40);
+        $this->addPayment($refund, 40);
+        $this->addStockMovement($refund, 'return', 1, 25);
+        $this->posting->postIfReady($refund);
+
+        $journal = JournalHeader::where('source_type', 'sale')->where('source_id', $refund->id)->first();
+        $this->assertSame('posted', $journal->status);
+        $this->assertSame(60.0, $this->account($businessId, '1000')->balance());
+        $this->assertSame(60.0, $this->account($businessId, '4000')->balance());
+        // The returned unit's cost goes back into stock.
+        $this->assertSame(25.0, $this->account($businessId, '1200')->balance());
+    }
 }

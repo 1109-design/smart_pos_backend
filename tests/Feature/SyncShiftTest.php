@@ -3,8 +3,10 @@
 namespace Tests\Feature;
 
 use App\Models\Device;
+use App\Models\Payment;
 use App\Models\Shift;
 use App\Models\Tenant;
+use App\Models\Transaction;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
@@ -162,5 +164,65 @@ class SyncShiftTest extends TestCase
         $this->assertEquals(-190, (float) $shift->variance);
         // opening_float itself was preserved from the original open push.
         $this->assertEquals(100, (float) $shift->opening_float);
+    }
+
+    /**
+     * A partially refunded sale's kept cash is still in the drawer, and the
+     * refund's payout (recorded by the till as a positive leg on the
+     * negative-total reversal row) left it — both must reach expected_cash,
+     * mirroring shift_close_provider.dart's drawerMovement().
+     */
+    public function test_a_partial_refund_keeps_the_kept_cash_and_subtracts_the_payout(): void
+    {
+        $tenantId = 'tenant-sync-shift-3';
+        $token = $this->actingDeviceToken($tenantId);
+        $cashierId = '99999999-9999-4999-9999-999999999999';
+        $shiftId = (string) Str::uuid();
+
+        $this->push($token, 'shifts', $shiftId, [
+            'business_id' => $tenantId,
+            'cashier_id' => $cashierId,
+            'opened_at' => now()->subHour()->toIso8601String(),
+            'status' => 'open',
+            'opening_float' => 0,
+        ])->assertOk();
+
+        $cashLeg = function (string $transactionId, float $amount): void {
+            Payment::create([
+                'id' => (string) Str::uuid(),
+                'transaction_id' => $transactionId,
+                'method' => 'cash',
+                'amount' => $amount,
+                'currency_code' => 'USD',
+                'base_equivalent' => $amount,
+            ]);
+        };
+        $transaction = fn (float $total, string $status, ?string $exchangeOf = null): string => Transaction::create([
+            'id' => $id = (string) Str::uuid(),
+            'business_id' => $tenantId,
+            'user_id' => $cashierId,
+            'subtotal' => $total,
+            'total' => $total,
+            'base_currency' => 'USD',
+            'status' => $status,
+            'exchange_of_transaction_id' => $exchangeOf,
+        ])->id;
+
+        // $100 cash sale, $20 of it refunded in cash.
+        $cashLeg($transaction(100, 'partial_refund'), 100);
+        $cashLeg($transaction(-20, 'refunded'), 20);
+        // An exchange that paid $5 back, written as a signed leg.
+        $cashLeg($transaction(-5, 'completed', (string) Str::uuid()), -5);
+
+        $this->push($token, 'shifts', $shiftId, [
+            'status' => 'closed',
+            'closed_at' => now()->addMinute()->toIso8601String(),
+            'counted_cash' => 75,
+        ])->assertOk();
+
+        $shift = Shift::find($shiftId);
+        $this->assertEquals(75, (float) $shift->cash_sales);
+        $this->assertEquals(75, (float) $shift->expected_cash);
+        $this->assertEquals(0, (float) $shift->variance);
     }
 }

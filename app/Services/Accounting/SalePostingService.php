@@ -201,6 +201,14 @@ class SalePostingService
             $roundingTotal = 0.0;
             $paymentLines = [];
 
+            // A refund is its own reversal row with a negative total, but the
+            // till records its payout legs as POSITIVE amounts (see
+            // sale_posting_service.dart's isReversal) — taken at face value
+            // they'd debit Cash for money that left the drawer and leave
+            // every refund journal unbalanced. Force them to money out. An
+            // exchange's single leg is already signed, so it's left alone.
+            $isRefundReversal = (float) $transaction->total < 0 && $transaction->exchange_of_transaction_id === null;
+
             foreach ($payments as $payment) {
                 $account = $this->resolvePaymentAccount($payment, $accounts);
                 $isReceivable = $account->control_type === 'receivable' && $transaction->customer_id;
@@ -212,7 +220,9 @@ class SalePostingService
                     'party_type' => $isReceivable ? 'customer' : null,
                     'party_id' => $isReceivable ? $transaction->customer_id : null,
                 ];
-                $paymentLines[$key]['amount'] += (float) $payment->base_equivalent;
+                $paymentLines[$key]['amount'] += $isRefundReversal
+                    ? -abs((float) $payment->base_equivalent)
+                    : (float) $payment->base_equivalent;
                 $roundingTotal += (float) ($payment->rounding_adjustment ?? 0);
             }
 
