@@ -2,8 +2,8 @@
 
 namespace Tests\Feature;
 
-use App\Models\Customer;
 use App\Models\Device;
+use App\Models\Quotation;
 use App\Models\SyncConflict;
 use App\Models\Tenant;
 use App\Models\User;
@@ -26,6 +26,15 @@ use Tests\TestCase;
  * 'edit_after_delete', status 'pending') instead of being applied — deletes
  * are Category C in the audit's conflict classification: always require
  * human review, never silently resurrected OR silently discarded.
+ *
+ * Uses `quotations` as the representative table (this mechanism lives
+ * entirely in SyncController::push(), ahead of SyncProcessor, so it applies
+ * identically regardless of table). Originally used `customers`, but a later
+ * sync audit (2026-09-28, finding C2) closed `customers` off from untrusted
+ * hard deletes entirely — no legitimate device flow ever deletes a customer
+ * record — so this generic mechanism test was moved to a table
+ * (`quotations`) that genuinely is device-deletable, per
+ * SyncQuotationInvoiceTest::test_quotation_status_transitions_and_deletion.
  */
 class SyncTombstonePrecedenceTest extends TestCase
 {
@@ -52,23 +61,39 @@ class SyncTombstonePrecedenceTest extends TestCase
         return $plain;
     }
 
-    public function test_a_later_clocked_edit_cannot_resurrect_a_customer_deleted_on_another_device(): void
+    /**
+     * @return array{0: string, 1: string, 2: string} [quotationId, customerId, createdByUserId]
+     */
+    private function makeQuotation(string $tenantId): array
+    {
+        $id = (string) Str::uuid();
+        $customerId = (string) Str::uuid();
+        $createdByUserId = (string) Str::uuid();
+        Quotation::create([
+            'id' => $id, 'business_id' => $tenantId, 'customer_id' => $customerId,
+            'quote_number' => 'QUO-'.substr($id, 0, 8), 'status' => 'draft',
+            'created_by_user_id' => $createdByUserId,
+        ]);
+
+        return [$id, $customerId, $createdByUserId];
+    }
+
+    public function test_a_later_clocked_edit_cannot_resurrect_a_quotation_deleted_on_another_device(): void
     {
         $tenantId = 'tenant-tombstone-1';
         $deviceA = $this->actingDeviceToken($tenantId, 'Till A');
         $deviceB = $this->actingDeviceToken($tenantId, 'Till B');
 
-        $customerId = (string) Str::uuid();
-        Customer::create(['id' => $customerId, 'business_id' => $tenantId, 'name' => 'Original Name', 'phone' => '0771234567']);
+        [$quoteId, $customerId, $createdByUserId] = $this->makeQuotation($tenantId);
 
-        // Device A deletes the customer — this actually happened FIRST in
+        // Device A deletes the quotation — this actually happened FIRST in
         // real time (an earlier server-received timestamp), even though its
         // own payload timestamp is deliberately earlier than B's below.
         $deleteResp = $this->withHeader('Authorization', 'Bearer '.$deviceA)
             ->postJson('/api/v1/sync/push', [
                 'records' => [[
-                    'table' => 'customers',
-                    'uuid' => $customerId,
+                    'table' => 'quotations',
+                    'uuid' => $quoteId,
                     'operation' => 'delete',
                     'payload' => ['business_id' => $tenantId],
                     'updated_at' => now()->subMinutes(5)->toIso8601String(),
@@ -76,19 +101,23 @@ class SyncTombstonePrecedenceTest extends TestCase
             ]);
         $deleteResp->assertOk();
         $this->assertCount(1, $deleteResp->json('accepted'));
-        $this->assertDatabaseMissing('customers', ['id' => $customerId]);
+        $this->assertDatabaseMissing('quotations', ['id' => $quoteId]);
 
         // Device B, offline this whole time with a clock running fast,
-        // pushes an edit to the SAME customer with a timestamp that looks
+        // pushes an edit to the SAME quotation with a timestamp that looks
         // newer than the delete — this is exactly the clock-skew scenario
         // the fix must not trust.
         $editResp = $this->withHeader('Authorization', 'Bearer '.$deviceB)
             ->postJson('/api/v1/sync/push', [
                 'records' => [[
-                    'table' => 'customers',
-                    'uuid' => $customerId,
+                    'table' => 'quotations',
+                    'uuid' => $quoteId,
                     'operation' => 'upsert',
-                    'payload' => ['business_id' => $tenantId, 'name' => 'Original Name', 'phone' => '0779999999'],
+                    'payload' => [
+                        'business_id' => $tenantId, 'customer_id' => $customerId,
+                        'created_by_user_id' => $createdByUserId,
+                        'quote_number' => 'QUO-EDITED', 'status' => 'accepted',
+                    ],
                     'updated_at' => now()->addMinutes(30)->toIso8601String(),
                 ]],
             ]);
@@ -98,18 +127,18 @@ class SyncTombstonePrecedenceTest extends TestCase
         $this->assertCount(1, $editResp->json('conflicts'), 'it must surface as a conflict requiring review, not succeed or silently vanish');
         $this->assertCount(0, $editResp->json('errors'));
 
-        // The customer must stay deleted — no resurrection.
-        $this->assertDatabaseMissing('customers', ['id' => $customerId]);
+        // The quotation must stay deleted — no resurrection.
+        $this->assertDatabaseMissing('quotations', ['id' => $quoteId]);
 
         $conflict = SyncConflict::where('business_id', $tenantId)
-            ->where('table_name', 'customers')
-            ->where('record_uuid', $customerId)
+            ->where('table_name', 'quotations')
+            ->where('record_uuid', $quoteId)
             ->first();
 
         $this->assertNotNull($conflict);
         $this->assertSame('edit_after_delete', $conflict->conflict_type);
         $this->assertSame('pending', $conflict->status);
-        $this->assertSame('0779999999', $conflict->local_payload['phone'] ?? null, 'the attempted edit must be preserved for review, not lost');
+        $this->assertSame('accepted', $conflict->local_payload['status'] ?? null, 'the attempted edit must be preserved for review, not lost');
     }
 
     public function test_a_second_delete_for_an_already_deleted_record_is_a_harmless_no_op(): void
@@ -117,14 +146,13 @@ class SyncTombstonePrecedenceTest extends TestCase
         $tenantId = 'tenant-tombstone-2';
         $token = $this->actingDeviceToken($tenantId);
 
-        $customerId = (string) Str::uuid();
-        Customer::create(['id' => $customerId, 'business_id' => $tenantId, 'name' => 'Double Delete Customer']);
+        [$quoteId] = $this->makeQuotation($tenantId);
 
         $push = fn () => $this->withHeader('Authorization', 'Bearer '.$token)
             ->postJson('/api/v1/sync/push', [
                 'records' => [[
-                    'table' => 'customers',
-                    'uuid' => $customerId,
+                    'table' => 'quotations',
+                    'uuid' => $quoteId,
                     'operation' => 'delete',
                     'payload' => ['business_id' => $tenantId],
                     'updated_at' => now()->toIso8601String(),
@@ -132,7 +160,7 @@ class SyncTombstonePrecedenceTest extends TestCase
             ]);
 
         $push()->assertOk();
-        $this->assertDatabaseMissing('customers', ['id' => $customerId]);
+        $this->assertDatabaseMissing('quotations', ['id' => $quoteId]);
 
         // A second delete for the same, already-deleted uuid (e.g. two
         // devices both deleted it offline) must not be treated as an
@@ -149,18 +177,21 @@ class SyncTombstonePrecedenceTest extends TestCase
         $tenantId = 'tenant-tombstone-3';
         $token = $this->actingDeviceToken($tenantId);
 
-        $customerId = (string) Str::uuid();
-        Customer::create(['id' => $customerId, 'business_id' => $tenantId, 'name' => 'Not Deleted Yet']);
+        [$quoteId, $customerId, $createdByUserId] = $this->makeQuotation($tenantId);
 
         // Regression guard: no prior delete exists for this uuid, so a plain
         // edit must go through exactly as before this fix.
         $resp = $this->withHeader('Authorization', 'Bearer '.$token)
             ->postJson('/api/v1/sync/push', [
                 'records' => [[
-                    'table' => 'customers',
-                    'uuid' => $customerId,
+                    'table' => 'quotations',
+                    'uuid' => $quoteId,
                     'operation' => 'upsert',
-                    'payload' => ['business_id' => $tenantId, 'name' => 'Renamed'],
+                    'payload' => [
+                        'business_id' => $tenantId, 'customer_id' => $customerId,
+                        'created_by_user_id' => $createdByUserId,
+                        'quote_number' => 'QUO-RENAMED', 'status' => 'sent',
+                    ],
                     'updated_at' => now()->toIso8601String(),
                 ]],
             ]);
@@ -168,6 +199,6 @@ class SyncTombstonePrecedenceTest extends TestCase
         $resp->assertOk();
         $this->assertCount(1, $resp->json('accepted'));
         $this->assertCount(0, $resp->json('conflicts'));
-        $this->assertDatabaseHas('customers', ['id' => $customerId, 'name' => 'Renamed']);
+        $this->assertDatabaseHas('quotations', ['id' => $quoteId, 'quote_number' => 'QUO-RENAMED']);
     }
 }

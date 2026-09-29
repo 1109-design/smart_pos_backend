@@ -130,6 +130,7 @@ use App\Services\Accounting\SupplierPaymentService;
 use App\Services\Zimra\ZimraSalesService;
 use App\Support\BackOfficePermission;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -335,7 +336,7 @@ class SyncProcessor
         $this->assertOwnership($table, $uuid, $payload);
 
         if ($operation === 'delete') {
-            $this->handleDelete($table, $uuid);
+            $this->handleDelete($table, $uuid, $trusted, $actingUser);
 
             return;
         }
@@ -519,6 +520,43 @@ class SyncProcessor
         if ($headerBusinessId !== null && $accountBusinessId !== null && (string) $headerBusinessId !== (string) $accountBusinessId) {
             throw new \RuntimeException("{$table}: referenced gl_account does not belong to this business.");
         }
+    }
+
+    /**
+     * 2026-09-28 sync audit finding C1: journal_header_id carries no DB-level
+     * foreign key (see the 2026_09_05_122740 migration — a plain indexed
+     * uuid column). general_ledger is TENANT_SCOPED_MODELS (its own
+     * business_id), not CHILD_SCOPED_MODELS, so unlike journal_lines it gets
+     * no automatic "parent doesn't exist yet" deferral from assertOwnership()
+     * — nothing stopped a GL entry from landing for a journal_header_id that
+     * doesn't exist at all. Since general_ledger is also its own independent
+     * push group (SyncController::groupPushRecords() only special-cases the
+     * sale 'tx:' group), this closes a real gap the journal_headers
+     * duplicate-rejection fix alongside this would otherwise have left open:
+     * a device's journal_headers push gets rejected as a duplicate, but its
+     * sibling general_ledger record for that same rejected header is
+     * processed independently and would otherwise still be written, orphaned.
+     */
+    protected function assertJournalHeaderExists(?string $journalHeaderId, string $table): void
+    {
+        if (! $journalHeaderId) {
+            return;
+        }
+
+        if (! JournalHeader::where('id', $journalHeaderId)->exists()) {
+            throw new \RuntimeException("{$table}: referenced journal_header_id does not exist.");
+        }
+    }
+
+    /**
+     * Mirrors JournalService::isUniqueConstraintViolation() exactly (kept as
+     * a separate copy rather than making that one public — the two classes'
+     * duplicate-handling shouldn't need to stay coupled beyond this shared
+     * portable SQLSTATE check).
+     */
+    private function isUniqueConstraintViolation(QueryException $e): bool
+    {
+        return $e->getCode() === '23000';
     }
 
     /**
@@ -3004,46 +3042,87 @@ class SyncProcessor
                     throw new \RuntimeException("journal_headers: posting a {$sourceType} journal requires the business owner role.");
                 }
 
-                // Soft guard against the exact double-post this feature's
-                // cutover flag is designed to prevent — a second header for
-                // a source that already has one is almost certainly a race
-                // or a bug, not a legitimate second journal. Logged, not
-                // rejected: a false positive here must never turn into a
-                // permanently stuck sync record for a device.
-                if ($businessId && $sourceType && $sourceId) {
-                    $duplicate = JournalHeader::where('business_id', $businessId)
-                        ->where('source_type', $sourceType)
-                        ->where('source_id', $sourceId)
-                        ->where('id', '!=', $uuid)
-                        ->exists();
+                // 2026-09-28 sync audit finding C1: this used to be a soft,
+                // log-only guard ("possible double-post, needs manual
+                // review") against exactly the double-post the client-side
+                // posting cutover is designed to prevent — most commonly,
+                // the server's own >1hr catch-up sweep (PostPending*.php)
+                // posts its own journal for a source before the originating
+                // device's own already-posted local journal (a different,
+                // client-generated uuid) finally reaches the server. Logging
+                // it and writing the second header through anyway silently
+                // doubled revenue/COGS/cash for that event — invisible to
+                // every other correctness check, since both sides of the
+                // duplicate entry still balance on their own.
+                //
+                // Fixed by finally wiring the sync-push path into the SAME
+                // idempotency_key mechanism (journal_headers_idempotency_
+                // key_unique, see the 2026-09-17 migration) JournalService::
+                // createDraft() already uses server-side for this exact
+                // class of race — it just never reached this path before,
+                // since this case writes JournalHeader directly and skips
+                // createDraft() entirely (the client has already "posted"
+                // its own copy; Laravel only mirrors it here). Deliberately
+                // scoped to the same source types createDraft()'s own
+                // callers opt an idempotency key in for today (sale,
+                // salary_payment, supplier_payment, credit_payment,
+                // invoice_payment, asset_acquisition, asset_disposal) — every
+                // one of them a "posts at most one journal ever per source"
+                // flow paired with a PostPending*.php sweep. Deliberately
+                // NOT applied to depreciation/GRV/expense/cash-vault-* etc.,
+                // which legitimately post multiple journals against the same
+                // source over time (see JournalPostingRaceIdempotencyTest::
+                // test_the_same_source_type_and_id_can_still_have_multiple_
+                // journals_when_not_opted_into_idempotency) — applying this
+                // blindly to every source type would have silently rejected
+                // real, distinct accounting entries instead of duplicates.
+                $singleJournalPerSourceTypes = [
+                    'sale', 'salary_payment', 'supplier_payment',
+                    'credit_payment', 'invoice_payment',
+                    'asset_acquisition', 'asset_disposal',
+                ];
+                $idempotencyKey = ($sourceType && $sourceId && in_array($sourceType, $singleJournalPerSourceTypes, true))
+                    ? "{$sourceType}:{$sourceId}"
+                    : null;
 
-                    if ($duplicate) {
-                        Log::warning("Accounting: client pushed journal_header {$uuid} for {$sourceType}:{$sourceId}, but another journal already exists for that source — possible double-post, needs manual review.");
+                try {
+                    JournalHeader::updateOrCreate(
+                        ['id' => $uuid],
+                        [
+                            'business_id' => $businessId,
+                            'journal_number' => $payload['journal_number'] ?? null,
+                            'trans_date' => $payload['trans_date'] ?? now()->toDateString(),
+                            'description' => $payload['description'] ?? null,
+                            'source_type' => $sourceType,
+                            'source_id' => $sourceId,
+                            'idempotency_key' => $idempotencyKey,
+                            'status' => $payload['status'] ?? 'posted',
+                            'posted_at' => $payload['posted_at'] ?? null,
+                            'posted_by_user_id' => $payload['posted_by_user_id'] ?? null,
+                            'reversed_by_journal_id' => $payload['reversed_by_journal_id'] ?? null,
+                            'reversed_at' => $payload['reversed_at'] ?? null,
+                            'reversed_by_user_id' => $payload['reversed_by_user_id'] ?? null,
+                            'reversal_of_journal_id' => $payload['reversal_of_journal_id'] ?? null,
+                            'location_id' => $payload['location_id'] ?? null,
+                        ]
+                    );
+                } catch (QueryException $e) {
+                    if ($idempotencyKey !== null && $this->isUniqueConstraintViolation($e)
+                        && JournalHeader::where('idempotency_key', $idempotencyKey)->where('id', '!=', $uuid)->exists()) {
+                        throw new \RuntimeException("journal_headers: a journal already exists for {$sourceType}:{$sourceId} — refusing to post a duplicate.");
                     }
+                    throw $e;
                 }
-
-                JournalHeader::updateOrCreate(
-                    ['id' => $uuid],
-                    [
-                        'business_id' => $businessId,
-                        'journal_number' => $payload['journal_number'] ?? null,
-                        'trans_date' => $payload['trans_date'] ?? now()->toDateString(),
-                        'description' => $payload['description'] ?? null,
-                        'source_type' => $sourceType,
-                        'source_id' => $sourceId,
-                        'status' => $payload['status'] ?? 'posted',
-                        'posted_at' => $payload['posted_at'] ?? null,
-                        'posted_by_user_id' => $payload['posted_by_user_id'] ?? null,
-                        'reversed_by_journal_id' => $payload['reversed_by_journal_id'] ?? null,
-                        'reversed_at' => $payload['reversed_at'] ?? null,
-                        'reversed_by_user_id' => $payload['reversed_by_user_id'] ?? null,
-                        'reversal_of_journal_id' => $payload['reversal_of_journal_id'] ?? null,
-                        'location_id' => $payload['location_id'] ?? null,
-                    ]
-                );
                 break;
 
             case 'journal_lines':
+                // No assertJournalHeaderExists() call here, unlike
+                // general_ledger below — journal_lines is in
+                // CHILD_SCOPED_MODELS (parented via journal_header_id), so
+                // assertOwnership() already defers a push whose parent
+                // doesn't exist yet (MissingParentRecordException) before
+                // handleUpsert() is ever reached; an explicit re-check here
+                // would be dead code.
                 $this->assertAccountOwnedByJournalBusiness($payload['journal_header_id'] ?? null, $payload['gl_account_id'] ?? null, 'journal_lines');
 
                 JournalLine::updateOrCreate(
@@ -3067,6 +3146,8 @@ class SyncProcessor
             case 'general_ledger':
                 $glBusinessId = $payload['business_id'] ?? null;
                 $glAccountId = $payload['gl_account_id'] ?? null;
+
+                $this->assertJournalHeaderExists($payload['journal_header_id'] ?? null, 'general_ledger');
 
                 if ($glBusinessId && $glAccountId) {
                     $accountOwner = GlAccount::where('id', $glAccountId)->value('business_id');
@@ -4206,7 +4287,31 @@ class SyncProcessor
         ])->save();
     }
 
-    protected function handleDelete(string $table, string $uuid): void
+    // Tables in $modelMap below with NO legitimate reason for an arbitrary
+    // device to ever hard-delete them — the underlying record is either a
+    // completed financial/legal event (a sale, a purchase, a payment, a
+    // ledger-adjacent status change) or has other rows that reference it,
+    // so erasing it destroys evidence and orphans children instead of
+    // correcting the books the way a void/reversal/credit-note does. An
+    // untrusted push targeting one of these is refused outright rather than
+    // gated behind a permission that would need inventing — confirmed (by
+    // grepping the Flutter app for every enqueueSyncRecord(..., 'delete',
+    // ...) call site, and by the existing test suite) that the real client
+    // never triggers this, so rejecting it breaks nothing real. Deliberately
+    // NOT a blanket "block everything not explicitly allowed": quotations,
+    // for one, has its own dedicated test proving device-driven deletion is
+    // intended, and most of $modelMap's remaining tables are low-risk
+    // reference/config data this fix isn't targeting. Mirrors the "the real
+    // client never triggers this" reasoning already used for handleUpsert()'s
+    // users/role_permissions/salary_payments gates.
+    private const UNTRUSTED_HARD_DELETE_BLOCKED = [
+        'transactions', 'purchase_orders', 'stock_transfers', 'stock_takes',
+        'customers', 'invoices', 'invoice_items', 'credit_notes', 'salary_payments',
+        'expenses', 'supplier_invoices', 'supplier_credit_notes',
+        'supplier_reconciliations', 'recurring_invoice_schedules',
+    ];
+
+    protected function handleDelete(string $table, string $uuid, bool $trusted = true, ?User $actingUser = null): void
     {
         if (in_array($table, self::IMMUTABLE)) {
             return;
@@ -4277,6 +4382,9 @@ class SyncProcessor
             } elseif ($table === 'employees') {
                 $modelMap[$table]::where('id', $uuid)->update(['status' => 'inactive']);
             } else {
+                if (! $trusted && in_array($table, self::UNTRUSTED_HARD_DELETE_BLOCKED, true)) {
+                    throw new \RuntimeException("{$table}: hard delete is not permitted from an untrusted device push.");
+                }
                 $modelMap[$table]::where('id', $uuid)->delete();
             }
         }
