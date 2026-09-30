@@ -27,6 +27,7 @@ class Business extends Model
         'footer_text',
         'metadata',
         'fiscalisation_enabled',
+        'fiscalise_by_default',
         'day_shift_start',
         'night_shift_start',
         'stock_reset_at',
@@ -43,6 +44,7 @@ class Business extends Model
         return [
             'metadata' => 'array',
             'fiscalisation_enabled' => 'boolean',
+            'fiscalise_by_default' => 'boolean',
             'stock_reset_at' => 'datetime',
             'catalogue_reset_at' => 'datetime',
             'workflow_settings' => 'array',

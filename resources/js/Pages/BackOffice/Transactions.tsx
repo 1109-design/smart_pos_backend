@@ -36,6 +36,7 @@ interface FiscalSummary {
     fiscalised: number;
     pending: number;
     failed: number;
+    excluded: number;
 }
 
 interface Props {
@@ -64,6 +65,9 @@ function FiscalBadge({ status }: { status: string | null }) {
     if (status === 'failed' || status === 'not_configured') {
         return <span className="inline-flex items-center rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-semibold text-red-600">{status === 'failed' ? 'Failed' : 'Not configured'}</span>;
     }
+    if (status === 'excluded') {
+        return <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-600">Excluded</span>;
+    }
     return <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-500">—</span>;
 }
 
@@ -72,6 +76,7 @@ const FISCAL_FILTERS = [
     { value: 'fiscalised', label: 'Fiscalised' },
     { value: 'pending', label: 'Pending' },
     { value: 'failed', label: 'Failed' },
+    { value: 'excluded', label: 'Excluded' },
     { value: 'none', label: 'Not fiscal' },
 ];
 
@@ -112,12 +117,13 @@ export default function BackOfficeTransactions({ transactions, fiscal_summary, c
             </div>
 
             {/* Fiscal summary cards */}
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 mb-6">
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-5 mb-6">
                 {[
                     { label: 'Total', value: fiscal_summary.total, tone: 'text-slate-900' },
                     { label: 'Fiscalised', value: fiscal_summary.fiscalised, tone: 'text-emerald-600' },
                     { label: 'Pending ZIMRA', value: fiscal_summary.pending, tone: 'text-amber-600' },
                     { label: 'Failed / Not configured', value: fiscal_summary.failed, tone: 'text-red-600' },
+                    { label: 'Excluded', value: fiscal_summary.excluded, tone: 'text-slate-600' },
                 ].map(({ label, value, tone }) => (
                     <div key={label} className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4">
                         <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{label}</p>

@@ -307,6 +307,60 @@ class SyncFiscalisationGateTest extends TestCase
         ]);
     }
 
+    public function test_sale_excluded_by_cashier_is_never_queued(): void
+    {
+        Queue::fake();
+        $tenantId = 'tenant-fiscal-excluded';
+        $token = $this->actingDeviceToken($tenantId);
+
+        Business::create([
+            'id' => $tenantId,
+            'name' => 'Excluded Sale Shop',
+            'fiscalisation_enabled' => true,
+            'tin' => '1234567890',
+        ]);
+
+        ZimraDevice::create([
+            'business_id' => $tenantId,
+            'tin' => '1234567890',
+            'device_id' => '90004',
+            'is_active' => true,
+            'status' => 'active',
+        ]);
+
+        $transactionId = (string) Str::uuid();
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'transactions',
+                    'uuid' => $transactionId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'user_id' => '99999999-9999-4999-9999-999999999999',
+                        'subtotal' => 10,
+                        'tax_total' => 0,
+                        'total' => 10,
+                        'base_currency' => 'USD',
+                        'status' => 'completed',
+                        'sale_number' => '202607-TEST-EXCLUDED',
+                        'fiscalisation_requested' => false,
+                        'updated_at' => now()->toIso8601String(),
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ])->assertOk();
+
+        $this->assertDatabaseCount('zimra_sales', 0);
+        Queue::assertNotPushed(ProcessZimraFiscalisationJob::class);
+
+        $this->assertDatabaseHas('transactions', [
+            'id' => $transactionId,
+            'fiscal_status' => 'excluded',
+            'fiscalisation_requested' => false,
+        ]);
+    }
+
     public function test_sale_with_no_location_falls_back_to_business_wide_device(): void
     {
         // Backward compatibility: a business that hasn't split its fiscal

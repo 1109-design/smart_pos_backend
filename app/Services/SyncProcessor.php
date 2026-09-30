@@ -61,16 +61,15 @@ use App\Models\MilestoneTask;
 use App\Models\Payment;
 use App\Models\PoAuditLog;
 use App\Models\PoReceiptVariance;
-use App\Models\ReceiptInspection;
 use App\Models\ProcurementBudget;
 use App\Models\Product;
+use App\Models\ProductBarcode;
 use App\Models\ProductContainerLink;
-use App\Models\ProductRequest;
 use App\Models\ProductPriceTier;
+use App\Models\ProductRequest;
 use App\Models\ProductSellableLocation;
 use App\Models\ProductStock;
 use App\Models\ProductTaxRate;
-use App\Models\ProductBarcode;
 use App\Models\ProductUnit;
 use App\Models\ProductVariant;
 use App\Models\ProductVariantStock;
@@ -80,6 +79,7 @@ use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
 use App\Models\Quotation;
 use App\Models\QuotationItem;
+use App\Models\ReceiptInspection;
 use App\Models\RecurringInvoiceSchedule;
 use App\Models\Requisition;
 use App\Models\RequisitionItem;
@@ -1557,6 +1557,7 @@ class SyncProcessor
                     'sale_number' => $payload['sale_number'] ?? null,
                     'notes' => $payload['notes'] ?? null,
                     'void_reason' => $payload['void_reason'] ?? null,
+                    'fiscalisation_requested' => $payload['fiscalisation_requested'] ?? true,
                 ];
                 $tx = Transaction::updateOrCreate(['id' => $uuid], $txData);
 
