@@ -47,6 +47,7 @@ use App\Models\CustomerWriteOff;
 use App\Models\DeliveryNote;
 use App\Models\DeliveryNoteItem;
 use App\Models\DocumentBrandingSetting;
+use App\Models\DocumentSignature;
 use App\Models\Employee;
 use App\Models\ExchangeRate;
 use App\Models\Expense;
@@ -165,6 +166,8 @@ class SyncProcessor
         'pending_collections',
         'pending_collection_events',
         'pending_collection_used_otps',
+        // On-screen document signatures are voided, never deleted.
+        'document_signatures',
         // GLS·03 — no delete UI exists for a bin; safer to leave an
         // orphaned one than strand a sheet_lots.warehouse_bin_id reference.
         'warehouse_bins',
@@ -292,6 +295,7 @@ class SyncProcessor
         'ar_disputes' => ArDispute::class,
         'customer_reconciliations' => CustomerReconciliation::class,
         'sales_returns' => SalesReturn::class,
+        'document_signatures' => DocumentSignature::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -875,6 +879,43 @@ class SyncProcessor
         if ($locationOwner === null || (string) $locationOwner !== (string) $businessId) {
             throw new \RuntimeException('product_sellable_locations: referenced location does not belong to this business.');
         }
+    }
+
+    /**
+     * A signature's ink, signer and document never change once captured —
+     * a re-sent or tampered push can only void it (and a void sticks).
+     */
+    protected function upsertDocumentSignature(string $uuid, array $payload): void
+    {
+        $existing = DocumentSignature::find($uuid);
+        if ($existing) {
+            if ($existing->voided_at === null && ! empty($payload['voided_at'])) {
+                $existing->update([
+                    'voided_at' => $payload['voided_at'],
+                    'voided_by_user_id' => $payload['voided_by_user_id'] ?? null,
+                ]);
+            }
+
+            return;
+        }
+
+        if (empty($payload['image_png'])) {
+            throw new \RuntimeException('document_signatures: image_png is required.');
+        }
+
+        DocumentSignature::create([
+            'id' => $uuid,
+            'business_id' => $payload['business_id'] ?? null,
+            'document_type' => $payload['document_type'] ?? '',
+            'document_id' => $payload['document_id'] ?? '',
+            'slot' => $payload['slot'] ?? '',
+            'signer_name' => $payload['signer_name'] ?? '',
+            'image_png' => $payload['image_png'],
+            'signed_by_user_id' => $payload['signed_by_user_id'] ?? null,
+            'signed_at' => $payload['signed_at'] ?? now(),
+            'voided_at' => $payload['voided_at'] ?? null,
+            'voided_by_user_id' => $payload['voided_by_user_id'] ?? null,
+        ]);
     }
 
     protected function handleUpsert(string $table, string $uuid, array $payload, bool $trusted = true, ?User $actingUser = null): void
@@ -2780,6 +2821,27 @@ class SyncProcessor
 
             case 'pending_collection_used_otps':
                 $this->recordPendingUsedOtp($uuid, $payload);
+                break;
+
+            case 'pending_book_settings':
+                // business_id is the primary key (see sales_return_settings),
+                // so a device only ever touches its own row. Whether a
+                // customer must sign for Pending Book goods is the owner's call.
+                if (! $trusted && ! ($actingUser?->hasRole(['business_owner']) ?? false)) {
+                    throw new \RuntimeException('pending_book_settings: only the business owner can change this.');
+                }
+
+                DB::table('pending_book_settings')->updateOrInsert(
+                    ['business_id' => $uuid],
+                    [
+                        'require_collection_signature' => (bool) ($payload['require_collection_signature'] ?? false),
+                        'updated_at' => now(),
+                    ]
+                );
+                break;
+
+            case 'document_signatures':
+                $this->upsertDocumentSignature($uuid, $payload);
                 break;
 
             case 'receipt_inspections':
