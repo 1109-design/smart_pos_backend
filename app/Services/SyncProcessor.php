@@ -133,6 +133,7 @@ use App\Services\Accounting\OpeningBalanceService;
 use App\Services\Accounting\ProductOpeningStockPostingService;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use App\Services\Accounting\SalaryPostingService;
+use App\Services\Payroll\PayrollSync;
 use App\Services\Accounting\SalePostingService;
 use App\Services\Accounting\StockTakePostingService;
 use App\Services\Accounting\SupplierPaymentService;
@@ -296,6 +297,21 @@ class SyncProcessor
         'customer_reconciliations' => CustomerReconciliation::class,
         'sales_returns' => SalesReturn::class,
         'document_signatures' => DocumentSignature::class,
+        // Payroll — see App\Services\Payroll\PayrollSync.
+        'payroll_settings' => \App\Models\Payroll\PayrollSetting::class,
+        'pay_components' => \App\Models\Payroll\PayComponent::class,
+        'employee_pay_profiles' => \App\Models\Payroll\EmployeePayProfile::class,
+        'employee_pay_splits' => \App\Models\Payroll\EmployeePaySplit::class,
+        'employee_recurring_components' => \App\Models\Payroll\EmployeeRecurringComponent::class,
+        'employee_loans' => \App\Models\Payroll\EmployeeLoan::class,
+        'tax_tables' => \App\Models\Payroll\TaxTable::class,
+        'tax_table_bands' => \App\Models\Payroll\TaxTableBand::class,
+        'statutory_settings' => \App\Models\Payroll\StatutorySetting::class,
+        'pay_runs' => \App\Models\Payroll\PayRun::class,
+        'pay_run_employees' => \App\Models\Payroll\PayRunEmployee::class,
+        'pay_run_lines' => \App\Models\Payroll\PayRunLine::class,
+        'statutory_remittances' => \App\Models\Payroll\StatutoryRemittance::class,
+        'employee_leave_entries' => \App\Models\Payroll\EmployeeLeaveEntry::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -920,6 +936,12 @@ class SyncProcessor
 
     protected function handleUpsert(string $table, string $uuid, array $payload, bool $trusted = true, ?User $actingUser = null): void
     {
+        if (PayrollSync::handles($table)) {
+            app(PayrollSync::class)->upsert($table, $uuid, $payload, $trusted);
+
+            return;
+        }
+
         switch ($table) {
             case 'locations':
                 Location::updateOrCreate(
@@ -3614,6 +3636,8 @@ class SyncProcessor
                     'sale', 'salary_payment', 'supplier_payment',
                     'credit_payment', 'invoice_payment',
                     'asset_acquisition', 'asset_disposal',
+                    // Payroll — see PayRunPostingService.
+                    'pay_run', 'pay_run_payment', 'statutory_remittance', 'staff_loan',
                 ];
                 $idempotencyKey = ($sourceType && $sourceId && in_array($sourceType, $singleJournalPerSourceTypes, true))
                     ? "{$sourceType}:{$sourceId}"
@@ -4931,6 +4955,12 @@ class SyncProcessor
     protected function handleDelete(string $table, string $uuid, bool $trusted = true, ?User $actingUser = null): void
     {
         if (in_array($table, self::IMMUTABLE)) {
+            return;
+        }
+
+        if (PayrollSync::handles($table)) {
+            app(PayrollSync::class)->delete($table, $uuid, $trusted);
+
             return;
         }
 
