@@ -7,6 +7,7 @@ use App\Models\ApprovalRequestStageDecision;
 use App\Models\ApprovalRule;
 use App\Models\ExchangeRate;
 use App\Models\SyncRecord;
+use App\Models\User;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -185,6 +186,11 @@ class ApprovalService
                     default => 'You cannot approve or reject your own request.',
                 }
             );
+        }
+
+        $permissionBlock = app(ApprovalActionPermissions::class)->missing($request, User::find($approverUserId));
+        if ($permissionBlock !== null) {
+            throw new \RuntimeException($permissionBlock);
         }
 
         $delegatedFromUserId = $rule ? $this->ruleEngine->resolveDelegationSource($request->business_id, $approverUserId, $rule) : null;

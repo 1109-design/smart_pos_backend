@@ -1080,6 +1080,11 @@ class SyncProcessor
                             }
                         );
                     }
+
+                    $permissionBlock = app(ApprovalActionPermissions::class)->missing($existingApprovalRequest, $actingUser);
+                    if ($permissionBlock !== null) {
+                        throw new \RuntimeException("approval_requests: {$permissionBlock}");
+                    }
                 }
 
                 ApprovalRequest::updateOrCreate(
