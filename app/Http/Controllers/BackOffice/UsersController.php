@@ -8,12 +8,14 @@ use App\Models\SyncRecord;
 use App\Models\User;
 use App\Services\BackOfficeAuthorizer;
 use App\Services\SyncProcessor;
+use App\Services\TillCredentials;
 use App\Support\BackOfficePermission;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
 use Spatie\Permission\Models\Role;
@@ -73,21 +75,28 @@ class UsersController extends BackOfficeController
             'name' => 'required|string|max:255',
             'email' => 'required|email|max:255|unique:users,email',
             'role' => ['required', Rule::in($this->assignableRoles())],
-            'pin' => 'required|digits:4',
+            // Temporary till password — they choose their own at first sign-in.
+            'till_password' => 'required|string|min:8|max:255',
         ]);
+
+        $problems = $this->credentials()->violations($this->tenantId(), $data['till_password'], $data['name']);
+        if ($problems !== []) {
+            throw ValidationException::withMessages([
+                'till_password' => 'Password needs: '.implode(', ', $problems).'.',
+            ]);
+        }
 
         $this->ensureRoleExists($data['role']);
 
         // Routed through the same pipeline a device push uses (not a plain
         // User::create()) so a web-created user shows up on every till on
         // its next sync exactly like one created at the counter, and picks
-        // up the same PIN-hashing safety net as every other write path.
+        // up the same safety net as every other write path.
         $uuid = (string) Str::uuid();
         $payload = [
             'business_id' => $this->tenantId(),
             'name' => $data['name'],
             'email' => $data['email'],
-            'pin_hash' => Hash::make($data['pin']),
             'role' => $data['role'],
             'is_active' => true,
             'biometric_enabled' => false,
@@ -95,6 +104,7 @@ class UsersController extends BackOfficeController
 
         $processor->process('users', $uuid, 'upsert', $payload);
         $this->publishSyncRecord($uuid, $payload);
+        $this->credentials()->setPassword(User::findOrFail($uuid), $data['till_password'], mustChange: true);
 
         return redirect()->route('office.users.index')
             ->with('success', 'User created. They can sign in at the till once it syncs — Back Office access needs a password set separately via "Password".');
@@ -111,10 +121,20 @@ class UsersController extends BackOfficeController
             'email' => 'required|email|max:255',
             'role' => ['required', Rule::in($this->assignableRoles())],
             'is_active' => 'boolean',
-            'pin' => 'nullable|digits:4',
+            // Resets the till password; they choose their own at next sign-in.
+            'till_password' => 'nullable|string|min:8|max:255',
         ]);
 
         $user = User::findOrFail($userId);
+
+        if (! empty($data['till_password'])) {
+            $problems = $this->credentials()->violations((string) $user->business_id, $data['till_password'], $data['name']);
+            if ($problems !== []) {
+                throw ValidationException::withMessages([
+                    'till_password' => 'Password needs: '.implode(', ', $problems).'.',
+                ]);
+            }
+        }
 
         // Prevent demoting/deactivating your own account
         if ($user->id === $currentUserId) {
@@ -125,8 +145,11 @@ class UsersController extends BackOfficeController
             'name' => $data['name'],
             'email' => $data['email'],
             'is_active' => $data['is_active'] ?? $user->is_active,
-            'pin_hash' => isset($data['pin']) ? Hash::make($data['pin']) : $user->pin_hash,
         ]);
+
+        if (! empty($data['till_password'])) {
+            $this->credentials()->setPassword($user, $data['till_password'], mustChange: true);
+        }
 
         if (isset($data['role'])) {
             $this->ensureRoleExists($data['role']);
@@ -291,5 +314,10 @@ class UsersController extends BackOfficeController
             'source_updated_at' => now(),
             'synced_at' => now(),
         ]);
+    }
+
+    private function credentials(): TillCredentials
+    {
+        return app(TillCredentials::class);
     }
 }

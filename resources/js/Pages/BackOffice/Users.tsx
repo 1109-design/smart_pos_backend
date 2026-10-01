@@ -55,7 +55,7 @@ export default function BackOfficeUsers({ users, roles, locations, viewer_role, 
 
     useEffect(() => () => { if (debounceRef.current) { clearTimeout(debounceRef.current); } }, []);
 
-    const editForm = useForm({ name: '', email: '', role: 'cashier', is_active: true as boolean, pin: '' });
+    const editForm = useForm({ name: '', email: '', role: 'cashier', is_active: true as boolean, till_password: '' });
     const pwForm   = useForm({ password: '', password_confirmation: '' });
     const locForm  = useForm<{ location_ids: string[] }>({ location_ids: [] });
 
@@ -63,14 +63,14 @@ export default function BackOfficeUsers({ users, roles, locations, viewer_role, 
         setSelected(null);
         editForm.reset();
         editForm.clearErrors();
-        editForm.setData({ name: '', email: '', role: 'cashier', is_active: true, pin: '' });
+        editForm.setData({ name: '', email: '', role: 'cashier', is_active: true, till_password: '' });
         setModalMode('create');
     };
 
     const openEdit = (u: User) => {
         setSelected(u);
         editForm.clearErrors();
-        editForm.setData({ name: u.name, email: u.email, role: u.role ?? 'cashier', is_active: u.is_active, pin: '' });
+        editForm.setData({ name: u.name, email: u.email, role: u.role ?? 'cashier', is_active: u.is_active, till_password: '' });
         setModalMode('edit');
     };
 
@@ -341,18 +341,20 @@ export default function BackOfficeUsers({ users, roles, locations, viewer_role, 
                             </div>
                             <div>
                                 <label className="form-label">
-                                    POS PIN {modalMode === 'edit' && <span className="text-slate-400 font-normal">(leave blank to keep)</span>}
+                                    Temporary till password {modalMode === 'edit' && <span className="text-slate-400 font-normal">(leave blank to keep)</span>}
                                 </label>
                                 <input
-                                    type="text"
-                                    maxLength={4}
-                                    value={editForm.data.pin}
-                                    onChange={(e) => editForm.setData('pin', e.target.value)}
+                                    type="password"
+                                    autoComplete="new-password"
+                                    minLength={8}
+                                    value={editForm.data.till_password}
+                                    onChange={(e) => editForm.setData('till_password', e.target.value)}
                                     className="form-input"
-                                    placeholder="••••"
+                                    placeholder="At least 8 characters"
                                     required={modalMode === 'create'}
                                 />
-                                {editForm.errors.pin && <p className="text-red-500 text-xs mt-1">{editForm.errors.pin}</p>}
+                                <p className="text-slate-400 text-xs mt-1">They'll be asked to choose their own the first time they sign in at the till.</p>
+                                {editForm.errors.till_password && <p className="text-red-500 text-xs mt-1">{editForm.errors.till_password}</p>}
                             </div>
                         </div>
                         {modalMode === 'edit' && (

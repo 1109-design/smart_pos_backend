@@ -89,7 +89,7 @@ class BackOfficeRolesTest extends TestCase
             'name' => 'Audit User',
             'email' => 'audit@example.com',
             'role' => 'auditor',
-            'pin' => '4444',
+            'till_password' => 'Temp-Pass-4444',
         ])->assertRedirect();
 
         $auditor = User::where('email', 'audit@example.com')->first();

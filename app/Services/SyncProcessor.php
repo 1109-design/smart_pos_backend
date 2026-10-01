@@ -169,6 +169,9 @@ class SyncProcessor
         'pending_collection_used_otps',
         // On-screen document signatures are voided, never deleted.
         'document_signatures',
+        // Till passwords and the password policy are replaced, never deleted.
+        'user_credentials',
+        'password_policies',
         // GLS·03 — no delete UI exists for a bin; safer to leave an
         // orphaned one than strand a sheet_lots.warehouse_bin_id reference.
         'warehouse_bins',
@@ -2867,6 +2870,25 @@ class SyncProcessor
                 );
                 break;
 
+            case 'user_credentials':
+                $this->syncUserCredential($uuid, $payload, $trusted, $actingUser);
+                break;
+
+            case 'password_policies':
+                // One row per business, keyed by business_id. The rules
+                // every till password must meet are the owner's call.
+                if (! $trusted) {
+                    if (! ($actingUser?->hasRole(['business_owner']) ?? false)) {
+                        throw new \RuntimeException('password_policies: only the business owner can change this.');
+                    }
+                    if ((string) $actingUser->business_id !== $uuid) {
+                        throw new \RuntimeException('password_policies: record belongs to a different business.');
+                    }
+                }
+
+                app(TillCredentials::class)->applyPolicyPayload($uuid, $payload);
+                break;
+
             case 'document_signatures':
                 $this->upsertDocumentSignature($uuid, $payload);
                 break;
@@ -4202,6 +4224,30 @@ class SyncProcessor
                 );
                 break;
         }
+    }
+
+    /**
+     * A till password change, pushed by a paired device. The target user
+     * must belong to the same business as the record and as the device's
+     * own account. Which person at the till may change whose password (self,
+     * or the owner resetting someone) is enforced on the till, since the
+     * device token belongs to whoever paired it, not whoever is signed in.
+     */
+    protected function syncUserCredential(string $uuid, array $payload, bool $trusted, ?User $actingUser): void
+    {
+        $target = User::find($uuid);
+        if (! $target) {
+            throw new MissingParentRecordException('user_credentials');
+        }
+        $businessId = (string) ($payload['business_id'] ?? '');
+        if ((string) $target->business_id !== $businessId) {
+            throw new \RuntimeException('user_credentials: record belongs to a different business.');
+        }
+        if (! $trusted && (string) $actingUser?->business_id !== $businessId) {
+            throw new \RuntimeException('user_credentials: record belongs to a different business.');
+        }
+
+        app(TillCredentials::class)->applyCredentialPayload($uuid, $payload);
     }
 
     protected function syncUser(string $uuid, array $payload, bool $trusted = true, ?User $actingUser = null): void

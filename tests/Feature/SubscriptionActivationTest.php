@@ -295,7 +295,7 @@ class SubscriptionActivationTest extends TestCase
             ->assertStatus(403);
     }
 
-    public function test_revoked_device_cannot_relogin_with_pin(): void
+    public function test_revoked_device_cannot_relogin_with_a_password(): void
     {
         $tenantId = 'tenant-relogin-1';
         Tenant::create([
@@ -317,7 +317,8 @@ class SubscriptionActivationTest extends TestCase
         $response = $this->postJson('/api/v1/auth/device', [
             'device_identifier' => $deviceId,
             'device_name' => 'Old Device',
-            'pin' => '1234',
+            'email' => 'someone@example.com',
+            'password' => 'Some-Pass-1234',
             'business_code' => $tenantId,
         ]);
 
@@ -333,7 +334,8 @@ class SubscriptionActivationTest extends TestCase
         $payload = [
             'device_identifier' => (string) str()->uuid(),
             'device_name' => 'Brute Force Device',
-            'pin' => '0000',
+            'email' => 'brute@example.com',
+            'password' => 'Guess-0000',
             'business_code' => 'does-not-exist',
         ];
 

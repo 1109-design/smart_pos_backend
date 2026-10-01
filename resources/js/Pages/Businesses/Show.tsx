@@ -7,7 +7,7 @@ import BusinessTabs from '@/Components/BusinessTabs';
 interface SetupCredentials {
     admin_name: string;
     admin_email: string;
-    admin_pin: string;
+    admin_password: string;
     pairing_code: string;
 }
 
@@ -68,7 +68,7 @@ export default function BusinessShow({ business, devicesCount, setup_credentials
                         {[
                             { label: 'Admin Name',  value: setup_credentials.admin_name },
                             { label: 'Email',        value: setup_credentials.admin_email },
-                            { label: 'PIN',          value: setup_credentials.admin_pin },
+                            { label: 'Temp password', value: setup_credentials.admin_password },
                             { label: 'Pairing Code', value: setup_credentials.pairing_code },
                         ].map(({ label, value }) => (
                             <div key={label} className="bg-white rounded-xl border border-amber-200 p-3">

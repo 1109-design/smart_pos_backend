@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Models\SyncRecord;
+use App\Services\TillCredentials;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -54,7 +55,8 @@ class UserController extends Controller
             'email' => 'required|email|max:255',
             'password' => 'required|string|min:8',
             'role' => 'required|in:business_owner,manager,cashier',
-            'pin' => 'nullable|digits:4',
+            // Temporary till password — they choose their own at first sign-in.
+            'till_password' => 'nullable|string|min:8|max:255',
         ]);
 
         tenancy()->initialize($tenant);
@@ -63,11 +65,14 @@ class UserController extends Controller
             'name' => $data['name'],
             'email' => $data['email'],
             'password' => Hash::make($data['password']),
-            'pin_hash' => isset($data['pin']) ? Hash::make($data['pin']) : null,
             'is_active' => true,
         ]);
 
         $user->assignRole($data['role']);
+
+        if (! empty($data['till_password'])) {
+            app(TillCredentials::class)->setPassword($user, $data['till_password'], mustChange: true);
+        }
 
         SyncRecord::create([
             'business_id' => $tenant->id,
@@ -102,7 +107,8 @@ class UserController extends Controller
             'email' => 'required|email|max:255',
             'role' => 'required|in:business_owner,manager,cashier',
             'is_active' => 'boolean',
-            'pin' => 'nullable|digits:4',
+            // Resets the till password; they choose their own at next sign-in.
+            'till_password' => 'nullable|string|min:8|max:255',
         ]);
 
         tenancy()->initialize($tenant);
@@ -112,9 +118,12 @@ class UserController extends Controller
             'name' => $data['name'],
             'email' => $data['email'],
             'is_active' => $data['is_active'] ?? $user->is_active,
-            'pin_hash' => isset($data['pin']) ? Hash::make($data['pin']) : $user->pin_hash,
         ]);
         $user->syncRoles([$data['role']]);
+
+        if (! empty($data['till_password'])) {
+            app(TillCredentials::class)->setPassword($user, $data['till_password'], mustChange: true);
+        }
 
         SyncRecord::create([
             'business_id' => $tenant->id,
