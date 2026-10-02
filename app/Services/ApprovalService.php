@@ -6,6 +6,7 @@ use App\Models\ApprovalRequest;
 use App\Models\ApprovalRequestStageDecision;
 use App\Models\ApprovalRule;
 use App\Models\ExchangeRate;
+use App\Models\StockTake;
 use App\Models\SyncRecord;
 use App\Models\User;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
@@ -320,6 +321,15 @@ class ApprovalService
             return;
         }
 
+        if ($request->subject_type === StockTakeApprovalService::SUBJECT_TYPE && $request->action === StockTakeApprovalService::ACTION) {
+            $take = StockTake::with('items')->find($request->subject_id);
+            if ($take !== null) {
+                app(StockTakeApprovalService::class)->approve($take, $approverUserId, $request->fresh()?->reason);
+            }
+
+            return;
+        }
+
         if ($request->subject_type !== 'ExchangeRate' || $request->action !== 'change_exchange_rate') {
             return;
         }
@@ -411,6 +421,15 @@ class ApprovalService
      */
     private function applyRejectedAction(ApprovalRequest $request, string $approverUserId): void
     {
+        if ($request->subject_type === StockTakeApprovalService::SUBJECT_TYPE && $request->action === StockTakeApprovalService::ACTION) {
+            $take = StockTake::find($request->subject_id);
+            if ($take !== null && $take->status === 'pending_approval') {
+                app(StockTakeApprovalService::class)->reject($take, $approverUserId, $request->fresh()?->reason);
+            }
+
+            return;
+        }
+
         if ($request->subject_type !== 'PurchaseOrder' || $request->action !== 'approve_purchase_order') {
             return;
         }

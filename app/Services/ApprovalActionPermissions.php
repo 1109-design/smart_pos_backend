@@ -26,6 +26,10 @@ class ApprovalActionPermissions
             'approveSalesReturn',
             ['manager', 'branch_manager', 'operations_manager'],
         ],
+        'stock_take_approval' => [
+            'approveStockTake',
+            ['manager', 'branch_manager', 'operations_manager'],
+        ],
     ];
 
     public function __construct(private readonly TillPermissions $permissions) {}
