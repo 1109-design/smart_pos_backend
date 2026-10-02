@@ -70,15 +70,12 @@ class PurchaseOrder extends Model
     /**
      * A PO is genuinely multi-device — created/sent on one till, received
      * via GRV on another (often a warehouse till) — same shape as
-     * StockTransfer. SyncProcessor::gatePurchaseOrderStatus() already locks
-     * 'pending_approval' against being overwritten, but for every other
-     * status it applied the incoming payload unconditionally: a device that
+     * StockTransfer. Without a transition check, a device that
      * sent a PO and went offline could resync its own stale 'sent' snapshot
      * after another device already received (or cancelled) it, silently
-     * regressing the status. 'pending_approval' is deliberately left out of
-     * ALLOWED_TRANSITIONS here since gatePurchaseOrderStatus() already
-     * short-circuits that case before this is ever consulted — see its doc
-     * comment on why resolution bypasses both entirely.
+     * regressing the status. 'pending_approval' (waiting on the app's
+     * Approvals inbox) can only move on to 'sent' (approved) or 'cancelled'
+     * (rejected).
      */
     public const TERMINAL_STATUSES = ['received', 'cancelled'];
 
@@ -87,6 +84,7 @@ class PurchaseOrder extends Model
      */
     public const ALLOWED_TRANSITIONS = [
         'draft' => ['sent', 'pending_approval', 'cancelled'],
+        'pending_approval' => ['sent', 'cancelled'],
         'sent' => ['partial', 'received', 'cancelled'],
         'partial' => ['partial', 'received'],
     ];

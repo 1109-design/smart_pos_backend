@@ -4,6 +4,7 @@ namespace App\Http\Controllers\BackOffice;
 
 use App\Models\Accounting\AccountCategory;
 use App\Models\Accounting\JournalHeader;
+use App\Services\Accounting\JournalEntryApprovalService;
 use App\Services\Accounting\JournalService;
 use App\Services\BackOfficeAuthorizer;
 use App\Support\BackOfficePermission;
@@ -59,7 +60,7 @@ class JournalEntriesController extends BackOfficeController
         ]);
     }
 
-    public function store(Request $request, JournalService $journals): RedirectResponse
+    public function store(Request $request, JournalService $journals, JournalEntryApprovalService $approvals): RedirectResponse
     {
         $this->authorize();
 
@@ -90,8 +91,25 @@ class JournalEntriesController extends BackOfficeController
                 ]);
             }
 
+            // A configured 'journal_entry' approval rule holds the entry as
+            // a draft until its approver decides it (Approvals inbox).
+            $amount = (float) collect($data['lines'])->sum(fn ($l) => (float) ($l['debit'] ?? 0));
+            if ($approvals->requiresApproval($this->tenantId(), $amount)) {
+                throw_unless($journals->isBalanced($header), new RuntimeException(
+                    'Debits and credits must balance before sending for approval.'
+                ));
+                $approvals->requestApproval($header, (string) $this->userId(), $amount);
+
+                return redirect()->route('office.journal-entries.index')
+                    ->with('success', "{$header->journal_number} sent for approval — it posts once approved.");
+            }
+
             $journals->post($header, $this->userId());
         } catch (RuntimeException $e) {
+            if (isset($header) && $header->status === 'draft' && ! $header->fresh()?->lines()->exists()) {
+                $header->delete();
+            }
+
             return back()->withErrors(['journal' => $e->getMessage()])->withInput();
         }
 
