@@ -164,6 +164,31 @@ class ChartOfAccountsSeeder
         ]);
     }
 
+    /**
+     * Holds the value of goods a customer hands back in an exchange for the
+     * instant between the return and the replacement sale — Cr on the
+     * return, Dr on the new sale, always netting to zero. See
+     * SalePostingService's 'exchange_credit' tender.
+     */
+    public const EXCHANGE_CLEARING = ['code' => '2045', 'name' => 'Exchange Clearing'];
+
+    /**
+     * Payroll accounts — see PayRunPostingService. A pay run accrues on
+     * approval into these payables, which clear when net pay and statutory
+     * remittances go out. [category, sub-category, account].
+     */
+    public const PAYROLL_ACCOUNTS = [
+        ['Assets', 'Current Assets', ['code' => '1160', 'name' => 'Staff Loans & Advances']],
+        ['Liabilities', 'Current Liabilities', ['code' => '2050', 'name' => 'Net Wages Payable']],
+        ['Liabilities', 'Current Liabilities', ['code' => '2051', 'name' => 'PAYE Payable (USD)']],
+        ['Liabilities', 'Current Liabilities', ['code' => '2052', 'name' => 'PAYE Payable (ZiG)']],
+        ['Liabilities', 'Current Liabilities', ['code' => '2053', 'name' => 'NSSA Payable']],
+        ['Liabilities', 'Current Liabilities', ['code' => '2054', 'name' => 'ZIMDEF Payable']],
+        ['Liabilities', 'Current Liabilities', ['code' => '2055', 'name' => 'Payroll Deductions Payable']],
+        ['Liabilities', 'Current Liabilities', ['code' => '2056', 'name' => 'NEC Levy Payable']],
+        ['Expenses', 'Operating Expenses', ['code' => '6025', 'name' => 'Employer Payroll Costs']],
+    ];
+
     private const CHART = [
         [
             'name' => 'Assets', 'code' => 1000, 'is_debit_normal' => true, 'statement_type' => 'balance_sheet',
@@ -176,6 +201,7 @@ class ChartOfAccountsSeeder
                     ['code' => '1100', 'name' => 'Accounts Receivable', 'control_type' => 'receivable'],
                     // AP module — recoverable input tax on supplier invoices.
                     ['code' => '1150', 'name' => 'Input VAT'],
+                    ['code' => '1160', 'name' => 'Staff Loans & Advances'],
                     ['code' => '1200', 'name' => 'Inventory', 'control_type' => 'inventory'],
                 ]],
                 ['name' => 'Fixed Assets', 'accounts' => [
@@ -195,6 +221,14 @@ class ChartOfAccountsSeeder
                     ['code' => '2015', 'name' => 'Withholding Tax Payable'],
                     ['code' => '2020', 'name' => 'Deposits Held'],
                     ['code' => '2030', 'name' => 'Tax Payable'],
+                    self::EXCHANGE_CLEARING,
+                    ['code' => '2050', 'name' => 'Net Wages Payable'],
+                    ['code' => '2051', 'name' => 'PAYE Payable (USD)'],
+                    ['code' => '2052', 'name' => 'PAYE Payable (ZiG)'],
+                    ['code' => '2053', 'name' => 'NSSA Payable'],
+                    ['code' => '2054', 'name' => 'ZIMDEF Payable'],
+                    ['code' => '2055', 'name' => 'Payroll Deductions Payable'],
+                    ['code' => '2056', 'name' => 'NEC Levy Payable'],
                 ]],
                 ['name' => 'Long-Term Liabilities', 'accounts' => [
                     ['code' => '2040', 'name' => 'Loans'],
@@ -247,6 +281,7 @@ class ChartOfAccountsSeeder
                     // invoice, kept distinct from general 'Transport'.
                     ['code' => '6015', 'name' => 'Freight & Carriage Inwards'],
                     ['code' => '6020', 'name' => 'Wages'],
+                    ['code' => '6025', 'name' => 'Employer Payroll Costs'],
                     ['code' => '6030', 'name' => 'Utilities'],
                     ['code' => '6040', 'name' => 'Bank Charges'],
                     ['code' => '6090', 'name' => 'General Expenses'],

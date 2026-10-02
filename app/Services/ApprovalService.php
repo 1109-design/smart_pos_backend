@@ -6,7 +6,9 @@ use App\Models\ApprovalRequest;
 use App\Models\ApprovalRequestStageDecision;
 use App\Models\ApprovalRule;
 use App\Models\ExchangeRate;
+use App\Models\StockTake;
 use App\Models\SyncRecord;
+use App\Models\User;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -187,6 +189,11 @@ class ApprovalService
             );
         }
 
+        $permissionBlock = app(ApprovalActionPermissions::class)->missing($request, User::find($approverUserId));
+        if ($permissionBlock !== null) {
+            throw new \RuntimeException($permissionBlock);
+        }
+
         $delegatedFromUserId = $rule ? $this->ruleEngine->resolveDelegationSource($request->business_id, $approverUserId, $rule) : null;
         $slaBreached = $request->sla_due_at !== null && now()->greaterThan($request->sla_due_at);
 
@@ -314,6 +321,15 @@ class ApprovalService
             return;
         }
 
+        if ($request->subject_type === StockTakeApprovalService::SUBJECT_TYPE && $request->action === StockTakeApprovalService::ACTION) {
+            $take = StockTake::with('items')->find($request->subject_id);
+            if ($take !== null) {
+                app(StockTakeApprovalService::class)->approve($take, $approverUserId, $request->fresh()?->reason);
+            }
+
+            return;
+        }
+
         if ($request->subject_type !== 'ExchangeRate' || $request->action !== 'change_exchange_rate') {
             return;
         }
@@ -405,6 +421,15 @@ class ApprovalService
      */
     private function applyRejectedAction(ApprovalRequest $request, string $approverUserId): void
     {
+        if ($request->subject_type === StockTakeApprovalService::SUBJECT_TYPE && $request->action === StockTakeApprovalService::ACTION) {
+            $take = StockTake::find($request->subject_id);
+            if ($take !== null && $take->status === 'pending_approval') {
+                app(StockTakeApprovalService::class)->reject($take, $approverUserId, $request->fresh()?->reason);
+            }
+
+            return;
+        }
+
         if ($request->subject_type !== 'PurchaseOrder' || $request->action !== 'approve_purchase_order') {
             return;
         }

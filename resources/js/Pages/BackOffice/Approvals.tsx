@@ -11,7 +11,19 @@ interface ApprovalRow {
     subject_id: string;
     action: string;
     reason: string | null;
-    payload_json: { reason?: string; po_number?: string; supplier_name?: string } | null;
+    payload_json: {
+        reason?: string;
+        po_number?: string;
+        supplier_name?: string;
+        // refund_transaction (till return / exchange)
+        sale_number?: string | null;
+        amount?: number;
+        outcome?: 'refund' | 'exchange';
+        items?: string;
+        exchange_items?: string;
+        net_amount?: number;
+        settlement_method?: string | null;
+    } | null;
     status: ApprovalStatus;
     requested_by: { id: string; name: string } | null;
     approver: { id: string; name: string } | null;
@@ -29,6 +41,39 @@ interface Props {
     filters: { status: string };
 }
 
+/** What a till return actually does, from its approval payload. */
+function ReturnDetails({ payload }: { payload: NonNullable<ApprovalRow['payload_json']> }) {
+    const isExchange = payload.outcome === 'exchange';
+    const net = payload.net_amount;
+    const money =
+        net === undefined || Math.abs(net) <= 0.005
+            ? isExchange
+                ? 'Even exchange'
+                : null
+            : net > 0
+              ? `Customer pays ${net.toFixed(2)}`
+              : `Customer gets ${(-net).toFixed(2)} back`;
+
+    return (
+        <div className="text-xs font-normal text-slate-500 space-y-0.5 mt-0.5">
+            <div>
+                {isExchange ? 'Exchange' : 'Refund'}
+                {payload.sale_number && <> · sale #{payload.sale_number}</>}
+                {payload.amount !== undefined && <> · returned value {payload.amount.toFixed(2)}</>}
+            </div>
+            {payload.items && <div>Coming back: {payload.items}</div>}
+            {payload.exchange_items && <div>Taking instead: {payload.exchange_items}</div>}
+            {money && (
+                <div>
+                    {money}
+                    {payload.settlement_method && <> by {payload.settlement_method}</>}
+                </div>
+            )}
+            {payload.reason && <div>Reason: {payload.reason}</div>}
+        </div>
+    );
+}
+
 const STATUS_STYLE: Record<ApprovalStatus, { label: string; variant: 'amber' | 'green' | 'red' }> = {
     pending: { label: 'Pending', variant: 'amber' },
     approved: { label: 'Approved', variant: 'green' },
@@ -37,7 +82,7 @@ const STATUS_STYLE: Record<ApprovalStatus, { label: string; variant: 'amber' | '
 
 const ACTION_LABELS: Record<string, string> = {
     void_transaction: 'Void sale',
-    refund_transaction: 'Refund',
+    refund_transaction: 'Return / Exchange',
     change_exchange_rate: 'Exchange rate change',
     approve_purchase_order: 'Purchase order over threshold',
 };
@@ -104,6 +149,9 @@ export default function BackOfficeApprovals({ requests, filters }: Props) {
                                                 {r.payload_json.po_number} — {r.payload_json.supplier_name}
                                                 {r.payload_json.reason && <> ({r.payload_json.reason})</>}
                                             </div>
+                                        )}
+                                        {r.action === 'refund_transaction' && r.payload_json && (
+                                            <ReturnDetails payload={r.payload_json} />
                                         )}
                                     </td>
                                     <td className="table-td text-slate-600">{r.requested_by?.name ?? '—'}</td>

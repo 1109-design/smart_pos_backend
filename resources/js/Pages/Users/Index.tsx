@@ -53,8 +53,8 @@ export default function UsersIndex({ business, users, roles, filters }: Props) {
 
     useEffect(() => () => { if (debounceRef.current) { clearTimeout(debounceRef.current); } }, []);
 
-    const createForm = useForm({ name: '', email: '', password: '', role: 'cashier', pin: '' });
-    const editForm   = useForm({ name: '', email: '', role: 'cashier', is_active: true as boolean, pin: '' });
+    const createForm = useForm({ name: '', email: '', password: '', role: 'cashier', till_password: '' });
+    const editForm   = useForm({ name: '', email: '', role: 'cashier', is_active: true as boolean, till_password: '' });
     const pwForm     = useForm({ password: '', password_confirmation: '' });
 
     const openCreate = () => {
@@ -64,7 +64,7 @@ export default function UsersIndex({ business, users, roles, filters }: Props) {
 
     const openEdit = (u: User) => {
         setSelectedUser(u);
-        editForm.setData({ name: u.name, email: u.email, role: u.role ?? 'cashier', is_active: u.is_active, pin: '' });
+        editForm.setData({ name: u.name, email: u.email, role: u.role ?? 'cashier', is_active: u.is_active, till_password: '' });
         setModalMode('edit');
     };
 
@@ -245,9 +245,9 @@ export default function UsersIndex({ business, users, roles, filters }: Props) {
                                 {createForm.errors.role && <p className="text-red-500 text-xs mt-1">{createForm.errors.role}</p>}
                             </div>
                             <div>
-                                <label className="form-label">POS PIN <span className="text-slate-400 font-normal">(4 digits)</span></label>
-                                <input type="text" maxLength={4} value={createForm.data.pin} onChange={(e) => createForm.setData('pin', e.target.value)} className="form-input" placeholder="0000" />
-                                {createForm.errors.pin && <p className="text-red-500 text-xs mt-1">{createForm.errors.pin}</p>}
+                                <label className="form-label">Temporary till password <span className="text-slate-400 font-normal">(changed at first sign-in)</span></label>
+                                <input type="password" autoComplete="new-password" minLength={8} value={createForm.data.till_password} onChange={(e) => createForm.setData('till_password', e.target.value)} className="form-input" placeholder="At least 8 characters" />
+                                {createForm.errors.till_password && <p className="text-red-500 text-xs mt-1">{createForm.errors.till_password}</p>}
                             </div>
                         </div>
                         <div className="flex justify-end gap-3 pt-2">
@@ -289,9 +289,9 @@ export default function UsersIndex({ business, users, roles, filters }: Props) {
                                 {editForm.errors.role && <p className="text-red-500 text-xs mt-1">{editForm.errors.role}</p>}
                             </div>
                             <div>
-                                <label className="form-label">POS PIN <span className="text-slate-400 font-normal">(leave blank to keep)</span></label>
-                                <input type="text" maxLength={4} value={editForm.data.pin} onChange={(e) => editForm.setData('pin', e.target.value)} className="form-input" placeholder="••••" />
-                                {editForm.errors.pin && <p className="text-red-500 text-xs mt-1">{editForm.errors.pin}</p>}
+                                <label className="form-label">Reset till password <span className="text-slate-400 font-normal">(leave blank to keep)</span></label>
+                                <input type="password" autoComplete="new-password" minLength={8} value={editForm.data.till_password} onChange={(e) => editForm.setData('till_password', e.target.value)} className="form-input" placeholder="••••••••" />
+                                {editForm.errors.till_password && <p className="text-red-500 text-xs mt-1">{editForm.errors.till_password}</p>}
                             </div>
                         </div>
                         <div className="flex items-center gap-3 p-3 rounded-xl border border-slate-100 bg-slate-50">

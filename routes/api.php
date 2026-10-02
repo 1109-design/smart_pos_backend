@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\BusinessBrandingController;
 use App\Http\Controllers\Api\DeviceAuthController;
 use App\Http\Controllers\Api\LocalSyncConflictController;
 use App\Http\Controllers\Api\LocationController;
+use App\Http\Controllers\Api\PayrollPeriodLockController;
 use App\Http\Controllers\Api\StockResetController;
 use App\Http\Controllers\Api\StockTransferController;
 use App\Http\Controllers\Api\SubscriptionController;
@@ -90,6 +91,11 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     // token (see StockResetService). The till itself does the zeroing and
     // pushes it through the normal sync/push above.
     Route::post('stock/reset-claim', [StockResetController::class, 'claim']);
+
+    // Claims a month for one pay run just before a till approves it, so two
+    // offline devices can't both approve the same payroll (see
+    // PayrollPeriodLockController and PayrollSync).
+    Route::post('payroll/period-locks', [PayrollPeriodLockController::class, 'store']);
 });
 
 // Webhooks (no auth — verified by payload signature)

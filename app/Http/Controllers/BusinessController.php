@@ -52,10 +52,15 @@ class BusinessController extends Controller
             'country' => 'nullable|string|size:2',
             'currency_code' => 'nullable|string|max:10',
             'admin_name' => 'required|string|max:255',
-            'admin_pin' => 'required|digits:4',
+            // Temporary till password — the owner must change it at first sign-in.
+            'admin_password' => 'required|string|min:8|max:255',
         ]);
 
-        $tenant = $provisioner->provision($data);
+        $tenant = $provisioner->provision([
+            ...$data,
+            'till_password' => $data['admin_password'],
+            'till_password_must_change' => true,
+        ]);
 
         if ($data['tier'] !== 'starter') {
             SubscriptionHistory::create([
@@ -72,7 +77,7 @@ class BusinessController extends Controller
             ->with('setup_credentials', [
                 'admin_name' => $data['admin_name'],
                 'admin_email' => $data['owner_email'],
-                'admin_pin' => $data['admin_pin'],
+                'admin_password' => $data['admin_password'],
                 'pairing_code' => $tenant->pairing_code,
             ]);
     }

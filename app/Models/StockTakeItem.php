@@ -15,6 +15,10 @@ class StockTakeItem extends Model
         'id', 'stock_take_id', 'product_id', 'product_name',
         'system_qty', 'counted_qty', 'notes',
         'flagged_for_recount', 'recount_completed_at',
+        // damage_breakdown is JSON text (reason => qty), kept uncast so it
+        // round-trips to the device verbatim.
+        'damaged_qty', 'damage_breakdown', 'counted_at', 'counted_by_user_id',
+        'warehouse_bin_id',
     ];
 
     protected function casts(): array
@@ -24,6 +28,8 @@ class StockTakeItem extends Model
             'counted_qty' => 'decimal:4',
             'flagged_for_recount' => 'boolean',
             'recount_completed_at' => 'datetime',
+            'damaged_qty' => 'decimal:4',
+            'counted_at' => 'datetime',
         ];
     }
 

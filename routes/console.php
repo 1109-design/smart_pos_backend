@@ -58,6 +58,12 @@ Schedule::command('accounting:post-pending-salary-payments')
     ->withoutOverlapping()
     ->onOneServer();
 
+// Same as above, for payroll — see PostPendingPayroll.
+Schedule::command('accounting:post-pending-payroll')
+    ->everyFifteenMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
 // Same as above, for supplier payments — see PostPendingSupplierPayments.
 Schedule::command('accounting:post-pending-supplier-payments')
     ->everyFifteenMinutes()

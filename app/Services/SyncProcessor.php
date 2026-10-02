@@ -47,6 +47,7 @@ use App\Models\CustomerWriteOff;
 use App\Models\DeliveryNote;
 use App\Models\DeliveryNoteItem;
 use App\Models\DocumentBrandingSetting;
+use App\Models\DocumentSignature;
 use App\Models\Employee;
 use App\Models\ExchangeRate;
 use App\Models\Expense;
@@ -87,6 +88,8 @@ use App\Models\RolePermission;
 use App\Models\SalaryPayment;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
+use App\Models\SalesReturn;
+use App\Models\SalesReturnItem;
 use App\Models\SheetCut;
 use App\Models\SheetLossRecord;
 use App\Models\SheetLot;
@@ -116,6 +119,9 @@ use App\Models\Transaction;
 use App\Models\TransactionItem;
 use App\Models\TransactionTax;
 use App\Models\UnitOfMeasure;
+use App\Models\PendingCollection;
+use App\Models\PendingCollectionEvent;
+use App\Models\PendingCollectionUsedOtp;
 use App\Models\User;
 use App\Models\WarehouseBin;
 use App\Services\Accounting\AssetPostingService;
@@ -127,6 +133,7 @@ use App\Services\Accounting\OpeningBalanceService;
 use App\Services\Accounting\ProductOpeningStockPostingService;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use App\Services\Accounting\SalaryPostingService;
+use App\Services\Payroll\PayrollSync;
 use App\Services\Accounting\SalePostingService;
 use App\Services\Accounting\StockTakePostingService;
 use App\Services\Accounting\SupplierPaymentService;
@@ -154,6 +161,17 @@ class SyncProcessor
         'sheet_loss_records',
         // Goods inspection at receiving — a permanent record of each check.
         'receipt_inspections',
+        // Pending Book: the tills never delete an entry (it's cancelled
+        // instead), its history is append-only, and a used OTP must stay
+        // used forever.
+        'pending_collections',
+        'pending_collection_events',
+        'pending_collection_used_otps',
+        // On-screen document signatures are voided, never deleted.
+        'document_signatures',
+        // Till passwords and the password policy are replaced, never deleted.
+        'user_credentials',
+        'password_policies',
         // GLS·03 — no delete UI exists for a bin; safer to leave an
         // orphaned one than strand a sheet_lots.warehouse_bin_id reference.
         'warehouse_bins',
@@ -186,6 +204,9 @@ class SyncProcessor
         // an edit or delete — same reasoning as 'supplier_payments' itself.
         'supplier_payment_allocations',
         'supplier_credit_note_lines',
+        // A customer return, once approved on the till, is a financial fact
+        // — its money/stock already moved in transactions/stock_movements.
+        'sales_returns', 'sales_return_items',
         // AP module — a reconciliation session's own line items are a
         // frozen snapshot of what was found at that point in time, never
         // edited after the fact (matches 'credit_note_items' above).
@@ -199,6 +220,7 @@ class SyncProcessor
     // inert for push()/pull() and this explicit check is the real protection
     // there.
     private const TENANT_SCOPED_MODELS = [
+        'pending_collections' => PendingCollection::class,
         'locations' => Location::class,
         'categories' => Category::class,
         'tax_rates' => TaxRate::class,
@@ -276,6 +298,23 @@ class SyncProcessor
         'ar_promises_to_pay' => ArPromiseToPay::class,
         'ar_disputes' => ArDispute::class,
         'customer_reconciliations' => CustomerReconciliation::class,
+        'sales_returns' => SalesReturn::class,
+        'document_signatures' => DocumentSignature::class,
+        // Payroll — see App\Services\Payroll\PayrollSync.
+        'payroll_settings' => \App\Models\Payroll\PayrollSetting::class,
+        'pay_components' => \App\Models\Payroll\PayComponent::class,
+        'employee_pay_profiles' => \App\Models\Payroll\EmployeePayProfile::class,
+        'employee_pay_splits' => \App\Models\Payroll\EmployeePaySplit::class,
+        'employee_recurring_components' => \App\Models\Payroll\EmployeeRecurringComponent::class,
+        'employee_loans' => \App\Models\Payroll\EmployeeLoan::class,
+        'tax_tables' => \App\Models\Payroll\TaxTable::class,
+        'tax_table_bands' => \App\Models\Payroll\TaxTableBand::class,
+        'statutory_settings' => \App\Models\Payroll\StatutorySetting::class,
+        'pay_runs' => \App\Models\Payroll\PayRun::class,
+        'pay_run_employees' => \App\Models\Payroll\PayRunEmployee::class,
+        'pay_run_lines' => \App\Models\Payroll\PayRunLine::class,
+        'statutory_remittances' => \App\Models\Payroll\StatutoryRemittance::class,
+        'employee_leave_entries' => \App\Models\Payroll\EmployeeLeaveEntry::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -300,6 +339,7 @@ class SyncProcessor
         'po_audit_logs' => [PoAuditLog::class, 'po_id'],
         'po_receipt_variances' => [PoReceiptVariance::class, 'purchase_order_id'],
         'receipt_inspections' => [ReceiptInspection::class, 'purchase_order_id'],
+        'pending_collection_events' => [PendingCollectionEvent::class, 'collection_id'],
         'quotation_items' => [QuotationItem::class, 'quotation_id'],
         'invoice_items' => [InvoiceItem::class, 'invoice_id'],
         'invoice_payments' => [InvoicePayment::class, 'invoice_id'],
@@ -320,6 +360,7 @@ class SyncProcessor
         'delivery_note_items' => [DeliveryNoteItem::class, 'delivery_note_id'],
         'customer_debit_note_items' => [CustomerDebitNoteItem::class, 'customer_debit_note_id'],
         'customer_reconciliation_items' => [CustomerReconciliationItem::class, 'customer_reconciliation_id'],
+        'sales_return_items' => [SalesReturnItem::class, 'sales_return_id'],
     ];
 
     // Tables in TENANT_SCOPED_MODELS above (they carry their own business_id,
@@ -557,6 +598,122 @@ class SyncProcessor
         }
     }
 
+    /**
+     * Pending Book entry from a till. The device bumps `version` on every
+     * change and sends the version its change was built on (`base_version`).
+     * A change is only accepted on top of the version the server holds —
+     * otherwise another till changed the entry first (e.g. both confirmed
+     * the same OTP while offline from each other), and this push is refused
+     * as a conflict for a manager to review; the losing till re-pulls the
+     * server's copy.
+     */
+    protected function upsertPendingCollection(string $uuid, array $payload): void
+    {
+        $existing = PendingCollection::lockForUpdate()->find($uuid);
+        $incomingVersion = (int) ($payload['version'] ?? 0);
+        $baseVersion = (int) ($payload['base_version'] ?? 0);
+        $status = $payload['status'] ?? 'pending';
+
+        if ($existing) {
+            if ($incomingVersion === (int) $existing->version) {
+                // Re-sent push of what the server already holds — fine.
+                // Same version number with different content is two tills
+                // each making "the next" change: the later one loses.
+                if ($existing->status === $status
+                    && (string) $existing->items_json === (string) ($payload['items_json'] ?? '')
+                    && (string) $existing->otp_code === (string) ($payload['otp_code'] ?? '')) {
+                    return;
+                }
+                throw new \RuntimeException(
+                    "pending_collections: entry {$uuid} was changed on another device at the same time (v{$incomingVersion})."
+                );
+            }
+            if ($baseVersion !== (int) $existing->version) {
+                throw new \RuntimeException(
+                    "pending_collections: entry {$uuid} changed on another device first (server v{$existing->version}, "
+                    ."this change was based on v{$baseVersion})."
+                );
+            }
+        }
+
+        if (! PendingCollection::isValidTransition($existing?->status, $status)) {
+            throw new \RuntimeException(
+                "pending_collections: invalid status change '".($existing?->status ?? 'new')."' -> '{$status}'."
+            );
+        }
+
+        PendingCollection::updateOrCreate(
+            ['id' => $uuid],
+            [
+                'business_id' => $payload['business_id'] ?? $existing?->business_id,
+                'transaction_id' => $payload['transaction_id'] ?? $existing?->transaction_id ?? '',
+                'location_id' => ($payload['location_id'] ?? null) ?: null,
+                'collector_name' => $payload['collector_name'] ?? '',
+                'collector_phone' => $payload['collector_phone'] ?? '',
+                'collector_id_number' => ($payload['collector_id_number'] ?? null) ?: null,
+                'vehicle_registration' => ($payload['vehicle_registration'] ?? null) ?: null,
+                'status' => $status,
+                'notes' => $payload['notes'] ?? null,
+                'items_json' => $payload['items_json'] ?? null,
+                'expected_collection_date' => $payload['expected_collection_date'] ?? null,
+                'reminder_days_before' => (int) ($payload['reminder_days_before'] ?? 1),
+                'reminder_sent' => (bool) ($payload['reminder_sent'] ?? false),
+                'otp_code' => ($payload['otp_code'] ?? null) ?: null,
+                'otp_sent_at' => $payload['otp_sent_at'] ?? null,
+                'otp_expires_at' => $payload['otp_expires_at'] ?? null,
+                'confirmed_by_user_id' => ($payload['confirmed_by_user_id'] ?? null) ?: null,
+                'collected_at' => $payload['collected_at'] ?? null,
+                'cancelled_by_user_id' => ($payload['cancelled_by_user_id'] ?? null) ?: null,
+                'cancellation_reason' => ($payload['cancellation_reason'] ?? null) ?: null,
+                'cancelled_at' => $payload['cancelled_at'] ?? null,
+                'sms_message_id' => ($payload['sms_message_id'] ?? null) ?: null,
+                'reversal_count' => (int) ($payload['reversal_count'] ?? 0),
+                'last_reversed_at' => $payload['last_reversed_at'] ?? null,
+                'version' => $incomingVersion,
+                'device_id' => $existing?->device_id ?? (($payload['device_id'] ?? null) ?: null),
+                'created_at' => $payload['created_at'] ?? $existing?->created_at ?? now(),
+                'updated_at' => $payload['updated_at'] ?? now(),
+            ]
+        );
+    }
+
+    /**
+     * An OTP issued by a till. A code is issued once per business, ever: the
+     * same code arriving again for the same entry is a harmless re-send; for
+     * a different entry it means two tills drew the same code while out of
+     * touch — refused, so a manager sees it.
+     */
+    protected function recordPendingUsedOtp(string $uuid, array $payload): void
+    {
+        $businessId = $payload['business_id'] ?? null;
+        $otp = (string) ($payload['otp'] ?? '');
+        if ($businessId === null || $otp === '') {
+            throw new \RuntimeException('pending_collection_used_otps: business_id and otp are required.');
+        }
+
+        $existing = PendingCollectionUsedOtp::where('business_id', $businessId)
+            ->where('otp', $otp)
+            ->lockForUpdate()
+            ->first();
+        if ($existing) {
+            if ($existing->collection_id !== ($payload['collection_id'] ?? null)) {
+                throw new \RuntimeException(
+                    "pending_collection_used_otps: code already issued for another entry ({$existing->collection_id})."
+                );
+            }
+
+            return;
+        }
+
+        PendingCollectionUsedOtp::create([
+            'id' => $uuid,
+            'business_id' => $businessId,
+            'otp' => $otp,
+            'collection_id' => $payload['collection_id'] ?? null,
+            'issued_at' => $payload['issued_at'] ?? now(),
+        ]);
+    }
+
     protected function resolveParentOwner(string $table, string $parentId): ?string
     {
         return match ($table) {
@@ -573,6 +730,7 @@ class SyncProcessor
             'transaction_items', 'transaction_taxes', 'payments' => Transaction::where('id', $parentId)->value('business_id'),
             'loyalty_transactions', 'credit_transactions' => Customer::where('id', $parentId)->value('business_id'),
             'purchase_order_items', 'po_audit_logs', 'po_receipt_variances', 'receipt_inspections' => PurchaseOrder::where('id', $parentId)->value('business_id'),
+            'pending_collection_events' => PendingCollection::where('id', $parentId)->value('business_id'),
             'stock_take_items' => StockTake::where('id', $parentId)->value('business_id'),
             'quotation_items' => Quotation::where('id', $parentId)->value('business_id'),
             'invoice_items', 'invoice_payments' => Invoice::where('id', $parentId)->value('business_id'),
@@ -593,6 +751,7 @@ class SyncProcessor
             'delivery_note_items' => DeliveryNote::where('id', $parentId)->value('business_id'),
             'customer_debit_note_items' => CustomerDebitNote::where('id', $parentId)->value('business_id'),
             'customer_reconciliation_items' => CustomerReconciliation::where('id', $parentId)->value('business_id'),
+            'sales_return_items' => SalesReturn::where('id', $parentId)->value('business_id'),
             default => null,
         };
     }
@@ -741,8 +900,51 @@ class SyncProcessor
         }
     }
 
+    /**
+     * A signature's ink, signer and document never change once captured —
+     * a re-sent or tampered push can only void it (and a void sticks).
+     */
+    protected function upsertDocumentSignature(string $uuid, array $payload): void
+    {
+        $existing = DocumentSignature::find($uuid);
+        if ($existing) {
+            if ($existing->voided_at === null && ! empty($payload['voided_at'])) {
+                $existing->update([
+                    'voided_at' => $payload['voided_at'],
+                    'voided_by_user_id' => $payload['voided_by_user_id'] ?? null,
+                ]);
+            }
+
+            return;
+        }
+
+        if (empty($payload['image_png'])) {
+            throw new \RuntimeException('document_signatures: image_png is required.');
+        }
+
+        DocumentSignature::create([
+            'id' => $uuid,
+            'business_id' => $payload['business_id'] ?? null,
+            'document_type' => $payload['document_type'] ?? '',
+            'document_id' => $payload['document_id'] ?? '',
+            'slot' => $payload['slot'] ?? '',
+            'signer_name' => $payload['signer_name'] ?? '',
+            'image_png' => $payload['image_png'],
+            'signed_by_user_id' => $payload['signed_by_user_id'] ?? null,
+            'signed_at' => $payload['signed_at'] ?? now(),
+            'voided_at' => $payload['voided_at'] ?? null,
+            'voided_by_user_id' => $payload['voided_by_user_id'] ?? null,
+        ]);
+    }
+
     protected function handleUpsert(string $table, string $uuid, array $payload, bool $trusted = true, ?User $actingUser = null): void
     {
+        if (PayrollSync::handles($table)) {
+            app(PayrollSync::class)->upsert($table, $uuid, $payload, $trusted);
+
+            return;
+        }
+
         switch ($table) {
             case 'locations':
                 Location::updateOrCreate(
@@ -880,6 +1082,11 @@ class SyncProcessor
                                 default => 'approval_requests: you cannot approve or reject your own request.',
                             }
                         );
+                    }
+
+                    $permissionBlock = app(ApprovalActionPermissions::class)->missing($existingApprovalRequest, $actingUser);
+                    if ($permissionBlock !== null) {
+                        throw new \RuntimeException("approval_requests: {$permissionBlock}");
                     }
                 }
 
@@ -2397,6 +2604,64 @@ class SyncProcessor
                 );
                 break;
 
+            case 'sales_returns':
+                SalesReturn::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'return_number' => $payload['return_number'] ?? '',
+                        'original_transaction_id' => $payload['original_transaction_id'] ?? null,
+                        'return_transaction_id' => $payload['return_transaction_id'] ?? null,
+                        'exchange_transaction_id' => $payload['exchange_transaction_id'] ?? null,
+                        'outcome' => $payload['outcome'] ?? 'refund',
+                        'returned_value' => $payload['returned_value'] ?? 0,
+                        'new_items_value' => $payload['new_items_value'] ?? 0,
+                        'net_amount' => $payload['net_amount'] ?? 0,
+                        'settlement_method' => $payload['settlement_method'] ?? null,
+                        'reason' => $payload['reason'] ?? '',
+                        'requested_by_user_id' => $payload['requested_by_user_id'] ?? null,
+                        'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
+                        'approval_request_id' => $payload['approval_request_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'sales_return_items':
+                SalesReturnItem::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'sales_return_id' => $payload['sales_return_id'] ?? null,
+                        'original_transaction_item_id' => $payload['original_transaction_item_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'product_name' => $payload['product_name'] ?? '',
+                        'quantity' => $payload['quantity'] ?? 0,
+                        'unit_value' => $payload['unit_value'] ?? 0,
+                        'tax_amount' => $payload['tax_amount'] ?? 0,
+                        'line_value' => $payload['line_value'] ?? 0,
+                        'condition' => $payload['condition'] ?? 'resellable',
+                    ]
+                );
+                break;
+
+            case 'sales_return_settings':
+                // business_id is this table's own primary key (see
+                // ap_tolerance_settings below), so a device can only ever
+                // touch its own row. The return period is the owner's call.
+                if (! $trusted && ! ($actingUser?->hasRole(['business_owner']) ?? false)) {
+                    throw new \RuntimeException('sales_return_settings: only the business owner can change the return period.');
+                }
+
+                DB::table('sales_return_settings')->updateOrInsert(
+                    ['business_id' => $uuid],
+                    [
+                        'return_window_days' => max(0, (int) ($payload['return_window_days'] ?? 0)),
+                        'updated_at' => now(),
+                    ]
+                );
+                break;
+
             case 'ap_tolerance_settings':
                 // Deliberately unguarded — see role_permissions' identical
                 // note: business_id IS this table's own primary key, so a
@@ -2558,6 +2823,75 @@ class SyncProcessor
                         'rejection_reason' => $payload['rejection_reason'] ?? null,
                     ]
                 );
+                break;
+
+            case 'pending_collections':
+                $this->upsertPendingCollection($uuid, $payload);
+                break;
+
+            case 'pending_collection_events':
+                // Append-only: the first push wins (a reversal decision
+                // recorded on two devices shares one deterministic id).
+                PendingCollectionEvent::firstOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'collection_id' => $payload['collection_id'] ?? null,
+                        'business_id' => $payload['business_id'] ?? null,
+                        'event_type' => $payload['event_type'] ?? '',
+                        'from_status' => $payload['from_status'] ?? null,
+                        'to_status' => $payload['to_status'] ?? null,
+                        'actor_user_id' => $payload['actor_user_id'] ?? null,
+                        'approver_user_id' => $payload['approver_user_id'] ?? null,
+                        'approval_request_id' => $payload['approval_request_id'] ?? null,
+                        'reason' => $payload['reason'] ?? null,
+                        'data_json' => $payload['data_json'] ?? null,
+                        'created_at' => $payload['created_at'] ?? now(),
+                    ]
+                );
+                break;
+
+            case 'pending_collection_used_otps':
+                $this->recordPendingUsedOtp($uuid, $payload);
+                break;
+
+            case 'pending_book_settings':
+                // business_id is the primary key (see sales_return_settings),
+                // so a device only ever touches its own row. Whether a
+                // customer must sign for Pending Book goods is the owner's call.
+                if (! $trusted && ! ($actingUser?->hasRole(['business_owner']) ?? false)) {
+                    throw new \RuntimeException('pending_book_settings: only the business owner can change this.');
+                }
+
+                DB::table('pending_book_settings')->updateOrInsert(
+                    ['business_id' => $uuid],
+                    [
+                        'require_collection_signature' => (bool) ($payload['require_collection_signature'] ?? false),
+                        'updated_at' => now(),
+                    ]
+                );
+                break;
+
+            case 'user_credentials':
+                $this->syncUserCredential($uuid, $payload, $trusted, $actingUser);
+                break;
+
+            case 'password_policies':
+                // One row per business, keyed by business_id. The rules
+                // every till password must meet are the owner's call.
+                if (! $trusted) {
+                    if (! ($actingUser?->hasRole(['business_owner']) ?? false)) {
+                        throw new \RuntimeException('password_policies: only the business owner can change this.');
+                    }
+                    if ((string) $actingUser->business_id !== $uuid) {
+                        throw new \RuntimeException('password_policies: record belongs to a different business.');
+                    }
+                }
+
+                app(TillCredentials::class)->applyPolicyPayload($uuid, $payload);
+                break;
+
+            case 'document_signatures':
+                $this->upsertDocumentSignature($uuid, $payload);
                 break;
 
             case 'receipt_inspections':
@@ -2852,7 +3186,9 @@ class SyncProcessor
                         'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
                         'approved_at' => $payload['approved_at'] ?? null,
                         'review_comment' => $payload['review_comment'] ?? null,
-                    ]
+                    ] + $this->presentStockTakeColumns($payload, [
+                        'scope_type', 'scope_bin_ids', 'scope_label',
+                    ])
                 );
                 break;
 
@@ -2879,7 +3215,10 @@ class SyncProcessor
                         'notes' => $payload['notes'] ?? null,
                         'flagged_for_recount' => $flagged,
                         'recount_completed_at' => $recountCompletedAt,
-                    ]
+                    ] + $this->presentStockTakeColumns($payload, [
+                        'damaged_qty', 'damage_breakdown', 'counted_at',
+                        'counted_by_user_id', 'warehouse_bin_id',
+                    ])
                 );
 
                 // A device's own push payload never carries
@@ -2906,6 +3245,11 @@ class SyncProcessor
                             'notes' => $stockTakeItem->notes,
                             'flagged_for_recount' => $stockTakeItem->flagged_for_recount,
                             'recount_completed_at' => $stockTakeItem->recount_completed_at?->toIso8601String(),
+                            'damaged_qty' => $stockTakeItem->damaged_qty !== null ? (float) $stockTakeItem->damaged_qty : null,
+                            'damage_breakdown' => $stockTakeItem->damage_breakdown,
+                            'counted_at' => $stockTakeItem->counted_at?->toIso8601String(),
+                            'counted_by_user_id' => $stockTakeItem->counted_by_user_id,
+                            'warehouse_bin_id' => $stockTakeItem->warehouse_bin_id,
                         ],
                         'source_updated_at' => now(),
                         'synced_at' => now(),
@@ -3320,6 +3664,8 @@ class SyncProcessor
                     'sale', 'salary_payment', 'supplier_payment',
                     'credit_payment', 'invoice_payment',
                     'asset_acquisition', 'asset_disposal',
+                    // Payroll — see PayRunPostingService.
+                    'pay_run', 'pay_run_payment', 'statutory_remittance', 'staff_loan',
                 ];
                 $idempotencyKey = ($sourceType && $sourceId && in_array($sourceType, $singleJournalPerSourceTypes, true))
                     ? "{$sourceType}:{$sourceId}"
@@ -3881,6 +4227,30 @@ class SyncProcessor
         }
     }
 
+    /**
+     * A till password change, pushed by a paired device. The target user
+     * must belong to the same business as the record and as the device's
+     * own account. Which person at the till may change whose password (self,
+     * or the owner resetting someone) is enforced on the till, since the
+     * device token belongs to whoever paired it, not whoever is signed in.
+     */
+    protected function syncUserCredential(string $uuid, array $payload, bool $trusted, ?User $actingUser): void
+    {
+        $target = User::find($uuid);
+        if (! $target) {
+            throw new MissingParentRecordException('user_credentials');
+        }
+        $businessId = (string) ($payload['business_id'] ?? '');
+        if ((string) $target->business_id !== $businessId) {
+            throw new \RuntimeException('user_credentials: record belongs to a different business.');
+        }
+        if (! $trusted && (string) $actingUser?->business_id !== $businessId) {
+            throw new \RuntimeException('user_credentials: record belongs to a different business.');
+        }
+
+        app(TillCredentials::class)->applyCredentialPayload($uuid, $payload);
+    }
+
     protected function syncUser(string $uuid, array $payload, bool $trusted = true, ?User $actingUser = null): void
     {
         // Captured before updateOrCreate() below overwrites the row — this
@@ -4317,6 +4687,42 @@ class SyncProcessor
     }
 
     /**
+     * Stock-take v2 columns (scope, damage, counted-by and warehouse bin)
+     * are only written when the payload actually carries the key, so a
+     * push from an older app build (which doesn't know them) can't null
+     * out values another device already recorded. JSON columns are stored
+     * as text — an already-decoded array is re-encoded.
+     *
+     * @param  array<string, mixed>  $payload
+     * @param  array<int, string>  $columns
+     * @return array<string, mixed>
+     */
+    private function presentStockTakeColumns(array $payload, array $columns): array
+    {
+        $attributes = [];
+
+        foreach ($columns as $column) {
+            if (! array_key_exists($column, $payload)) {
+                continue;
+            }
+
+            $value = $payload[$column];
+
+            if (is_array($value)) {
+                $value = json_encode($value);
+            }
+
+            if ($column === 'scope_type' && ($value === null || $value === '')) {
+                $value = 'all';
+            }
+
+            $attributes[$column] = $value;
+        }
+
+        return $attributes;
+    }
+
+    /**
      * STC·08 — decides flagged_for_recount/recount_completed_at for one
      * stock_take_items upsert. See StockTakeItem::needsRecount() for how
      * this gets enforced at approval time.
@@ -4601,6 +5007,12 @@ class SyncProcessor
     protected function handleDelete(string $table, string $uuid, bool $trusted = true, ?User $actingUser = null): void
     {
         if (in_array($table, self::IMMUTABLE)) {
+            return;
+        }
+
+        if (PayrollSync::handles($table)) {
+            app(PayrollSync::class)->delete($table, $uuid, $trusted);
+
             return;
         }
 

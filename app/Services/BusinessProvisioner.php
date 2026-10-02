@@ -27,8 +27,9 @@ class BusinessProvisioner
      *   country?: string|null,
      *   currency_code?: string|null,
      *   admin_name: string,
-     *   admin_pin: string,
      *   admin_password?: string|null,
+     *   till_password?: string|null,
+     *   till_password_must_change?: bool,
      * }  $data
      */
     public function provision(array $data): Tenant
@@ -64,11 +65,21 @@ class BusinessProvisioner
                     // The owner's BackOffice password. When not supplied (legacy
                     // callers), an unusable random hash — never a guessable value.
                     'password' => Hash::make($data['admin_password'] ?? Str::random(40)),
-                    'pin_hash' => Hash::make($data['admin_pin']),
                     'is_active' => true,
                 ]);
 
                 $owner->assignRole('business_owner');
+
+                // The owner's till password. Set by someone else (the admin
+                // panel), it's temporary: they choose their own at first
+                // sign-in on the till.
+                if (! empty($data['till_password'])) {
+                    app(TillCredentials::class)->setPassword(
+                        $owner,
+                        $data['till_password'],
+                        mustChange: (bool) ($data['till_password_must_change'] ?? false),
+                    );
+                }
 
                 // The businesses row is the domain record every accounting
                 // and sync path resolves (Business::find, postIfReady,
