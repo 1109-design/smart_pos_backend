@@ -7,8 +7,13 @@ import StatusBadge from '@/Components/StatusBadge';
 interface RequestRow {
     id: string;
     product_name: string;
+    customer_name: string | null;
+    customer_phone: string | null;
+    quantity: string | number | null;
     note: string | null;
-    status: 'open' | 'fulfilled';
+    status: 'open' | 'stock_available' | 'notified' | 'fulfilled' | 'cancelled';
+    stock_available_at: string | null;
+    notified_at: string | null;
     requested_by_user_id: string | null;
     requested_by?: { id: string; name: string } | null;
     created_at: string;
@@ -41,10 +46,10 @@ export default function BackOfficeProductRequests({ requests, tally }: Props) {
     const [tab, setTab] = useState<'tally' | 'recent'>('tally');
     const [showForm, setShowForm] = useState(false);
     const { flash } = usePage().props as unknown as { flash: { success: string | null } };
-    const form = useForm({ product_name: '', note: '' });
+    const form = useForm({ product_name: '', customer_name: '', customer_phone: '', note: '' });
 
     const openCreate = () => {
-        form.setData({ product_name: '', note: '' });
+        form.setData({ product_name: '', customer_name: '', customer_phone: '', note: '' });
         form.clearErrors();
         setShowForm(true);
     };
@@ -147,11 +152,35 @@ export default function BackOfficeProductRequests({ requests, tally }: Props) {
                                     {row.product_name}
                                 </p>
                                 <StatusBadge
-                                    label={row.status === 'fulfilled' ? 'Fulfilled' : 'Open'}
-                                    variant={row.status === 'fulfilled' ? 'green' : 'amber'}
+                                    label={
+                                        {
+                                            open: 'Open',
+                                            stock_available: 'Back in stock',
+                                            notified: 'Notified',
+                                            fulfilled: 'Fulfilled',
+                                            cancelled: 'Cancelled',
+                                        }[row.status]
+                                    }
+                                    variant={row.status === 'fulfilled' ? 'green' : row.status === 'cancelled' ? 'gray' : 'amber'}
                                 />
                             </div>
+                            {(row.customer_name || row.customer_phone) && (
+                                <p className="text-xs text-slate-600 mb-1">
+                                    {row.customer_name ?? 'Customer'}
+                                    {row.customer_phone ? ` · ${row.customer_phone}` : ''}
+                                </p>
+                            )}
                             {row.note && <p className="text-xs text-slate-500 mb-3">{row.note}</p>}
+                            {row.status === 'stock_available' && (
+                                <p className="text-xs font-semibold text-amber-600 mb-2">
+                                    Back in stock — waiting on a text to the customer
+                                </p>
+                            )}
+                            {row.status === 'notified' && row.notified_at && (
+                                <p className="text-xs text-emerald-600 mb-2">
+                                    Customer notified {formatDateTime(row.notified_at)}
+                                </p>
+                            )}
                             <p className="text-xs text-slate-400 mb-3">
                                 {row.requested_by?.name ?? 'Staff'} · {formatDateTime(row.created_at)}
                             </p>
@@ -195,6 +224,28 @@ export default function BackOfficeProductRequests({ requests, tally }: Props) {
                             {form.errors.product_name && (
                                 <p className="text-xs text-red-500 mt-1">{form.errors.product_name}</p>
                             )}
+                        </div>
+
+                        <div>
+                            <label className="text-xs font-semibold text-slate-500">Customer name (optional)</label>
+                            <input
+                                type="text"
+                                value={form.data.customer_name}
+                                onChange={(e) => form.setData('customer_name', e.target.value)}
+                                placeholder="Who asked?"
+                                className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                        </div>
+
+                        <div>
+                            <label className="text-xs font-semibold text-slate-500">Customer phone (optional)</label>
+                            <input
+                                type="text"
+                                value={form.data.customer_phone}
+                                onChange={(e) => form.setData('customer_phone', e.target.value)}
+                                placeholder="For a text when it's back in stock"
+                                className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
                         </div>
 
                         <div>

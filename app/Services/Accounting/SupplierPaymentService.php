@@ -109,7 +109,14 @@ class SupplierPaymentService
         }
 
         try {
-            $cashOrBank = $this->resolveFundingAccount($payment->business_id, $payment->method, $payment->bank_account_id);
+            $cashOrBank = $this->resolveFundingAccount(
+                $payment->business_id,
+                $payment->method,
+                $payment->bank_account_id,
+                $payment->provider,
+                $payment->gl_account_id,
+                $payment->currency_code,
+            );
             $accountsPayable = $this->mappings->resolve($payment->business_id, 'accounts_payable');
 
             $this->postJournal($payment, $accountsPayable, $cashOrBank, $amount);
@@ -139,27 +146,23 @@ class SupplierPaymentService
         $this->journals->post($header);
     }
 
-    private function resolveFundingAccount(string $businessId, string $method, ?string $bankAccountId): GlAccount
-    {
-        $role = $method === 'bank' ? 'default_bank' : 'default_cash';
-        $account = $this->mappings->resolve($businessId, $role);
+    private function resolveFundingAccount(
+        string $businessId,
+        string $method,
+        ?string $bankAccountId,
+        ?string $provider = null,
+        ?string $glAccountId = null,
+        ?string $currencyCode = null
+    ): GlAccount {
+        $resolver = app(PaymentAccountResolver::class);
 
-        return $role === 'default_bank' ? $this->resolveBankAccount($bankAccountId, $account) : $account;
-    }
-
-    /**
-     * See SalePostingService::resolveBankAccount() — identical fallback
-     * behavior.
-     */
-    private function resolveBankAccount(?string $bankAccountId, GlAccount $default): GlAccount
-    {
-        if (! $bankAccountId) {
-            return $default;
-        }
-
-        $bankAccount = BankAccount::find($bankAccountId);
-        $glAccount = $bankAccount ? GlAccount::find($bankAccount->gl_account_id) : null;
-
-        return $glAccount ?? $default;
+        return $resolver->resolve(
+            businessId: $businessId,
+            method: $method,
+            currencyCode: $currencyCode,
+            paymentAccountId: $bankAccountId,
+            provider: $provider,
+            glAccountId: $glAccountId,
+        );
     }
 }

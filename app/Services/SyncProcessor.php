@@ -60,6 +60,24 @@ use App\Models\Location;
 use App\Models\LoyaltyTransaction;
 use App\Models\MilestoneTask;
 use App\Models\Payment;
+use App\Models\PaymentMethodConfig;
+use App\Models\Payroll\EmployeeLeaveEntry;
+use App\Models\Payroll\EmployeeLoan;
+use App\Models\Payroll\EmployeePayProfile;
+use App\Models\Payroll\EmployeePaySplit;
+use App\Models\Payroll\EmployeeRecurringComponent;
+use App\Models\Payroll\PayComponent;
+use App\Models\Payroll\PayrollSetting;
+use App\Models\Payroll\PayRun;
+use App\Models\Payroll\PayRunEmployee;
+use App\Models\Payroll\PayRunLine;
+use App\Models\Payroll\StatutoryRemittance;
+use App\Models\Payroll\StatutorySetting;
+use App\Models\Payroll\TaxTable;
+use App\Models\Payroll\TaxTableBand;
+use App\Models\PendingCollection;
+use App\Models\PendingCollectionEvent;
+use App\Models\PendingCollectionUsedOtp;
 use App\Models\PoAuditLog;
 use App\Models\PoReceiptVariance;
 use App\Models\ProcurementBudget;
@@ -119,9 +137,6 @@ use App\Models\Transaction;
 use App\Models\TransactionItem;
 use App\Models\TransactionTax;
 use App\Models\UnitOfMeasure;
-use App\Models\PendingCollection;
-use App\Models\PendingCollectionEvent;
-use App\Models\PendingCollectionUsedOtp;
 use App\Models\User;
 use App\Models\WarehouseBin;
 use App\Services\Accounting\AssetPostingService;
@@ -133,10 +148,10 @@ use App\Services\Accounting\OpeningBalanceService;
 use App\Services\Accounting\ProductOpeningStockPostingService;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use App\Services\Accounting\SalaryPostingService;
-use App\Services\Payroll\PayrollSync;
 use App\Services\Accounting\SalePostingService;
 use App\Services\Accounting\StockTakePostingService;
 use App\Services\Accounting\SupplierPaymentService;
+use App\Services\Payroll\PayrollSync;
 use App\Services\Zimra\ZimraSalesService;
 use App\Support\BackOfficePermission;
 use Illuminate\Database\Eloquent\Model;
@@ -260,6 +275,7 @@ class SyncProcessor
         'journal_headers' => JournalHeader::class,
         'general_ledger' => GeneralLedgerEntry::class,
         'bank_accounts' => BankAccount::class,
+        'payment_method_configs' => PaymentMethodConfig::class,
         'bank_reconciliations' => BankReconciliation::class,
         'account_role_mappings' => AccountRoleMapping::class,
         'supplier_payments' => SupplierPayment::class,
@@ -301,20 +317,20 @@ class SyncProcessor
         'sales_returns' => SalesReturn::class,
         'document_signatures' => DocumentSignature::class,
         // Payroll — see App\Services\Payroll\PayrollSync.
-        'payroll_settings' => \App\Models\Payroll\PayrollSetting::class,
-        'pay_components' => \App\Models\Payroll\PayComponent::class,
-        'employee_pay_profiles' => \App\Models\Payroll\EmployeePayProfile::class,
-        'employee_pay_splits' => \App\Models\Payroll\EmployeePaySplit::class,
-        'employee_recurring_components' => \App\Models\Payroll\EmployeeRecurringComponent::class,
-        'employee_loans' => \App\Models\Payroll\EmployeeLoan::class,
-        'tax_tables' => \App\Models\Payroll\TaxTable::class,
-        'tax_table_bands' => \App\Models\Payroll\TaxTableBand::class,
-        'statutory_settings' => \App\Models\Payroll\StatutorySetting::class,
-        'pay_runs' => \App\Models\Payroll\PayRun::class,
-        'pay_run_employees' => \App\Models\Payroll\PayRunEmployee::class,
-        'pay_run_lines' => \App\Models\Payroll\PayRunLine::class,
-        'statutory_remittances' => \App\Models\Payroll\StatutoryRemittance::class,
-        'employee_leave_entries' => \App\Models\Payroll\EmployeeLeaveEntry::class,
+        'payroll_settings' => PayrollSetting::class,
+        'pay_components' => PayComponent::class,
+        'employee_pay_profiles' => EmployeePayProfile::class,
+        'employee_pay_splits' => EmployeePaySplit::class,
+        'employee_recurring_components' => EmployeeRecurringComponent::class,
+        'employee_loans' => EmployeeLoan::class,
+        'tax_tables' => TaxTable::class,
+        'tax_table_bands' => TaxTableBand::class,
+        'statutory_settings' => StatutorySetting::class,
+        'pay_runs' => PayRun::class,
+        'pay_run_employees' => PayRunEmployee::class,
+        'pay_run_lines' => PayRunLine::class,
+        'statutory_remittances' => StatutoryRemittance::class,
+        'employee_leave_entries' => EmployeeLeaveEntry::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -1873,6 +1889,8 @@ class SyncProcessor
                         'rounding_adjustment' => $payload['rounding_adjustment'] ?? 0,
                         'bank_account_id' => $payload['bank_account_id'] ?? null,
                         'pop_attachment_path' => $payload['pop_attachment_path'] ?? null,
+                        'provider' => $payload['provider'] ?? null,
+                        'gl_account_id' => $payload['gl_account_id'] ?? null,
                     ]
                 );
 
@@ -2031,6 +2049,9 @@ class SyncProcessor
                         'reference' => $payload['reference'] ?? null,
                         'receipt_number' => $payload['receipt_number'] ?? null,
                         'bank_account_id' => $payload['bank_account_id'] ?? null,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'exchange_rate' => $payload['exchange_rate'] ?? 1.0,
+                        'base_amount' => $payload['base_amount'] ?? null,
                     ]
                 );
                 // Recompute customer credit_balance from the full ledger.
@@ -2402,6 +2423,8 @@ class SyncProcessor
                         'journal_header_id' => $payload['journal_header_id'] ?? null,
                         'created_by_user_id' => $payload['created_by_user_id'] ?? null,
                         'sync_status' => $payload['sync_status'] ?? 'synced',
+                        'provider' => $payload['provider'] ?? null,
+                        'gl_account_id' => $payload['gl_account_id'] ?? null,
                     ]
                 );
                 break;
@@ -3135,11 +3158,20 @@ class SyncProcessor
                     [
                         'business_id' => $payload['business_id'] ?? null,
                         'location_id' => $payload['location_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
                         'requested_by_user_id' => $payload['requested_by_user_id'] ?? null,
                         'product_name' => $payload['product_name'] ?? '',
+                        'customer_name' => $payload['customer_name'] ?? null,
+                        'customer_phone' => $payload['customer_phone'] ?? null,
+                        'quantity' => $payload['quantity'] ?? null,
                         'note' => $payload['note'] ?? null,
                         'status' => $payload['status'] ?? 'open',
+                        'stock_available_at' => $payload['stock_available_at'] ?? null,
+                        'notified_by_user_id' => $payload['notified_by_user_id'] ?? null,
+                        'notified_at' => $payload['notified_at'] ?? null,
+                        'sms_message_id' => $payload['sms_message_id'] ?? null,
                         'created_at' => $payload['created_at'] ?? now(),
+                        'updated_at' => $payload['updated_at'] ?? now(),
                         'deleted_at' => $payload['deleted_at'] ?? null,
                     ]
                 );
@@ -3903,6 +3935,24 @@ class SyncProcessor
                 );
                 break;
 
+            case 'payment_method_configs':
+                PaymentMethodConfig::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'method' => $payload['method'] ?? 'cash',
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'payment_account_id' => $payload['payment_account_id'] ?? null,
+                        'provider' => $payload['provider'] ?? null,
+                        'gl_account_id' => $payload['gl_account_id'] ?? null,
+                        'is_enabled' => $payload['is_enabled'] ?? true,
+                        'require_reference' => $payload['require_reference'] ?? false,
+                        'allows_change' => $payload['allows_change'] ?? false,
+                        'display_label' => $payload['display_label'] ?? '',
+                    ]
+                );
+                break;
+
             case 'bank_reconciliations':
                 $currentReconciliationStatus = BankReconciliation::where('id', $uuid)->value('status');
                 $incomingReconciliationStatus = $payload['status'] ?? 'in_progress';
@@ -4004,6 +4054,8 @@ class SyncProcessor
                         'reference' => $payload['reference'] ?? null,
                         'recorded_by_user_id' => $payload['recorded_by_user_id'] ?? null,
                         'bank_account_id' => $payload['bank_account_id'] ?? null,
+                        'provider' => $payload['provider'] ?? null,
+                        'gl_account_id' => $payload['gl_account_id'] ?? null,
                     ]
                 );
                 app(SupplierPaymentService::class)->postIfReady($supplierPayment);
@@ -4927,23 +4979,28 @@ class SyncProcessor
         $cardSales = 0.0;
         $mobileSales = 0.0;
         $creditSales = 0.0;
+        $bankTransferSales = 0.0;
+        $otherSales = 0.0;
         // Payment-method breakdown deliberately scoped to `completed` only,
         // same as the client — a refund's cash/card payout has no Payments
         // row of its own, so widening this to refunded/partial_refund
         // originals would count cash that's since left the till.
         $payments = Payment::whereIn('transaction_id', $completed->pluck('id'))->get();
         foreach ($payments as $payment) {
-            $method = strtolower($payment->method);
+            $method = strtolower($payment->method ?? '');
             $amount = (float) $payment->base_equivalent;
-            if (str_contains($method, 'cash')) {
+            if ($method === 'cash' || str_starts_with($method, 'cash')) {
                 $cashSales += $amount;
-            } elseif (str_contains($method, 'card') || str_contains($method, 'swipe')) {
+            } elseif ($method === 'card' || $method === 'swipe' || str_contains($method, 'card') || str_contains($method, 'swipe')) {
                 $cardSales += $amount;
-            } elseif (str_contains($method, 'mobile') || str_contains($method, 'ecocash')
-                || str_contains($method, 'm-pesa') || str_contains($method, 'mpesa')) {
+            } elseif ($method === 'bank_transfer' || $method === 'bank transfer' || $method === 'eft' || $method === 'cheque' || str_starts_with($method, 'bank transfer')) {
+                $bankTransferSales += $amount;
+            } elseif ($method === 'mobile_money' || $method === 'ecocash' || str_contains($method, 'mobile') || str_contains($method, 'ecocash')) {
                 $mobileSales += $amount;
-            } elseif (str_contains($method, 'credit')) {
+            } elseif ($method === 'credit' || $method === 'layby') {
                 $creditSales += $amount;
+            } else {
+                $otherSales += $amount;
             }
         }
 
@@ -4972,6 +5029,8 @@ class SyncProcessor
             'card_sales' => $cardSales,
             'mobile_money_sales' => $mobileSales,
             'credit_sales' => $creditSales,
+            'bank_transfer_sales' => $bankTransferSales,
+            'other_sales' => $otherSales,
             'total_refunds' => $refundTotal,
             'total_discounts' => $discountTotal,
             'transaction_count' => $completed->count(),

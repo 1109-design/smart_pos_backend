@@ -15,7 +15,7 @@ class Shift extends Model
         'id', 'business_id', 'location_id', 'till_id', 'cashier_id', 'opened_at', 'closed_at', 'status',
         'opening_float', 'expected_cash', 'counted_cash', 'variance',
         'total_sales', 'cash_sales', 'card_sales', 'mobile_money_sales',
-        'credit_sales', 'total_refunds', 'total_discounts', 'transaction_count',
+        'credit_sales', 'bank_transfer_sales', 'other_sales', 'total_refunds', 'total_discounts', 'transaction_count',
         'opening_float_json', 'counted_cash_json', 'notes',
     ];
 

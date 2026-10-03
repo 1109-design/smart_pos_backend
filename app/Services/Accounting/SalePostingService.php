@@ -195,7 +195,7 @@ class SalePostingService
             $paymentLines = [];
 
             foreach ($payments as $payment) {
-                $account = $this->resolvePaymentAccount($payment, $accounts);
+                $account = $this->resolvePaymentAccount($payment, $accounts, $transaction->business_id);
                 $isReceivable = $account->control_type === 'receivable' && $transaction->customer_id;
                 $key = $account->id.'|'.($isReceivable ? $transaction->customer_id : '');
 
@@ -278,17 +278,42 @@ class SalePostingService
         ]);
     }
 
-    private function resolvePaymentAccount(Payment $payment, array $accounts): GlAccount
+    private function resolvePaymentAccount(Payment $payment, array $accounts, string $businessId): GlAccount
     {
-        $method = strtolower($payment->method ?? '');
+        // 1. Direct explicit GL account
+        if ($payment->gl_account_id) {
+            $gl = GlAccount::where('business_id', $businessId)->find($payment->gl_account_id);
+            if ($gl) {
+                return $gl;
+            }
+        }
 
-        return match (true) {
-            $method === 'exchange_credit' => $accounts['exchange_clearing'],
-            str_contains($method, 'credit') => $accounts['receivable'],
-            str_contains($method, 'mobile'), str_contains($method, 'ecocash') => $accounts['mobile'],
-            str_contains($method, 'card'), str_contains($method, 'bank'), str_contains($method, 'swipe') => $this->resolveBankAccount($payment->bank_account_id, $accounts['bank']),
-            default => $accounts['cash'],
-        };
+        // 2. Delegate to PaymentAccountResolver
+        $resolver = app(PaymentAccountResolver::class);
+
+        try {
+            return $resolver->resolve(
+                businessId: $businessId,
+                method: $payment->method ?? 'cash',
+                currencyCode: $payment->currency_code,
+                paymentAccountId: $payment->bank_account_id,
+                provider: $payment->provider,
+                glAccountId: $payment->gl_account_id,
+            );
+        } catch (\Throwable $e) {
+            $method = strtolower($payment->method ?? '');
+            if ($method === 'exchange_credit') {
+                return $accounts['exchange_clearing'];
+            }
+            if ($method === 'credit') {
+                return $accounts['receivable'];
+            }
+            if ($payment->bank_account_id) {
+                return $this->resolveBankAccount($payment->bank_account_id, $accounts['bank']);
+            }
+
+            return $accounts['cash'];
+        }
     }
 
     /**

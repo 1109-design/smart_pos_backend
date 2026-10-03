@@ -155,9 +155,9 @@ return new class extends Migration
             $table->string('run_number');
             $table->unsignedSmallInteger('period_year');
             $table->unsignedTinyInteger('period_month');
-            $table->timestamp('period_start');
-            $table->timestamp('period_end');
-            $table->timestamp('pay_date');
+            $table->dateTime('period_start');
+            $table->dateTime('period_end');
+            $table->dateTime('pay_date');
             $table->string('status')->default('draft');
             $table->string('kind')->default('regular');
             $table->uuid('reverses_run_id')->nullable();

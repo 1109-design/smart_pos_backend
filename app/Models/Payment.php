@@ -15,6 +15,7 @@ class Payment extends Model
         'id', 'transaction_id', 'method', 'amount', 'currency_code',
         'exchange_rate_used', 'base_equivalent', 'change_given', 'reference',
         'rounding_adjustment', 'bank_account_id', 'pop_attachment_path',
+        'provider', 'gl_account_id',
     ];
 
     protected function casts(): array

@@ -106,16 +106,35 @@ class ZimraReceiptFormatter
         }
         $receiptTotal = round($receiptTotal, 2);
 
-        // ZIMRA expects a single condensed payment covering the receipt total.
-        $firstMethod = 'Cash';
+        // Multi-tender aggregation: sum each money type code and distribute receipt total
+        $paymentTotalsByMoneyType = [];
         foreach ($payments as $payment) {
-            $firstMethod = self::getMoneyTypeCode((string) $payment->method);
-            break;
+            $moneyType = self::getMoneyTypeCode((string) $payment->method);
+            $amount = (float) ($payment->base_equivalent ?? $payment->amount);
+            $paymentTotalsByMoneyType[$moneyType] = ($paymentTotalsByMoneyType[$moneyType] ?? 0.0) + $amount;
         }
-        $receiptPayments = [[
-            'moneyTypeCode' => $firstMethod,
-            'paymentAmount' => $receiptTotal,
-        ]];
+
+        $receiptPayments = [];
+        if (empty($paymentTotalsByMoneyType)) {
+            $receiptPayments[] = [
+                'moneyTypeCode' => 'Cash',
+                'paymentAmount' => $receiptTotal,
+            ];
+        } else {
+            $sumLegs = array_sum($paymentTotalsByMoneyType);
+            foreach ($paymentTotalsByMoneyType as $moneyType => $amt) {
+                $proportional = $sumLegs > 0 ? round(($amt / $sumLegs) * $receiptTotal, 2) : 0.0;
+                $receiptPayments[] = [
+                    'moneyTypeCode' => $moneyType,
+                    'paymentAmount' => (float) $proportional,
+                ];
+            }
+            // Ensure sum matches receiptTotal exactly to 2 decimal places to satisfy ZIMRA validation
+            $diff = round($receiptTotal - array_sum(array_column($receiptPayments, 'paymentAmount')), 2);
+            if ($diff != 0.0 && ! empty($receiptPayments)) {
+                $receiptPayments[0]['paymentAmount'] = round($receiptPayments[0]['paymentAmount'] + $diff, 2);
+            }
+        }
 
         // ── Tax aggregation ──────────────────────────────────────────────────
         $taxGroups = [];
@@ -309,9 +328,9 @@ class ZimraReceiptFormatter
         // preserved verbatim so no existing classification changes.
         $exact = match ($method) {
             'cash' => 'Cash',
-            'card', 'credit card', 'debit card' => 'Card',
+            'card', 'swipe', 'credit card', 'debit card' => 'Card',
             'ecocash', 'mobile_money', 'mobile money', 'mobile', 'mobile wallet' => 'MobileWallet',
-            'bank_transfer', 'bank transfer', 'bank' => 'BankTransfer',
+            'bank_transfer', 'bank transfer', 'bank', 'eft', 'cheque', 'check' => 'BankTransfer',
             'coupon', 'voucher' => 'Coupon',
             'credit', 'layby' => 'Credit',
             default => null,
@@ -320,22 +339,14 @@ class ZimraReceiptFormatter
             return $exact;
         }
 
-        // Fall back to substring matching for compound method strings the
-        // app writes with an extra tender detail baked in — e.g. "POS Swipe
-        // USD - ZB Bank" (a Card leg naming its settlement bank account) or
-        // "Mobile Money - EcoCash" (a provider-qualified label) — mirroring
-        // the same substring style every GL posting-account resolver already
-        // uses (SalePostingService::resolvePaymentAccount and its Dart/PHP
-        // twins). Without this, a swipe/bank-qualified method string fell
-        // through to the exact match's `default => 'Other'` and reported the
-        // wrong fiscal money type to ZIMRA.
+        // Fall back to prefix and keyword matching for legacy compound strings
         return match (true) {
-            str_contains($method, 'card'), str_contains($method, 'swipe') => 'Card',
-            str_contains($method, 'mobile'), str_contains($method, 'ecocash') => 'MobileWallet',
-            str_contains($method, 'bank_transfer'), str_contains($method, 'bank transfer') => 'BankTransfer',
-            str_contains($method, 'cash') => 'Cash',
-            str_contains($method, 'coupon'), str_contains($method, 'voucher') => 'Coupon',
-            str_contains($method, 'credit'), str_contains($method, 'layby') => 'Credit',
+            str_starts_with($method, 'cash') || str_contains($method, 'cash') => 'Cash',
+            str_starts_with($method, 'pos swipe') || str_contains($method, 'card') || str_contains($method, 'swipe') => 'Card',
+            str_starts_with($method, 'bank transfer') || str_contains($method, 'bank_transfer') || str_contains($method, 'bank') || str_contains($method, 'eft') || str_contains($method, 'cheque') => 'BankTransfer',
+            str_contains($method, 'mobile') || str_contains($method, 'ecocash') => 'MobileWallet',
+            str_contains($method, 'coupon') || str_contains($method, 'voucher') => 'Coupon',
+            str_contains($method, 'credit') || str_contains($method, 'layby') => 'Credit',
             default => 'Other',
         };
     }
