@@ -2,7 +2,6 @@
 
 namespace Tests\Feature;
 
-use App\Http\Middleware\AuthenticateBackOfficeUser;
 use App\Models\ApprovalRequest;
 use App\Models\Business;
 use App\Models\Device;
@@ -77,8 +76,10 @@ class ProcurementBudgetGateTest extends TestCase
         $this->assertSame('sent', $po->status);
     }
 
-    public function test_a_po_that_would_exceed_the_period_budget_is_held_for_approval(): void
+    public function test_a_po_over_the_period_budget_is_not_held_by_the_server(): void
     {
+        // PO approval is decided in the app (Approval Setup stages); the
+        // server honours the app's 'sent' rather than re-gating it on budget.
         $tenantId = 'tenant-budget-2';
         $token = $this->actingDeviceToken($tenantId);
         $userId = (string) Str::uuid();
@@ -89,59 +90,14 @@ class ProcurementBudgetGateTest extends TestCase
             'amount' => 1000, 'created_by_user_id' => $userId,
         ]);
 
-        // First PO: 700, well within budget.
         $this->pushPo($token, $tenantId, (string) Str::uuid(), 'PO-1', 700, $userId)->assertOk();
-        // Second PO: another 500 would bring the period total to 1200 > 1000.
         $secondPoId = (string) Str::uuid();
         $this->pushPo($token, $tenantId, $secondPoId, 'PO-2', 500, $userId)->assertOk();
 
-        $secondPo = PurchaseOrder::findOrFail($secondPoId);
-        $this->assertSame('pending_approval', $secondPo->status);
-
-        $request = ApprovalRequest::where('subject_id', $secondPoId)->first();
-        $this->assertNotNull($request);
-        $this->assertSame('approve_purchase_order', $request->action);
-        $this->assertStringContainsString($budget->name, $request->payload_json['reason']);
-
-        // Budget spend only counts what's actually been sent (700), not the
-        // held PO — spentSoFar() must reflect reality, not double-count a
-        // PO that never actually went out.
-        $this->assertSame(700.0, $budget->fresh()->spentSoFar());
-    }
-
-    public function test_approving_a_budget_held_po_releases_it_to_sent(): void
-    {
-        $tenantId = 'tenant-budget-3';
-        $this->withoutMiddleware(AuthenticateBackOfficeUser::class);
-        Tenant::firstOrCreate(['id' => $tenantId], ['business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com', 'pairing_code' => substr(md5($tenantId), 0, 6)]);
-        $requester = User::factory()->create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'email' => $tenantId.'-requester@example.com', 'is_active' => true]);
-        // Separate from $requester — ApprovalRuleEngine::canApprove() now
-        // enforces separation of duties (the requester can't also be the
-        // approver of their own request), so the PO creator and the
-        // BackOffice user resolving it must be two different people.
-        $owner = User::factory()->create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'email' => $tenantId.'-owner2@example.com', 'is_active' => true]);
-
-        $token = $this->actingDeviceToken($tenantId.'-device');
-        Device::where('tenant_id', $tenantId.'-device')->update(['tenant_id' => $tenantId]);
-
-        ProcurementBudget::create([
-            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Sept 2026',
-            'period_start' => now()->startOfMonth(), 'period_end' => now()->endOfMonth(),
-            'amount' => 100, 'created_by_user_id' => $requester->id,
-        ]);
-
-        $poId = (string) Str::uuid();
-        $this->pushPo($token, $tenantId, $poId, 'PO-1', 200, $requester->id)->assertOk();
-        $this->assertSame('pending_approval', PurchaseOrder::findOrFail($poId)->status);
-
-        session(['backoffice' => [
-            'tenant_id' => $tenantId, 'user_id' => $owner->id, 'user_name' => $owner->name,
-            'user_email' => $owner->email, 'role' => 'business_owner', 'business_name' => $tenantId, 'currency_code' => 'USD',
-        ]]);
-        $request = ApprovalRequest::where('subject_id', $poId)->firstOrFail();
-        $this->post("/office/approvals/{$request->id}/approve")->assertRedirect();
-
-        $this->assertSame('sent', PurchaseOrder::findOrFail($poId)->fresh()->status);
+        $this->assertSame('sent', PurchaseOrder::findOrFail($secondPoId)->status);
+        $this->assertSame(0, ApprovalRequest::where('subject_id', $secondPoId)->count());
+        // Budget tracking still reflects real spend.
+        $this->assertSame(1200.0, $budget->fresh()->spentSoFar());
     }
 
     public function test_a_budget_outside_its_period_does_not_gate(): void

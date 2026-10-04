@@ -146,6 +146,7 @@ use App\Services\Accounting\GrvPostingService;
 use App\Services\Accounting\InvoicePaymentPostingService;
 use App\Services\Accounting\OpeningBalanceService;
 use App\Services\Accounting\ProductOpeningStockPostingService;
+use App\Services\Accounting\JournalEntryApprovalService;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use App\Services\Accounting\SalaryPostingService;
 use App\Services\Accounting\SalePostingService;
@@ -1137,6 +1138,27 @@ class SyncProcessor
                         'delegated_from_user_id' => $payload['delegated_from_user_id'] ?? null,
                     ]
                 );
+
+                if ($currentApprovalStatus === 'pending'
+                    && in_array($incomingApprovalStatus, ['approved', 'rejected'], true)) {
+                    // A PO decided in the app's Approvals inbox: release or
+                    // cancel it here too, so the server never keeps a PO the
+                    // app already decided at pending_approval.
+                    if (($payload['action'] ?? null) === 'approve_purchase_order'
+                        && ($payload['subject_type'] ?? null) === 'PurchaseOrder') {
+                        $decided = ApprovalRequest::find($uuid);
+                        $approver = (string) ($payload['approver_user_id'] ?? $actingUser?->id ?? '');
+                        $incomingApprovalStatus === 'approved'
+                            ? app(PurchaseOrderApprovalGate::class)->resolveApproved($decided, $approver)
+                            : app(PurchaseOrderApprovalGate::class)->resolveRejected($decided, $approver);
+                    }
+
+                    // A manual journal held for approval posts (or is
+                    // discarded) on its final decision.
+                    if (($payload['action'] ?? null) === JournalEntryApprovalService::ACTION) {
+                        app(JournalEntryApprovalService::class)->applyDecision(ApprovalRequest::find($uuid));
+                    }
+                }
                 break;
 
             case 'stock_transfer_items':
@@ -2758,7 +2780,7 @@ class SyncProcessor
 
             case 'purchase_orders':
                 $existingPo = PurchaseOrder::find($uuid);
-                [$status, $justGated, $gateReason] = $this->gatePurchaseOrderStatus($existingPo, $payload);
+                [$status] = $this->gatePurchaseOrderStatus($existingPo, $payload);
 
                 PurchaseOrder::updateOrCreate(
                     ['id' => $uuid],
@@ -2781,9 +2803,6 @@ class SyncProcessor
                 );
                 $this->recomputePurchaseOrderTotals($uuid);
 
-                if ($justGated) {
-                    app(PurchaseOrderApprovalGate::class)->requestApproval($uuid, $gateReason);
-                }
                 break;
 
             case 'purchase_order_items':
@@ -4638,25 +4657,6 @@ class SyncProcessor
     }
 
     /**
-     * Purchasing & Cash Vault Blueprint, part D — a PO over the business's
-     * configured threshold is held at 'pending_approval' instead of moving
-     * to 'sent', with a remote ApprovalRequest raised for an owner/manager
-     * to clear (see PurchaseOrderApprovalGate). Only the first transition
-     * into 'sent' (from null/'draft') is ever gated — once a PO has reached
-     * pending_approval, this device's payload is a stale copy of the
-     * original submission (it doesn't know a review is pending yet), so its
-     * 'sent' claim is ignored rather than re-applied. Resolving the request
-     * writes the final status directly (bypassing this method entirely —
-     * see PurchaseOrderApprovalGate::resolve()), so there's no path back
-     * into this gate once a decision has been made.
-     *
-     * @param  array<string, mixed>  $payload
-     * @return array{0: string, 1: bool} the status to persist, and whether this call just newly raised the gate
-     */
-    /**
-     * @return array{0: string, 1: bool, 2: ?string} [status, justGated, gateReason]
-     */
-    /**
      * Server-side backstop for actions the spec requires a supervisor to
      * approve before they take effect: void/refund/exchange-rate-change.
      * The Flutter approval dialog (`requireApproval()`) already raises an
@@ -4825,51 +4825,23 @@ class SyncProcessor
         return $businessId ? Business::find($businessId)?->stockTakeVarianceThresholdPercent() : null;
     }
 
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array{0: string, 1: bool, 2: ?string} [status, justGated (always false), gateReason]
+     */
     private function gatePurchaseOrderStatus(?PurchaseOrder $existing, array $payload): array
     {
         $incomingStatus = $payload['status'] ?? 'draft';
 
-        if ($existing?->status === 'pending_approval') {
-            return ['pending_approval', false, null];
-        }
-
+        // Approval of a PO is decided in the app (Approval Setup's
+        // 'purchase_order' stages + the app's Approvals inbox), which only
+        // ever pushes 'sent' once that approval is cleared — the server
+        // honours it rather than holding the PO under a second, server-only
+        // threshold/budget check. Only the lifecycle itself is enforced.
         if (! PurchaseOrder::isValidTransition($existing?->status, $incomingStatus)) {
             throw new \RuntimeException(
                 "Invalid purchase order transition: '{$existing?->status}' -> '{$incomingStatus}'"
             );
-        }
-
-        $isFirstSubmission = $incomingStatus === 'sent' && ($existing === null || $existing->status === 'draft');
-        if (! $isFirstSubmission) {
-            return [$incomingStatus, false, null];
-        }
-
-        $businessId = $payload['business_id'] ?? null;
-        $threshold = Business::find($businessId)?->poApprovalThreshold();
-        $totalOrdered = (float) ($payload['total_ordered'] ?? 0);
-
-        // A PO with no creator can never raise a properly-attributed
-        // ApprovalRequest (requested_by_user_id and po_audit_logs.user_id
-        // both require a real user) — gating it anyway would strand it at
-        // pending_approval with nothing able to resolve it, so it's left
-        // ungated instead of risking that dead end.
-        $hasCreator = ! empty($payload['created_by_user_id']);
-
-        if ($threshold !== null && $totalOrdered > $threshold && $hasCreator) {
-            return ['pending_approval', true, "total exceeds this business's configured PO threshold"];
-        }
-
-        // PUR·02 — a period procurement budget catches what the flat
-        // per-PO threshold above can't: many individually-small POs that
-        // add up past what's been allocated for the period. Checked
-        // against spend excluding this PO (it isn't 'sent' yet at this
-        // point) plus its own total, so the PO that actually tips the
-        // balance is the one that gets held.
-        if ($hasCreator && $businessId) {
-            $budget = ProcurementBudget::activeFor($businessId, now());
-            if ($budget && $budget->spentSoFar() + $totalOrdered > (float) $budget->amount) {
-                return ['pending_approval', true, "would exceed the '{$budget->name}' procurement budget for this period"];
-            }
         }
 
         return [$incomingStatus, false, null];
