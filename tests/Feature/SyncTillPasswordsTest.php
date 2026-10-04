@@ -94,6 +94,30 @@ class SyncTillPasswordsTest extends TestCase
         $this->assertNull(DB::table('user_credentials')->where('user_id', $this->user->id)->first());
     }
 
+    public function test_a_dart_labelled_bcrypt_hash_is_accepted_and_stored_as_2y(): void
+    {
+        $token = $this->tokenFor('tenant-pw-2a', 'cashier');
+        // What the till's Dart bcrypt package produces: the same algorithm
+        // as PHP's, labelled $2a$ instead of $2y$.
+        $hash = preg_replace('/^\$2y\$/', '\$2a\$', Hash::make('New-Pass-123'));
+        $old = preg_replace('/^\$2y\$/', '\$2b\$', Hash::make('Old-Pass-456'));
+
+        $this->push($token, 'user_credentials', $this->user->id, [
+            'user_id' => $this->user->id,
+            'business_id' => 'tenant-pw-2a',
+            'password_hash' => $hash,
+            'must_change' => false,
+            'password_changed_at' => now()->toIso8601String(),
+            'history_json' => json_encode([$old]),
+        ])->assertOk()->assertJsonCount(1, 'accepted');
+
+        $row = DB::table('user_credentials')->where('user_id', $this->user->id)->first();
+        $this->assertStringStartsWith('$2y$', $row->password_hash);
+        $this->assertSame('$2y$'.substr($hash, 4), $row->password_hash);
+        $this->assertSame(['$2y$'.substr($old, 4)], json_decode($row->history_json, true));
+        $this->assertTrue(app(TillCredentials::class)->check($this->user, 'New-Pass-123'));
+    }
+
     public function test_a_till_cannot_set_a_password_for_another_business(): void
     {
         $token = $this->tokenFor('tenant-pw-3', 'business_owner');

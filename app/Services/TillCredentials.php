@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\SyncRecord;
 use App\Models\User;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 
@@ -143,6 +144,18 @@ class TillCredentials
     }
 
     /**
+     * Rewrites a `$2a$`/`$2b$` bcrypt hash to PHP's `$2y$` label. Tills
+     * before 1.0.16 hash with Dart's bcrypt package, which labels its hashes
+     * `$2a$` — the same algorithm, but `Hash::isHashed()` (password_get_info)
+     * only recognises `$2y$`, so those hashes were refused as plain
+     * passwords. Anything else is returned unchanged.
+     */
+    public static function phpBcryptLabel(mixed $hash): mixed
+    {
+        return is_string($hash) ? preg_replace('/^\$2[ab]\$/', '\$2y\$', $hash) : $hash;
+    }
+
+    /**
      * Stores a till's pushed credential row. The till hashes the password
      * itself; anything that isn't a hash is refused rather than stored.
      *
@@ -150,9 +163,14 @@ class TillCredentials
      */
     public function applyCredentialPayload(string $userId, array $payload): void
     {
-        $hash = $payload['password_hash'] ?? null;
+        $hash = self::phpBcryptLabel($payload['password_hash'] ?? null);
         if ($hash !== null && $hash !== '' && ! Hash::isHashed($hash)) {
             throw new \RuntimeException('user_credentials: password_hash must be a hash, never a plain password.');
+        }
+
+        $history = $payload['history_json'] ?? null;
+        if (is_string($history) && is_array($decoded = json_decode($history, true))) {
+            $history = json_encode(array_map([self::class, 'phpBcryptLabel'], $decoded));
         }
 
         DB::table('user_credentials')->updateOrInsert(
@@ -162,9 +180,9 @@ class TillCredentials
                 'password_hash' => $hash ?: null,
                 'must_change' => (bool) ($payload['must_change'] ?? false),
                 'password_changed_at' => isset($payload['password_changed_at'])
-                    ? \Illuminate\Support\Carbon::parse($payload['password_changed_at'])
+                    ? Carbon::parse($payload['password_changed_at'])
                     : null,
-                'history_json' => is_string($payload['history_json'] ?? null) ? $payload['history_json'] : null,
+                'history_json' => is_string($history) ? $history : null,
                 'updated_at' => now(),
             ]
         );
