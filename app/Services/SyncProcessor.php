@@ -144,9 +144,9 @@ use App\Services\Accounting\CreditPaymentPostingService;
 use App\Services\Accounting\ExpensePostingService;
 use App\Services\Accounting\GrvPostingService;
 use App\Services\Accounting\InvoicePaymentPostingService;
+use App\Services\Accounting\JournalEntryApprovalService;
 use App\Services\Accounting\OpeningBalanceService;
 use App\Services\Accounting\ProductOpeningStockPostingService;
-use App\Services\Accounting\JournalEntryApprovalService;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use App\Services\Accounting\SalaryPostingService;
 use App\Services\Accounting\SalePostingService;
@@ -165,6 +165,18 @@ use Illuminate\Support\Str;
 
 class SyncProcessor
 {
+    /**
+     * Product columns an upsert leaves untouched when the payload omits the
+     * key entirely (see the 'products' case) — added after the original
+     * payload shape, so older device builds don't know to send them.
+     *
+     * @var list<string>
+     */
+    private const PRODUCT_KEEP_WHEN_ABSENT = [
+        'sheet_width', 'sheet_height', 'sheet_min_usable_width', 'sheet_min_usable_height',
+        'sheet_kerf_width', 'sheet_cutting_charge', 'sheet_allow_rotate', 'is_taxable',
+    ];
+
     // Tables whose records are immutable — delete operations are ignored
     private const IMMUTABLE = [
         'stock_movements', 'loyalty_transactions', 'credit_transactions',
@@ -1553,45 +1565,56 @@ class SyncProcessor
                 $productExisted = Product::where('id', $uuid)->exists();
                 $openingStock = (float) ($payload['stock_quantity'] ?? 0);
 
-                $product = Product::updateOrCreate(
-                    ['id' => $uuid],
-                    [
-                        'business_id' => $payload['business_id'] ?? null,
-                        'category_id' => $payload['category_id'] ?? null,
-                        'name' => $payload['name'] ?? '',
-                        'item_type' => $payload['item_type'] ?? 'product',
-                        'sku' => $payload['sku'] ?? null,
-                        'barcode' => $payload['barcode'] ?? null,
-                        'price' => $payload['price'] ?? 0,
-                        'min_price' => $payload['min_price'] ?? null,
-                        'discount_percent' => $payload['discount_percent'] ?? null,
-                        'cost_price' => $payload['cost_price'] ?? 0,
-                        'deposit_amount' => $payload['deposit_amount'] ?? null,
-                        'unit' => $payload['unit'] ?? 'piece',
-                        'sheet_width' => $payload['sheet_width'] ?? null,
-                        'sheet_height' => $payload['sheet_height'] ?? null,
-                        // GLS·02 — every 'products' upsert is a full-row
-                        // replace (see this case's other `?? default`
-                        // fields), so a payload built before these columns
-                        // existed — or from a call site that forgot them —
-                        // would otherwise silently wipe a sheet product's
-                        // cutting rules on every unrelated receive/sale.
-                        'sheet_min_usable_width' => $payload['sheet_min_usable_width'] ?? null,
-                        'sheet_min_usable_height' => $payload['sheet_min_usable_height'] ?? null,
-                        'sheet_kerf_width' => $payload['sheet_kerf_width'] ?? null,
-                        'sheet_cutting_charge' => $payload['sheet_cutting_charge'] ?? null,
-                        'sheet_allow_rotate' => $payload['sheet_allow_rotate'] ?? true,
-                        'track_stock' => $payload['track_stock'] ?? true,
-                        // stock_quantity is accepted from payload for initial setup.
-                        // It will be overridden below if movements exist (multi-device safe).
-                        'stock_quantity' => $payload['stock_quantity'] ?? 0,
-                        'low_stock_threshold' => $payload['low_stock_threshold'] ?? 5,
-                        'image_path' => $payload['image_path'] ?? null,
-                        'expiry_date' => $payload['expiry_date'] ?? null,
-                        'is_active' => $payload['is_active'] ?? true,
-                        'is_taxable' => $payload['is_taxable'] ?? true,
-                    ]
-                );
+                $productAttributes = [
+                    'business_id' => $payload['business_id'] ?? null,
+                    'category_id' => $payload['category_id'] ?? null,
+                    'name' => $payload['name'] ?? '',
+                    'item_type' => $payload['item_type'] ?? 'product',
+                    'sku' => $payload['sku'] ?? null,
+                    'barcode' => $payload['barcode'] ?? null,
+                    'price' => $payload['price'] ?? 0,
+                    'min_price' => $payload['min_price'] ?? null,
+                    'discount_percent' => $payload['discount_percent'] ?? null,
+                    'cost_price' => $payload['cost_price'] ?? 0,
+                    'deposit_amount' => $payload['deposit_amount'] ?? null,
+                    'unit' => $payload['unit'] ?? 'piece',
+                    'sheet_width' => $payload['sheet_width'] ?? null,
+                    'sheet_height' => $payload['sheet_height'] ?? null,
+                    // GLS·02 — every 'products' upsert is a full-row
+                    // replace (see this case's other `?? default`
+                    // fields), so a payload built before these columns
+                    // existed — or from a call site that forgot them —
+                    // would otherwise silently wipe a sheet product's
+                    // cutting rules on every unrelated receive/sale.
+                    'sheet_min_usable_width' => $payload['sheet_min_usable_width'] ?? null,
+                    'sheet_min_usable_height' => $payload['sheet_min_usable_height'] ?? null,
+                    'sheet_kerf_width' => $payload['sheet_kerf_width'] ?? null,
+                    'sheet_cutting_charge' => $payload['sheet_cutting_charge'] ?? null,
+                    'sheet_allow_rotate' => $payload['sheet_allow_rotate'] ?? true,
+                    'track_stock' => $payload['track_stock'] ?? true,
+                    // stock_quantity is accepted from payload for initial setup.
+                    // It will be overridden below if movements exist (multi-device safe).
+                    'stock_quantity' => $payload['stock_quantity'] ?? 0,
+                    'low_stock_threshold' => $payload['low_stock_threshold'] ?? 5,
+                    'image_path' => $payload['image_path'] ?? null,
+                    'expiry_date' => $payload['expiry_date'] ?? null,
+                    'is_active' => $payload['is_active'] ?? true,
+                    'is_taxable' => $payload['is_taxable'] ?? true,
+                ];
+                // A key that is absent (as opposed to sent as null) means the
+                // sender didn't know about that column — older app builds'
+                // stock-recompute/archive pushes never included sheet_* or
+                // is_taxable. Keep the stored value for an existing product
+                // instead of letting the `?? default` above wipe it; that
+                // wipe is what kept erasing sheet dimensions.
+                if ($productExisted) {
+                    foreach (self::PRODUCT_KEEP_WHEN_ABSENT as $column) {
+                        if (! array_key_exists($column, $payload)) {
+                            unset($productAttributes[$column]);
+                        }
+                    }
+                }
+                $product = Product::updateOrCreate(['id' => $uuid], $productAttributes);
                 // First time this product is created with an opening quantity: give it
                 // a ledger entry, same as every other stock change, so take-on has an
                 // audit trail instead of being a bare column write nothing can trace.
@@ -4560,6 +4583,14 @@ class SyncProcessor
             'image_path' => $product->image_path,
             'expiry_date' => $product->expiry_date?->toIso8601String(),
             'is_active' => (bool) $product->is_active,
+            'is_taxable' => (bool) $product->is_taxable,
+            'sheet_width' => $product->sheet_width !== null ? (float) $product->sheet_width : null,
+            'sheet_height' => $product->sheet_height !== null ? (float) $product->sheet_height : null,
+            'sheet_min_usable_width' => $product->sheet_min_usable_width !== null ? (float) $product->sheet_min_usable_width : null,
+            'sheet_min_usable_height' => $product->sheet_min_usable_height !== null ? (float) $product->sheet_min_usable_height : null,
+            'sheet_kerf_width' => $product->sheet_kerf_width !== null ? (float) $product->sheet_kerf_width : null,
+            'sheet_cutting_charge' => $product->sheet_cutting_charge !== null ? (float) $product->sheet_cutting_charge : null,
+            'sheet_allow_rotate' => (bool) ($product->sheet_allow_rotate ?? true),
         ];
     }
 
