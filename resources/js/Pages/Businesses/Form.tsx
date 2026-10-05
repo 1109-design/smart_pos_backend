@@ -60,6 +60,17 @@ export default function BusinessForm({ business, tiers = [] }: Props) {
             </h1>
 
             <form onSubmit={submit} className="max-w-lg space-y-6">
+                {Object.keys(errors).length > 0 && (
+                    <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl p-4">
+                        <p className="font-medium">The business couldn't be saved. Please fix the following:</p>
+                        <ul className="list-disc list-inside mt-1.5 space-y-0.5">
+                            {Object.entries(errors).map(([field, message]) => (
+                                <li key={field}>{message}</li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
+
                 <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 space-y-5">
                     <div>
                         <label className="form-label">Business Name</label>
@@ -99,6 +110,7 @@ export default function BusinessForm({ business, tiers = [] }: Props) {
                                     <option key={t.key} value={t.key}>{t.label} — {t.price}</option>
                                 ))}
                             </select>
+                            {errors.tier && <p className="text-red-500 text-xs mt-1.5">{errors.tier}</p>}
                         </div>
 
                         <div>
@@ -111,6 +123,7 @@ export default function BusinessForm({ business, tiers = [] }: Props) {
                                 placeholder="USD"
                                 className="form-input"
                             />
+                            {errors.currency_code && <p className="text-red-500 text-xs mt-1.5">{errors.currency_code}</p>}
                         </div>
                     </div>
 
@@ -141,6 +154,7 @@ export default function BusinessForm({ business, tiers = [] }: Props) {
                             placeholder="US"
                             className="form-input"
                         />
+                        {errors.country && <p className="text-red-500 text-xs mt-1.5">{errors.country}</p>}
                     </div>
                 </div>
 
