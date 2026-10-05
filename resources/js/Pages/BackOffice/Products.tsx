@@ -84,6 +84,29 @@ interface Props {
     filters: { type: string; search: string };
 }
 
+// TEMPORARY — remove once these are re-priced. Sheet products created
+// before per-sheet pricing had the whole-sheet price saved as the per-m²
+// price; their edit forms nag until someone re-enters it per sheet.
+const SHEET_PRICES_NEEDING_FIX = new Set([
+    '4fbaaf2e-d38e-424f-83e6-14243c63e16b', // GLASS 3MM CLEAR FLOAT 1830*1220
+    '2b9bcca8-2323-4ae8-b191-aa3b245597b1', // GLASS 4MM CLEAR FLOAT 2440*1830
+    '415bd406-7433-4dc8-911c-01e79412f311', // GLASS 4MM EURO GREY FLOAT
+    'ec6f121d-c4e5-4e47-898b-2206126ae24a', // GLASS 4MM BRONZE FLOAT
+    'ffcbe64d-3e03-4441-9562-2b85d9c74b04', // GLASS 4MM SILVER BRONZE REFLECTVE
+    '3fba6a7a-8bdc-4631-8e42-367c375ad4e7', // GLASS 4MM SILVER GREY REF
+    '954a9bb8-8f16-46f6-8b66-5577ca9af2e7', // GLASS 4MM OBSCURE WINTERVUE
+    '20c5bfa0-7ff0-4122-a5c7-f2bc39c406a2', // GLASS 5MM CLEAR FLOAT 2440*1830
+    'e20dc309-f639-4d75-b147-4f78b5aacf9a', // GLASS 5MM SILVER BRONZE REF
+    '16da4dba-fbc6-48a5-aff3-9e76e5532358', // GLASS 4MM BLUE REFLECTIVE
+]);
+
+/** Per-m² from a per-sheet amount, 4dp (the price columns' precision). */
+const sheetPerM2 = (perSheet: string, width: string, height: string): string => {
+    const area = Number(width) * Number(height);
+    if (perSheet.trim() === '' || !(area > 0)) return '';
+    return (Number(perSheet) / area).toFixed(4);
+};
+
 const EMPTY_FORM = {
     name: '',
     item_type: 'product' as 'product' | 'service' | 'container' | 'sheet',
@@ -94,6 +117,10 @@ const EMPTY_FORM = {
     deposit_amount: '',
     sheet_width: '',
     sheet_height: '',
+    // Sheet products: entered per whole sheet, saved as price/cost_price per
+    // m² (what the till charges) — see sheetPerM2() and submit().
+    sheet_price: '',
+    sheet_cost: '',
     expiry_date: '',
     sku: '',
     barcode: '',
@@ -260,6 +287,14 @@ export default function BackOfficeProducts({ products, categories, locations, co
             deposit_amount: row.deposit_amount ?? '',
             sheet_width: row.sheet_width ?? '',
             sheet_height: row.sheet_height ?? '',
+            ...(() => {
+                const area = Number(row.sheet_width ?? 0) * Number(row.sheet_height ?? 0);
+                if (row.item_type !== 'sheet' || !(area > 0)) return { sheet_price: '', sheet_cost: '' };
+                return {
+                    sheet_price: (Number(row.price) * area).toFixed(2),
+                    sheet_cost: Number(row.cost_price ?? 0) > 0 ? (Number(row.cost_price) * area).toFixed(2) : '',
+                };
+            })(),
             expiry_date: row.expiry_date ? row.expiry_date.slice(0, 10) : '',
             sku: row.sku ?? '',
             barcode: row.barcode ?? '',
@@ -294,6 +329,12 @@ export default function BackOfficeProducts({ products, categories, locations, co
         // and a no-op for single-location businesses.
         form.transform((data) => ({
             ...data,
+            ...(data.item_type === 'sheet'
+                ? {
+                      price: sheetPerM2(data.sheet_price, data.sheet_width, data.sheet_height),
+                      cost_price: sheetPerM2(data.sheet_cost, data.sheet_width, data.sheet_height),
+                  }
+                : {}),
             location_stock: Object.entries(data.location_stock).map(([location_id, quantity]) => ({ location_id, quantity })),
         }));
         if (editing) {
@@ -660,8 +701,8 @@ export default function BackOfficeProducts({ products, categories, locations, co
                             <div className="sm:col-span-2 rounded-xl bg-sky-50 border border-sky-100 px-4 py-3">
                                 <p className="text-xs text-sky-800 mb-3">
                                     Default size of one whole sheet as purchased — each unit received creates one
-                                    trackable sheet with this area. Price below is per unit area (e.g. per m²);
-                                    selling a whole sheet or a custom cut both derive from it.
+                                    trackable sheet with this area. Enter prices per whole sheet below — the per-m²
+                                    price the till charges is worked out from this size.
                                 </p>
                                 <div className="grid grid-cols-2 gap-3">
                                     <div>
@@ -702,6 +743,71 @@ export default function BackOfficeProducts({ products, categories, locations, co
                                 />
                                 {form.errors.deposit_amount && <p className="text-xs text-red-500 mt-1">{form.errors.deposit_amount}</p>}
                             </div>
+                        ) : isSheet ? (
+                            <>
+                                {editing && SHEET_PRICES_NEEDING_FIX.has(editing.id) && (
+                                    <div className="sm:col-span-2 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-xs font-semibold text-amber-800">
+                                        Re-price needed: this sheet's saved price is the whole-sheet price, but the till
+                                        charges it per m². Enter the correct selling and cost price per SHEET below,
+                                        check the per-m² figures, then save.
+                                    </div>
+                                )}
+                                <div>
+                                    <label className="text-xs font-semibold text-slate-500">Selling price per sheet</label>
+                                    <input
+                                        type="number" step="0.01" min="0"
+                                        value={form.data.sheet_price}
+                                        onChange={(e) => form.setData('sheet_price', e.target.value)}
+                                        className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                    />
+                                    {form.errors.price && <p className="text-xs text-red-500 mt-1">{form.errors.price}</p>}
+                                </div>
+
+                                <div>
+                                    <label className="text-xs font-semibold text-slate-500">Cost price per sheet</label>
+                                    <input
+                                        type="number" step="0.01" min="0"
+                                        value={form.data.sheet_cost}
+                                        onChange={(e) => form.setData('sheet_cost', e.target.value)}
+                                        className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                    />
+                                    {form.errors.cost_price && <p className="text-xs text-red-500 mt-1">{form.errors.cost_price}</p>}
+                                </div>
+
+                                <div className="sm:col-span-2 rounded-xl bg-slate-50 border border-slate-100 px-4 py-2 text-xs font-semibold text-slate-600">
+                                    {Number(form.data.sheet_width) * Number(form.data.sheet_height) > 0 ? (
+                                        <>
+                                            Sheet area {(Number(form.data.sheet_width) * Number(form.data.sheet_height)).toFixed(4)} m²
+                                            {' · '}Selling {sheetPerM2(form.data.sheet_price, form.data.sheet_width, form.data.sheet_height) || '—'} /m²
+                                            {' · '}Cost {sheetPerM2(form.data.sheet_cost, form.data.sheet_width, form.data.sheet_height) || '—'} /m²
+                                        </>
+                                    ) : (
+                                        'Enter the sheet width and height above to work out the per-m² price.'
+                                    )}
+                                </div>
+
+                                <div>
+                                    <label className="text-xs font-semibold text-slate-500">Negotiation floor (per m²)</label>
+                                    <input
+                                        type="number" step="0.0001" min="0"
+                                        value={form.data.min_price}
+                                        onChange={(e) => form.setData('min_price', e.target.value)}
+                                        placeholder="Minimum allowed price per m²"
+                                        className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className="text-xs font-semibold text-slate-500">Default discount %</label>
+                                    <input
+                                        type="number" step="0.01" min="0" max="100"
+                                        value={form.data.discount_percent}
+                                        onChange={(e) => form.setData('discount_percent', e.target.value)}
+                                        placeholder="Automatic discount"
+                                        className="mt-1 w-full text-sm rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                    />
+                                </div>
+                            </>
                         ) : (
                             <>
                                 <div>
