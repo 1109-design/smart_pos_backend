@@ -84,22 +84,6 @@ interface Props {
     filters: { type: string; search: string };
 }
 
-// TEMPORARY — remove once these are re-priced. Sheet products created
-// before per-sheet pricing had the whole-sheet price saved as the per-m²
-// price; their edit forms nag until someone re-enters it per sheet.
-const SHEET_PRICES_NEEDING_FIX = new Set([
-    '4fbaaf2e-d38e-424f-83e6-14243c63e16b', // GLASS 3MM CLEAR FLOAT 1830*1220
-    '2b9bcca8-2323-4ae8-b191-aa3b245597b1', // GLASS 4MM CLEAR FLOAT 2440*1830
-    '415bd406-7433-4dc8-911c-01e79412f311', // GLASS 4MM EURO GREY FLOAT
-    'ec6f121d-c4e5-4e47-898b-2206126ae24a', // GLASS 4MM BRONZE FLOAT
-    'ffcbe64d-3e03-4441-9562-2b85d9c74b04', // GLASS 4MM SILVER BRONZE REFLECTVE
-    '3fba6a7a-8bdc-4631-8e42-367c375ad4e7', // GLASS 4MM SILVER GREY REF
-    '954a9bb8-8f16-46f6-8b66-5577ca9af2e7', // GLASS 4MM OBSCURE WINTERVUE
-    '20c5bfa0-7ff0-4122-a5c7-f2bc39c406a2', // GLASS 5MM CLEAR FLOAT 2440*1830
-    'e20dc309-f639-4d75-b147-4f78b5aacf9a', // GLASS 5MM SILVER BRONZE REF
-    '16da4dba-fbc6-48a5-aff3-9e76e5532358', // GLASS 4MM BLUE REFLECTIVE
-]);
-
 /** Per-m² from a per-sheet amount, 4dp (the price columns' precision). */
 const sheetPerM2 = (perSheet: string, width: string, height: string): string => {
     const area = Number(width) * Number(height);
@@ -745,13 +729,6 @@ export default function BackOfficeProducts({ products, categories, locations, co
                             </div>
                         ) : isSheet ? (
                             <>
-                                {editing && SHEET_PRICES_NEEDING_FIX.has(editing.id) && (
-                                    <div className="sm:col-span-2 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-xs font-semibold text-amber-800">
-                                        Re-price needed: this sheet's saved price is the whole-sheet price, but the till
-                                        charges it per m². Enter the correct selling and cost price per SHEET below,
-                                        check the per-m² figures, then save.
-                                    </div>
-                                )}
                                 <div>
                                     <label className="text-xs font-semibold text-slate-500">Selling price per sheet</label>
                                     <input
