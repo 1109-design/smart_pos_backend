@@ -16,4 +16,13 @@ return [
     // returns it, but nothing currently blocks sync on it; that
     // enforcement is a deliberate follow-up, not silently added here.
     'minimum_supported_app_version' => env('SYNC_MIN_APP_VERSION', '0.0.0'),
+
+    // Devices allowed to READ every device's sync diagnostics via
+    // GET /sync/diagnostics (comma-separated devices.device_identifier
+    // values). Every device may report its own issues; only these may read
+    // them back. Defaults to the developer's machine.
+    'diagnostics_reader_devices' => array_values(array_filter(array_map(
+        'trim',
+        explode(',', (string) env('SYNC_DIAGNOSTICS_READER_DEVICES', '371f33f8-911d-4e68-8907-c55e616a2f99'))
+    ))),
 ];
