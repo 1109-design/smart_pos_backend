@@ -139,19 +139,10 @@ use App\Models\TransactionTax;
 use App\Models\UnitOfMeasure;
 use App\Models\User;
 use App\Models\WarehouseBin;
-use App\Services\Accounting\AssetPostingService;
-use App\Services\Accounting\CreditPaymentPostingService;
-use App\Services\Accounting\ExpensePostingService;
-use App\Services\Accounting\GrvPostingService;
-use App\Services\Accounting\InvoicePaymentPostingService;
 use App\Services\Accounting\JournalEntryApprovalService;
 use App\Services\Accounting\OpeningBalanceService;
 use App\Services\Accounting\ProductOpeningStockPostingService;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
-use App\Services\Accounting\SalaryPostingService;
-use App\Services\Accounting\SalePostingService;
-use App\Services\Accounting\StockTakePostingService;
-use App\Services\Accounting\SupplierPaymentService;
 use App\Services\Payroll\PayrollSync;
 use App\Services\Zimra\ZimraSalesService;
 use App\Support\BackOfficePermission;
@@ -1082,42 +1073,14 @@ class SyncProcessor
                     );
                 }
 
-                // Same enforcement as ApprovalService::resolve() (separation
-                // of duties + rule-based required-role), applied here too —
-                // a device can resolve an approval_requests row through this
-                // generic sync-push path directly (the till's own PIN-
-                // approved/queued flows both write here), completely
-                // bypassing ApprovalService::resolve(), which only the
-                // BackOffice web controller ever calls. Without this, the
-                // guard added there closes the BackOffice route but leaves
-                // this one wide open — the same class of bypass every other
-                // escalation gate in this file exists to close. $actingUser
-                // (the device's own authenticated identity), never a
-                // payload-claimed approver_user_id, decides who's deciding.
-                if (! $trusted && $currentApprovalStatus === 'pending' && in_array($incomingApprovalStatus, ['approved', 'rejected'], true)) {
-                    $applicableRule = $existingApprovalRequest->rule_set_id
-                        ? app(ApprovalRuleEngine::class)->findApplicableRule(
-                            ApprovalRuleSet::find($existingApprovalRequest->rule_set_id),
-                            ['amount' => (float) ($existingApprovalRequest->estimated_value ?? 0)],
-                            $existingApprovalRequest->current_level ?? 1,
-                        )
-                        : null;
-
-                    if (! $actingUser || ! app(ApprovalRuleEngine::class)->canApprove($existingApprovalRequest->business_id, $actingUser->id, $existingApprovalRequest, $applicableRule)) {
-                        throw new \RuntimeException(
-                            match (true) {
-                                $applicableRule?->approval_group_id !== null => 'approval_requests: deciding this stage requires a member of the assigned approver group.',
-                                $applicableRule?->required_role !== null => "approval_requests: deciding this request requires {$applicableRule->required_role} authority or higher.",
-                                default => 'approval_requests: you cannot approve or reject your own request.',
-                            }
-                        );
-                    }
-
-                    $permissionBlock = app(ApprovalActionPermissions::class)->missing($existingApprovalRequest, $actingUser);
-                    if ($permissionBlock !== null) {
-                        throw new \RuntimeException("approval_requests: {$permissionBlock}");
-                    }
-                }
+                // The app decides approvals: the approver signs in on the till
+                // and decides from the Approvals inbox, where separation of
+                // duties, approver groups and required roles are enforced.
+                // The server only syncs the result. Re-checking authority
+                // here against $actingUser — the device token's owner, not
+                // the person who signed in to approve — rejected legitimate
+                // decisions made on shared tills. Only the transition shape
+                // above is validated.
 
                 ApprovalRequest::updateOrCreate(
                     ['id' => $uuid],
@@ -1870,14 +1833,11 @@ class SyncProcessor
                     app(ZimraSalesService::class)->queueFiscalisation($tx);
                 }
 
-                // Accounting (Phase 11b) — same transition-based trigger as
-                // ZIMRA above, plus voiding, which needs to reverse whatever
-                // was already posted rather than post something new. No-ops
-                // quietly if this sale's items/payments haven't all synced
-                // yet; the accounting:post-pending-sales sweep catches it.
-                if ($tx->status !== $previousStatus) {
-                    app(SalePostingService::class)->postIfReady($tx);
-                }
+                // No journal posting here, or anywhere in sync: the app posts
+                // every journal (and reverses it on a void) and syncs it up
+                // like any other record. Server-side posting raced the app's
+                // on 2026-10-05 — both posted the same sales, the app's were
+                // rejected as duplicates and the server's lacked COGS.
                 break;
 
             case 'transaction_items':
@@ -1896,13 +1856,6 @@ class SyncProcessor
                         'notes' => $payload['notes'] ?? null,
                     ]
                 );
-
-                // The transaction row itself may well have synced first with
-                // its items still missing — retry posting now that one more
-                // piece has landed (see the 'transactions' case above).
-                if ($parentTx = Transaction::find($payload['transaction_id'] ?? null)) {
-                    app(SalePostingService::class)->postIfReady($parentTx);
-                }
                 break;
 
             case 'transaction_taxes':
@@ -1938,11 +1891,6 @@ class SyncProcessor
                         'gl_account_id' => $payload['gl_account_id'] ?? null,
                     ]
                 );
-
-                // Same retry-on-arrival reasoning as transaction_items above.
-                if ($parentTx = Transaction::find($payload['transaction_id'] ?? null)) {
-                    app(SalePostingService::class)->postIfReady($parentTx);
-                }
                 break;
 
             case 'stock_movements':
@@ -2037,24 +1985,8 @@ class SyncProcessor
                     $this->recomputePurchaseOrderItemReceivedQty($movement->reference_id, $movement->product_id);
                 }
 
-                // Purchasing & Cash Vault Blueprint, part A — a 'receive'
-                // movement that references a real PurchaseOrder (a known
-                // supplier) gets a GRV and a GL posting; walk-in receiving
-                // (reference_id null) is a no-op inside the service itself.
-                // quantity_rejected/rejection_reason are payload-only (never
-                // a stock_movements column — a rejected unit never entered
-                // inventory in the first place), reported by the till's
-                // receiving screen alongside the movement.
-                app(GrvPostingService::class)->recordReceipt(
-                    $movement,
-                    (float) ($payload['quantity_rejected'] ?? 0),
-                    $payload['rejection_reason'] ?? null,
-                );
-
-                // A 'stocktake' movement is one variance line from an
-                // approved stock take — post its GL effect the same
-                // tolerant-of-failure way as the GRV posting above.
-                app(StockTakePostingService::class)->recordVariance($movement);
+                // GRV and stock-take journals are posted by the app (see the
+                // 'transactions' case) — nothing posts here.
 
                 // An 'opening_stock' movement here is a take-on figure set
                 // (or corrected) via ProductsController::applyLocationBalance()
@@ -2103,10 +2035,6 @@ class SyncProcessor
                 if (! empty($payload['customer_id'])) {
                     $this->recomputeCustomerBalances($payload['customer_id']);
                 }
-                // The missing half of credit-sale accounting — see
-                // CreditPaymentPostingService's doc comment. Only 'repayment'
-                // rows post anything; the service itself no-ops otherwise.
-                app(CreditPaymentPostingService::class)->postIfReady($creditTransaction);
                 // A one-time opening balance also needs to land in the
                 // formal books (if this business has any) — see
                 // OpeningBalanceService's doc comment. The till-side ledger
@@ -3190,8 +3118,6 @@ class SyncProcessor
                         'deleted_at' => $payload['deleted_at'] ?? null,
                     ]
                 );
-
-                app(ExpensePostingService::class)->postIfReady($expense);
                 break;
 
             case 'product_requests':
@@ -3457,8 +3383,6 @@ class SyncProcessor
                         'bank_account_id' => $payload['bank_account_id'] ?? null,
                     ]
                 );
-
-                app(SalaryPostingService::class)->recordPayment($salaryPayment);
                 break;
 
             case 'quotations':
@@ -3587,9 +3511,6 @@ class SyncProcessor
                 if (! empty($payload['invoice_id'])) {
                     $this->recomputeInvoiceAmountPaid($payload['invoice_id']);
                 }
-                // The missing half of invoice accounting — see
-                // InvoicePaymentPostingService's doc comment.
-                app(InvoicePaymentPostingService::class)->postIfReady($invoicePayment);
                 break;
 
             case 'credit_notes':
@@ -4100,7 +4021,6 @@ class SyncProcessor
                         'gl_account_id' => $payload['gl_account_id'] ?? null,
                     ]
                 );
-                app(SupplierPaymentService::class)->postIfReady($supplierPayment);
                 break;
 
             case 'assets':
@@ -4155,7 +4075,6 @@ class SyncProcessor
                         'created_by_user_id' => $payload['created_by_user_id'] ?? null,
                     ]
                 );
-                app(AssetPostingService::class)->postIfReady($asset);
                 break;
 
             case 'approval_rule_sets':
@@ -4290,17 +4209,12 @@ class SyncProcessor
                 break;
 
             case 'approval_request_stage_decisions':
-                // Append-only audit trail — never mutated once written, and
-                // the device pushing it must be reporting its own action
-                // (acted_by_user_id), never fabricating a decision on behalf
-                // of someone else. The authority check for the decision
-                // itself already happened in the 'approval_requests' case
-                // above (both are pushed in the same sync batch); this case
-                // only guards against forging *who* made it.
+                // Append-only audit trail — never mutated once written.
+                // acted_by_user_id is whoever signed in to the app to decide,
+                // which on a shared till is not the device token's owner, so
+                // it is recorded as the app reports it (see the
+                // 'approval_requests' case above).
                 $actedByUserId = $payload['acted_by_user_id'] ?? null;
-                if (! $trusted && $actingUser?->id !== $actedByUserId) {
-                    throw new \RuntimeException('approval_request_stage_decisions: you may only record a decision as yourself.');
-                }
 
                 ApprovalRequestStageDecision::updateOrCreate(
                     ['id' => $uuid],

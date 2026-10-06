@@ -21,15 +21,12 @@ use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
 
 /**
- * Enterprise approval-rule-engine audit follow-up — closes the gap the
- * previous two commits (separation-of-duties, rule-based required-role)
- * left open: both live only in ApprovalService::resolve(), called only by
- * ApprovalsController (BackOffice web). A device can resolve the exact
- * same approval_requests row by pushing status: 'approved'/'rejected'
- * directly to /api/v1/sync/push instead — the till's own PIN-approved and
- * queued flows both write through this generic path — completely
- * bypassing ApprovalService::resolve() and, with it, every check added
- * there. This proves that bypass is now closed too.
+ * The app decides approvals; sync only carries the result. A decision is
+ * made on a till by whoever signs in to approve, while the server only sees
+ * the device token's owner — so the server must never re-judge a pushed
+ * decision against that identity (it used to, and rejected legitimate
+ * approvals made on shared tills). Only the status transition's shape is
+ * validated. BackOffice decisions still go through ApprovalService::resolve().
  */
 class SyncApprovalRequestAuthorityBypassTest extends TestCase
 {
@@ -75,7 +72,7 @@ class SyncApprovalRequestAuthorityBypassTest extends TestCase
             ]);
     }
 
-    public function test_a_till_cannot_directly_sync_push_approval_of_its_own_request(): void
+    public function test_a_decision_pushed_from_the_requesters_till_is_synced_as_made(): void
     {
         $tenantId = 'tenant-sync-approval-bypass-1';
         Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);
@@ -94,17 +91,13 @@ class SyncApprovalRequestAuthorityBypassTest extends TestCase
             ['reason' => 'Self-raised while alone on shift'],
         );
 
-        // Same device, same user — pushing its own request's resolution
-        // directly, bypassing the BackOffice web path entirely.
+        // The till is signed in to the device as the requester; a manager
+        // signed in on it to approve. The server sees only the token owner.
         $response = $this->pushApprovalDecision($token, $request->id, 'approved');
 
         $response->assertOk();
-        $this->assertCount(0, $response->json('accepted'));
-        $this->assertSame(
-            'approval_requests: you cannot approve or reject your own request.',
-            $response->json('errors.0.reason'),
-        );
-        $this->assertTrue($request->fresh()->isPending());
+        $this->assertCount(1, $response->json('accepted'));
+        $this->assertSame('approved', $request->fresh()->status);
     }
 
     public function test_a_different_till_user_can_sync_push_a_legitimate_approval(): void
@@ -136,7 +129,7 @@ class SyncApprovalRequestAuthorityBypassTest extends TestCase
         $this->assertSame('approved', $request->fresh()->status);
     }
 
-    public function test_a_cashier_cannot_sync_push_approval_of_a_po_requiring_branch_manager_authority(): void
+    public function test_a_po_decision_pushed_from_a_cashiers_till_is_synced_as_made(): void
     {
         $this->seed(RolesAndPermissionsSeeder::class);
         $tenant = app(BusinessProvisioner::class)->provision([
@@ -152,7 +145,8 @@ class SyncApprovalRequestAuthorityBypassTest extends TestCase
         // Central Approval Stage Engine: a process with zero configured
         // stages is ungated by design (see BusinessProvisioner), so
         // provisioning alone no longer implies PO approval is required —
-        // seed it explicitly to keep testing the authority check itself.
+        // seed it explicitly so the request really needs branch-manager
+        // authority the device token's owner doesn't have.
         DefaultApprovalRulesSeeder::seedForBusiness($tenant->id);
 
         $requester = User::factory()->create(['business_id' => $tenant->id, 'email' => Str::random(8).'@x.com']);
@@ -171,8 +165,8 @@ class SyncApprovalRequestAuthorityBypassTest extends TestCase
 
         $response = $this->pushApprovalDecision($token, $request->id, 'approved');
 
-        $this->assertCount(0, $response->json('accepted'));
-        $this->assertTrue($request->fresh()->isPending());
+        $this->assertCount(1, $response->json('accepted'));
+        $this->assertSame('approved', $request->fresh()->status);
     }
 
     public function test_a_trusted_backoffice_resolution_is_not_double_gated(): void

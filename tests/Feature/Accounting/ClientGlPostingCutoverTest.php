@@ -132,7 +132,19 @@ class ClientGlPostingCutoverTest extends TestCase
         );
     }
 
-    public function test_a_non_cutover_business_still_gets_posted_server_side_exactly_as_before(): void
+    public function test_the_client_owns_the_whole_cutover_day(): void
+    {
+        // Cutover switched on mid-day. Callers pass bare dates (midnight),
+        // which used to compare as "before the cutover" and left the server
+        // posting the same day the app was posting (2026-10-05).
+        $business = new Business(['client_gl_posting_enabled_at' => '2026-06-10 10:04:43']);
+
+        $this->assertFalse($business->postsFromClientFor('2026-06-09'));
+        $this->assertTrue($business->postsFromClientFor('2026-06-10'));
+        $this->assertTrue($business->postsFromClientFor('2026-06-11'));
+    }
+
+    public function test_sync_never_posts_a_journal_even_without_a_cutover(): void
     {
         $tenantId = 'tenant-no-cutover-regression';
         $token = $this->actingDeviceToken($tenantId, null);
@@ -140,9 +152,10 @@ class ClientGlPostingCutoverTest extends TestCase
 
         $this->pushSaleSkeleton($token, $tenantId, $txId);
 
-        $journal = JournalHeader::where('business_id', $tenantId)->where('source_type', 'sale')->where('source_id', $txId)->first();
-        $this->assertNotNull($journal, 'a business with no client_gl_posting_enabled_at must keep posting server-side, unchanged');
-        $this->assertSame('posted', $journal->status);
+        $this->assertNull(
+            JournalHeader::where('business_id', $tenantId)->where('source_type', 'sale')->where('source_id', $txId)->first(),
+            'the server only syncs — the app posts every journal',
+        );
     }
 
     public function test_a_client_posted_journal_is_mirrored_and_the_server_never_double_posts_the_same_sale(): void
