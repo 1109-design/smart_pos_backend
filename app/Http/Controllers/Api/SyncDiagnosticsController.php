@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Device;
+use App\Models\DeviceDbSnapshot;
 use App\Models\DeviceSyncHealth;
 use App\Models\DeviceSyncIssue;
 use App\Models\PendingSyncRecord;
@@ -96,7 +97,18 @@ class SyncDiagnosticsController extends Controller
 
         $device->update(['last_seen_at' => $now]);
 
-        return response()->json(['accepted' => $accepted]);
+        // A database copy the developer asked this device for — see
+        // DeviceDbSnapshotController.
+        $snapshot = DeviceDbSnapshot::where('device_id', $device->id)
+            ->whereIn('status', DeviceDbSnapshot::OPEN_STATUSES)
+            ->where('requested_at', '>=', $now->copy()->subDay())
+            ->orderByDesc('id')
+            ->first();
+
+        return response()->json([
+            'accepted' => $accepted,
+            'db_snapshot_request' => $snapshot ? ['id' => $snapshot->id] : null,
+        ]);
     }
 
     /** Developer device only: every device's issues + health + server view. */
@@ -204,9 +216,7 @@ class SyncDiagnosticsController extends Controller
 
     private function isReader(?Device $device): bool
     {
-        return $device !== null
-            && ! $device->is_revoked
-            && in_array($device->device_identifier, config('sync.diagnostics_reader_devices', []), true);
+        return $device?->isDiagnosticsReader() ?? false;
     }
 
     private function upsertIssue(Device $device, array $issue): void
