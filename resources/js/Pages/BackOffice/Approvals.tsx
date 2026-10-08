@@ -23,6 +23,37 @@ interface ApprovalRow {
         exchange_items?: string;
         net_amount?: number;
         settlement_method?: string | null;
+        // stock_adjustment
+        batch_ref?: string;
+        lines?: {
+            product_id: string;
+            product_name: string;
+            delta: number;
+            movement_type: string;
+            reason: string;
+            old_qty?: number;
+            new_qty?: number;
+        }[];
+        // void_transaction
+        total?: number;
+        // change_exchange_rate
+        from_currency?: string;
+        to_currency?: string;
+        rate?: number;
+        locked?: boolean;
+        // reverse_pending_collection
+        collector_name?: string;
+        mode?: 'none' | 'partial' | string;
+        items_change?: string;
+        // set_customer_opening_balance
+        customer_id?: string;
+        customer_name?: string;
+        // import_customer_opening_balances
+        count?: number;
+        // apply_discount
+        product_name?: string;
+        discount_amount?: number;
+        discount_pct?: number;
     } | null;
     status: ApprovalStatus;
     requested_by: { id: string; name: string } | null;
@@ -74,6 +105,104 @@ function ReturnDetails({ payload }: { payload: NonNullable<ApprovalRow['payload_
     );
 }
 
+/** What a stock adjustment batch actually changes, from its approval payload. */
+function StockAdjustmentDetails({ payload }: { payload: NonNullable<ApprovalRow['payload_json']> }) {
+    const lines = payload.lines ?? [];
+    return (
+        <div className="text-xs font-normal text-slate-500 space-y-0.5 mt-0.5">
+            {payload.batch_ref && <div>Batch {payload.batch_ref}</div>}
+            {payload.reason && <div>Reason: {payload.reason}</div>}
+            {lines.map((line, i) => (
+                <div key={line.product_id ?? i}>
+                    {line.product_name}{' '}
+                    {line.old_qty !== undefined && line.new_qty !== undefined
+                        ? `${line.old_qty} → ${line.new_qty} `
+                        : ''}
+                    <span className={line.delta > 0 ? 'text-emerald-600' : 'text-red-600'}>
+                        ({line.delta > 0 ? '+' : ''}
+                        {line.delta})
+                    </span>
+                    {line.reason && line.reason !== payload.reason && <> — {line.reason}</>}
+                </div>
+            ))}
+        </div>
+    );
+}
+
+/** What a voided sale actually was, from its approval payload. */
+function VoidDetails({ payload }: { payload: NonNullable<ApprovalRow['payload_json']> }) {
+    return (
+        <div className="text-xs font-normal text-slate-500 space-y-0.5 mt-0.5">
+            <div>
+                {payload.sale_number && <>Sale #{payload.sale_number}</>}
+                {payload.total !== undefined && <> · {payload.total.toFixed(2)}</>}
+            </div>
+            {payload.reason && <div>Reason: {payload.reason}</div>}
+        </div>
+    );
+}
+
+/** The new rate an exchange-rate-change approval would apply. */
+function ExchangeRateDetails({ payload }: { payload: NonNullable<ApprovalRow['payload_json']> }) {
+    return (
+        <div className="text-xs font-normal text-slate-500 space-y-0.5 mt-0.5">
+            {payload.from_currency && payload.to_currency && payload.rate !== undefined && (
+                <div>
+                    New rate: 1 {payload.from_currency} = {payload.rate} {payload.to_currency}
+                </div>
+            )}
+            {payload.locked !== undefined && <div>Locked: {payload.locked ? 'Yes' : 'No'}</div>}
+        </div>
+    );
+}
+
+/** What a Pending Book collection reversal would correct. */
+function ReversePendingCollectionDetails({ payload }: { payload: NonNullable<ApprovalRow['payload_json']> }) {
+    return (
+        <div className="text-xs font-normal text-slate-500 space-y-0.5 mt-0.5">
+            <div>
+                {payload.sale_number && <>Sale #{payload.sale_number}</>}
+                {payload.collector_name && <> · collector {payload.collector_name}</>}
+            </div>
+            {payload.mode && (
+                <div>Correct to: {payload.mode === 'none' ? 'Nothing collected' : 'Partially collected'}</div>
+            )}
+            {payload.items_change && <div>Collected: {payload.items_change}</div>}
+            {payload.reason && <div>Reason: {payload.reason}</div>}
+        </div>
+    );
+}
+
+/** The new opening balance a customer-opening-balance approval would set. */
+function OpeningBalanceDetails({ payload }: { payload: NonNullable<ApprovalRow['payload_json']> }) {
+    return (
+        <div className="text-xs font-normal text-slate-500 space-y-0.5 mt-0.5">
+            <div>Customer: {payload.customer_name ?? payload.customer_id ?? '—'}</div>
+            {payload.amount !== undefined && <div>New opening balance: {payload.amount.toFixed(2)}</div>}
+        </div>
+    );
+}
+
+/** How many customers an opening-balance import would affect. */
+function ImportOpeningBalancesDetails({ payload }: { payload: NonNullable<ApprovalRow['payload_json']> }) {
+    return (
+        <div className="text-xs font-normal text-slate-500 space-y-0.5 mt-0.5">
+            {payload.count !== undefined && <div>Customers affected: {payload.count}</div>}
+        </div>
+    );
+}
+
+/** What a manager's discount override would apply. */
+function DiscountDetails({ payload }: { payload: NonNullable<ApprovalRow['payload_json']> }) {
+    return (
+        <div className="text-xs font-normal text-slate-500 space-y-0.5 mt-0.5">
+            {payload.product_name && <div>Product: {payload.product_name}</div>}
+            {payload.discount_pct !== undefined && <div>Discount: {payload.discount_pct.toFixed(1)}%</div>}
+            {payload.discount_amount !== undefined && <div>Discount amount: {payload.discount_amount.toFixed(2)}</div>}
+        </div>
+    );
+}
+
 const STATUS_STYLE: Record<ApprovalStatus, { label: string; variant: 'amber' | 'green' | 'red' }> = {
     pending: { label: 'Pending', variant: 'amber' },
     approved: { label: 'Approved', variant: 'green' },
@@ -85,6 +214,11 @@ const ACTION_LABELS: Record<string, string> = {
     refund_transaction: 'Return / Exchange',
     change_exchange_rate: 'Exchange rate change',
     approve_purchase_order: 'Purchase order over threshold',
+    stock_adjustment: 'Stock adjustment',
+    reverse_pending_collection: 'Reverse Pending Book collection',
+    set_customer_opening_balance: 'Set customer opening balance',
+    import_customer_opening_balances: 'Import customer opening balances',
+    apply_discount: 'Manager discount',
 };
 
 export default function BackOfficeApprovals({ requests, filters }: Props) {
@@ -152,6 +286,27 @@ export default function BackOfficeApprovals({ requests, filters }: Props) {
                                         )}
                                         {r.action === 'refund_transaction' && r.payload_json && (
                                             <ReturnDetails payload={r.payload_json} />
+                                        )}
+                                        {r.action === 'stock_adjustment' && r.payload_json && (
+                                            <StockAdjustmentDetails payload={r.payload_json} />
+                                        )}
+                                        {r.action === 'void_transaction' && r.payload_json && (
+                                            <VoidDetails payload={r.payload_json} />
+                                        )}
+                                        {r.action === 'change_exchange_rate' && r.payload_json && (
+                                            <ExchangeRateDetails payload={r.payload_json} />
+                                        )}
+                                        {r.action === 'reverse_pending_collection' && r.payload_json && (
+                                            <ReversePendingCollectionDetails payload={r.payload_json} />
+                                        )}
+                                        {r.action === 'set_customer_opening_balance' && r.payload_json && (
+                                            <OpeningBalanceDetails payload={r.payload_json} />
+                                        )}
+                                        {r.action === 'import_customer_opening_balances' && r.payload_json && (
+                                            <ImportOpeningBalancesDetails payload={r.payload_json} />
+                                        )}
+                                        {r.action === 'apply_discount' && r.payload_json && (
+                                            <DiscountDetails payload={r.payload_json} />
                                         )}
                                     </td>
                                     <td className="table-td text-slate-600">{r.requested_by?.name ?? '—'}</td>
