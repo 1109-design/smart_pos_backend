@@ -996,6 +996,22 @@ class SyncProcessor
                         'price_override' => $payload['price_override'] ?? null,
                     ]
                 );
+                // The pushed quantity is a device's snapshot, and it can be
+                // older than movements the same device pushes alongside it
+                // (the app's duplicate-row merge enqueues one before the
+                // movement that changes it). Once this location has a
+                // movement ledger, that ledger is the quantity — same rule
+                // as the 'stock_movements' case's recompute — so a stale
+                // snapshot can never overwrite it, whatever order the
+                // records arrive in.
+                $psProductId = $payload['product_id'] ?? $uuid;
+                $psLocationId = $payload['location_id'] ?? '';
+                if ($psLocationId !== '' && DB::table('stock_movements')
+                    ->where('product_id', $psProductId)
+                    ->where('location_id', $psLocationId)
+                    ->exists()) {
+                    $this->recomputeLocationStock($psProductId, $psLocationId);
+                }
                 break;
 
             case 'product_variant_stock':
@@ -4783,13 +4799,48 @@ class SyncProcessor
         // ever pushes 'sent' once that approval is cleared — the server
         // honours it rather than holding the PO under a second, server-only
         // threshold/budget check. Only the lifecycle itself is enforced.
-        if (! PurchaseOrder::isValidTransition($existing?->status, $incomingStatus)) {
+        if (! PurchaseOrder::isValidTransition($existing?->status, $incomingStatus)
+            && ! ($incomingStatus === 'cancelled' && $existing !== null
+                && $this->purchaseOrderReceiptsFullyReversed($existing->id))) {
             throw new \RuntimeException(
                 "Invalid purchase order transition: '{$existing?->status}' -> '{$incomingStatus}'"
             );
         }
 
         return [$incomingStatus, false, null];
+    }
+
+    /**
+     * True when the PO has received stock and every one of its 'receive'
+     * movements has been fully offset by later movements referencing it
+     * (reference_id = the receive movement's id) — i.e. the receipt was
+     * posted in error and undone, so the PO can be cancelled even though
+     * 'received' is otherwise terminal. Goods received, GRV lines and
+     * journals are immutable, so cancelling is the only way to retire such
+     * a PO; requiring the stock to be fully reversed first means a PO with
+     * real goods still on hand can never be cancelled this way. Added for
+     * the 2026-10-10 duplicate goods-receipt cleanup.
+     */
+    private function purchaseOrderReceiptsFullyReversed(string $poId): bool
+    {
+        $receipts = DB::table('stock_movements')
+            ->where('reference_id', $poId)
+            ->where('type', 'receive')
+            ->get(['id', 'quantity_change']);
+        if ($receipts->isEmpty()) {
+            return false;
+        }
+
+        foreach ($receipts as $receipt) {
+            $offset = (float) DB::table('stock_movements')
+                ->where('reference_id', $receipt->id)
+                ->sum('quantity_change');
+            if (abs((float) $receipt->quantity_change + $offset) > 0.0001) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
