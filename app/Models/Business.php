@@ -68,6 +68,16 @@ class Business extends Model
      * point SalePostingService/GrvPostingService stand down for anything
      * on or after that date, deferring to whatever journal the client
      * pushes up. See the client_gl_posting_enabled_at migration.
+     *
+     * Compared by calendar day: callers pass a bare date ('2026-10-05'),
+     * which parses to midnight, while the cutover is a full timestamp set
+     * mid-day. Comparing those directly told the server it still owned
+     * every document dated on the cutover day, while the till (comparing
+     * full timestamps) posted its own journal for anything after the
+     * cutover time, so both posted and the till's was rejected as a
+     * duplicate. On the cutover day the server now stands down; documents
+     * from before the cutover time were already posted inline before the
+     * flag existed, and the pending-* sweeps still catch stragglers.
      */
     public function postsFromClientFor(string $transDate): bool
     {
@@ -75,7 +85,8 @@ class Business extends Model
             return false;
         }
 
-        return Carbon::parse($transDate)->greaterThanOrEqualTo($this->client_gl_posting_enabled_at);
+        return Carbon::parse($transDate)->startOfDay()
+            ->greaterThanOrEqualTo($this->client_gl_posting_enabled_at->copy()->startOfDay());
     }
 
     /**

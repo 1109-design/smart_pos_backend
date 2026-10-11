@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\BackOfficeAccessController;
 use App\Http\Controllers\Api\BusinessBrandingController;
 use App\Http\Controllers\Api\DeviceAuthController;
+use App\Http\Controllers\Api\DeviceDbSnapshotController;
 use App\Http\Controllers\Api\LocalSyncConflictController;
 use App\Http\Controllers\Api\LocationController;
 use App\Http\Controllers\Api\PayrollPeriodLockController;
@@ -10,6 +11,7 @@ use App\Http\Controllers\Api\StockResetController;
 use App\Http\Controllers\Api\StockTransferController;
 use App\Http\Controllers\Api\SubscriptionController;
 use App\Http\Controllers\Api\SyncController;
+use App\Http\Controllers\Api\SyncDiagnosticsController;
 use App\Http\Controllers\Api\SyncHealthController;
 use App\Http\Controllers\Api\TillController;
 use App\Http\Controllers\Api\WebhookController;
@@ -39,6 +41,19 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::get('sync/health', [SyncHealthController::class, 'index']);
     Route::post('sync/local-conflicts', [LocalSyncConflictController::class, 'store']);
     Route::get('sync/local-conflicts', [LocalSyncConflictController::class, 'index']);
+
+    // Per-device sync diagnostics — every device reports, only the
+    // developer device(s) in config('sync.diagnostics_reader_devices') read.
+    Route::post('sync/diagnostics', [SyncDiagnosticsController::class, 'store']);
+    Route::get('sync/diagnostics', [SyncDiagnosticsController::class, 'index']);
+    Route::post('sync/diagnostics/resolve', [SyncDiagnosticsController::class, 'resolve']);
+    // On-demand copies of a device's database — the reader requests and
+    // downloads, the asked device uploads. See DeviceDbSnapshotController.
+    Route::post('sync/diagnostics/db-snapshots', [DeviceDbSnapshotController::class, 'store']);
+    Route::get('sync/diagnostics/db-snapshots', [DeviceDbSnapshotController::class, 'index']);
+    Route::get('sync/diagnostics/db-snapshots/{id}/download', [DeviceDbSnapshotController::class, 'download'])->whereNumber('id');
+    Route::post('sync/diagnostics/db-snapshots/{id}/chunks', [DeviceDbSnapshotController::class, 'chunk'])->whereNumber('id');
+    Route::post('sync/diagnostics/db-snapshots/{id}/complete', [DeviceDbSnapshotController::class, 'complete'])->whereNumber('id');
 
     // Back Office access — portal details + owner/manager password set/reset
     Route::get('backoffice/info', [BackOfficeAccessController::class, 'info']);

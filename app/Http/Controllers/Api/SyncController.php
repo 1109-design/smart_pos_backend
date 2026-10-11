@@ -827,9 +827,17 @@ class SyncController extends Controller
         $status = $request->query('status', 'pending');
         $limit = max(1, min(200, (int) $request->query('limit', 100)));
 
+        // `before_id` pages back through older conflicts — the list is
+        // capped, so without it a device could never see past the newest
+        // $limit rows.
+        $beforeId = $request->query('before_id');
+
         $query = SyncConflict::query()
             ->when($device?->tenant_id, fn ($q, $tenantId) => $q->where('business_id', $tenantId))
-            ->orderByDesc('created_at')
+            ->when(is_numeric($beforeId), fn ($q) => $q->where('id', '<', (int) $beforeId))
+            // Newest first by id (insertion order), so `before_id` pages
+            // never skip a row.
+            ->orderByDesc('id')
             ->limit($limit);
 
         if ($status !== 'all') {

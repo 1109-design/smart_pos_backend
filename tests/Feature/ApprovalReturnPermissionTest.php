@@ -144,17 +144,18 @@ class ApprovalReturnPermissionTest extends TestCase
         $this->assertSame('approved', $request->fresh()->status);
     }
 
-    public function test_a_sync_pushed_decision_needs_the_permission_too(): void
+    public function test_a_sync_pushed_decision_is_never_re_gated(): void
     {
+        // The app checked the approver's permission when they decided; the
+        // device token's owner (who the server sees) may well lack it.
         $this->grant('manager', ['issueRefund']);
         $request = $this->returnRequest();
 
         $response = $this->push($this->user('manager'), $request, 'approved');
 
         $response->assertOk();
-        $this->assertCount(0, $response->json('accepted'));
-        $this->assertStringContainsString('approveSalesReturn', $response->json('errors.0.reason'));
-        $this->assertTrue($request->fresh()->isPending());
+        $this->assertCount(1, $response->json('accepted'));
+        $this->assertSame('approved', $request->fresh()->status);
     }
 
     public function test_a_sync_pushed_decision_with_the_permission_is_accepted(): void

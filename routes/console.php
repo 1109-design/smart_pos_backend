@@ -30,58 +30,9 @@ Schedule::command('invoices:generate-recurring')
     ->withoutOverlapping()
     ->onOneServer();
 
-// ── Accounting (Phase 11b) ───────────────────────────────────────────────────
-// Catches any sale whose items/payments hadn't all synced yet when it first
-// tried to post — see SalePostingService.
-Schedule::command('accounting:post-pending-sales')
-    ->everyFifteenMinutes()
-    ->withoutOverlapping()
-    ->onOneServer();
-
-// Catches any customer credit repayment CreditPaymentPostingService's
-// inline sync hook missed, and backfills history for businesses live
-// before this posting service existed — see PostPendingCreditPayments.
-Schedule::command('accounting:post-pending-credit-payments')
-    ->everyFifteenMinutes()
-    ->withoutOverlapping()
-    ->onOneServer();
-
-// Same as above, for invoice payments — see PostPendingInvoicePayments.
-Schedule::command('accounting:post-pending-invoice-payments')
-    ->everyFifteenMinutes()
-    ->withoutOverlapping()
-    ->onOneServer();
-
-// Same as above, for salary payments — see PostPendingSalaryPayments.
-Schedule::command('accounting:post-pending-salary-payments')
-    ->everyFifteenMinutes()
-    ->withoutOverlapping()
-    ->onOneServer();
-
-// Same as above, for payroll — see PostPendingPayroll.
-Schedule::command('accounting:post-pending-payroll')
-    ->everyFifteenMinutes()
-    ->withoutOverlapping()
-    ->onOneServer();
-
-// Same as above, for supplier payments — see PostPendingSupplierPayments.
-Schedule::command('accounting:post-pending-supplier-payments')
-    ->everyFifteenMinutes()
-    ->withoutOverlapping()
-    ->onOneServer();
-
-// Same as above, for asset acquisitions/disposals (not monthly depreciation,
-// which stays its own separate daily sweep below) — see
-// PostPendingAssetTransactions.
-Schedule::command('accounting:post-pending-asset-transactions')
-    ->everyFifteenMinutes()
-    ->withoutOverlapping()
-    ->onOneServer();
-
-// Phase 9 / 11d — catches up straight-line depreciation for every active
-// asset. Daily is more than enough cadence for a monthly charge; idempotent
-// either way.
-Schedule::command('accounting:post-asset-depreciation')
-    ->daily()
-    ->withoutOverlapping()
-    ->onOneServer();
+// ── Accounting ───────────────────────────────────────────────────────────────
+// Nothing is scheduled: the app posts every journal (sales, payments, GRVs,
+// payroll, assets, depreciation) and syncs it up. The server only syncs. The
+// old accounting:post-pending-* and post-asset-depreciation sweeps raced the
+// app's own postings (2026-10-05: duplicate sale journals, the server's
+// without COGS), so they no longer run.

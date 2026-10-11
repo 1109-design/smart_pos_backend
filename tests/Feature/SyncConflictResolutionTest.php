@@ -168,4 +168,41 @@ class SyncConflictResolutionTest extends TestCase
             'operation' => 'upsert',
         ]);
     }
+
+    public function test_conflicts_page_back_with_before_id(): void
+    {
+        $tenantId = 'tenant-sync-conflict-paging';
+        $token = $this->actingDeviceToken($tenantId);
+
+        $ids = [];
+        for ($i = 0; $i < 5; $i++) {
+            $ids[] = SyncConflict::create([
+                'business_id' => $tenantId,
+                'table_name' => 'categories',
+                'record_uuid' => sprintf('33333333-3333-4333-8333-%012d', $i),
+                'reason' => 'Manual review required',
+                'conflict_type' => 'version_conflict',
+                'local_payload' => ['name' => "C{$i}"],
+                'status' => 'pending',
+            ])->id;
+        }
+
+        $first = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->getJson('/api/v1/sync/conflicts?status=pending&limit=2')
+            ->assertOk()
+            ->json('conflicts');
+        $this->assertSame([$ids[4], $ids[3]], array_column($first, 'id'));
+
+        $second = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->getJson('/api/v1/sync/conflicts?status=pending&limit=2&before_id='.$ids[3])
+            ->assertOk()
+            ->json('conflicts');
+        $this->assertSame([$ids[2], $ids[1]], array_column($second, 'id'));
+
+        $last = $this->withHeader('Authorization', 'Bearer '.$token)
+            ->getJson('/api/v1/sync/conflicts?status=pending&limit=2&before_id='.$ids[1])
+            ->assertOk()
+            ->json('conflicts');
+        $this->assertSame([$ids[0]], array_column($last, 'id'));
+    }
 }
