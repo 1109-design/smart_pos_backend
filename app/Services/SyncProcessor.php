@@ -1505,25 +1505,9 @@ class SyncProcessor
                 break;
 
             case 'exchange_rates':
-                // A rate change must be backed by an approved
-                // change_exchange_rate approval_requests row before it can
-                // become active — see hasApprovedRequest() above. The
-                // Flutter client always generates the exchange_rates row's
-                // own uuid as the approval's subject_id (rates_tab_screen.dart,
-                // approval_resolution.dart), so a direct subject_id match is
-                // sufficient here; no approval_request_id payload field
-                // needed. A rate change is always a brand-new uuid, so this
-                // still only ever gates first-insert of a given rate id — the
-                // one legitimate update to an existing row is
-                // ApprovalService::applyApprovedAction() closing out the
-                // previously-current row's valid_until (FX·06 audit history),
-                // which is server-authored ($trusted stays true there) and
-                // so never hits this untrusted-payload branch at all.
-                if (! $trusted && ! ExchangeRate::where('id', $uuid)->exists()
-                    && ! $this->hasApprovedRequest($payload['business_id'] ?? null, 'ExchangeRate', $uuid, ['change_exchange_rate'], $payload)) {
-                    throw new \RuntimeException('exchange_rates: a rate change requires an approved approval request.');
-                }
-
+                // The app decides rate-change approvals; the server only
+                // relays the resulting row (see the 2026-10-06 sync-only
+                // refactor).
                 ExchangeRate::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -1768,24 +1752,11 @@ class SyncProcessor
                 $previousStatus = $existingTx?->status;
                 $incomingStatus = $payload['status'] ?? 'completed';
 
-                // Untrusted (device-pushed) writes that move a sale into a
-                // void/refund status must be backed by an approved
-                // approval_requests row — see hasApprovedRequest() above.
-                // $previousStatus !== $incomingStatus also covers a brand
-                // new transaction born already voided/refunded (an offline
-                // void/refund of a sale that had never synced before),
-                // since $previousStatus is null there.
-                if (! $trusted && $previousStatus !== $incomingStatus) {
-                    $gatedActions = match ($incomingStatus) {
-                        'voided' => ['void_transaction'],
-                        'refunded', 'partial_refund' => ['refund_transaction'],
-                        default => null,
-                    };
-
-                    if ($gatedActions && ! $this->hasApprovedRequest($payload['business_id'] ?? null, 'Transaction', $uuid, $gatedActions, $payload)) {
-                        throw new \RuntimeException("transactions: {$incomingStatus} requires an approved approval request.");
-                    }
-                }
+                // Voids and refunds are approved in the app; the server
+                // relays them. A server-side "must have an approved request"
+                // check raced the approval row itself — a refund pushed in
+                // the same second as its approval was rejected even though
+                // the approval landed moments later.
 
                 $txData = [
                     'business_id' => $payload['business_id'] ?? null,
@@ -1910,28 +1881,11 @@ class SyncProcessor
                 break;
 
             case 'stock_movements':
-                // STK·03 — "a requisition alone must never remove stock,"
-                // and issuing one is gated on approval. Unlike void/refund/
-                // exchange-rate changes, a requisition's approval lives on
-                // its own `status` column rather than the generic
-                // `approval_requests` table (see Requisition::isApproved()),
-                // so this can't reuse hasApprovedRequest() — but the
-                // principle is identical: an untrusted device claiming a
-                // 'requisition_issue' stock movement must point at a
-                // requisition that's actually been approved, not just
-                // trust whatever the Flutter UI's own button-visibility
-                // gate would normally have enforced. Without this, a
-                // device that talks to the API directly (bypassing the
-                // app) could deduct real stock against a requisition
-                // that was never approved.
-                if (! $trusted && ($payload['type'] ?? null) === 'requisition_issue') {
-                    $requisitionId = $payload['reference_id'] ?? null;
-                    $requisition = $requisitionId ? Requisition::find($requisitionId) : null;
-
-                    if (! $requisition || ! $requisition->isApproved()) {
-                        throw new \RuntimeException('stock_movements: requisition_issue requires an approved requisition.');
-                    }
-                }
+                // Requisition issues are approved in the app; the server
+                // relays the stock movement without re-checking the
+                // requisition's status (it can lag behind the movement, or
+                // never show 'approved' at all when approve + issue were
+                // pushed together — see Requisition::ALLOWED_TRANSITIONS).
 
                 // 2026-09-29 sync audit finding C3: transfer_detail_screen.
                 // dart::_confirmReceive() is gated only by local button
@@ -4615,48 +4569,6 @@ class SyncProcessor
 
             $po->update($updates);
         }
-    }
-
-    /**
-     * Server-side backstop for actions the spec requires a supervisor to
-     * approve before they take effect: void/refund/exchange-rate-change.
-     * The Flutter approval dialog (`requireApproval()`) already raises an
-     * `approval_requests` row before executing the action locally, but that
-     * row is just another sync record — a modified client (or a raw sync
-     * payload) could otherwise push the resulting mutation directly with no
-     * approval behind it at all, since none of these upserts previously
-     * checked for one server-side.
-     *
-     * Matching is subject_id-first (the common case: the approval's subject
-     * IS the record being upserted, e.g. voiding a transaction or changing
-     * an exchange rate). A caller may instead pass an explicit
-     * `approval_request_id` in $payload for the rare case where the upserted
-     * row is a NEW record distinct from the approval's subject (a refund's
-     * compensating transaction is a fresh uuid; the approval's subject is
-     * the original sale) — that id is verified directly instead.
-     *
-     * @param  array<string, mixed>  $payload
-     * @param  string[]  $actions
-     */
-    private function hasApprovedRequest(?string $businessId, string $subjectType, string $subjectId, array $actions, array $payload): bool
-    {
-        if (empty($businessId)) {
-            return false;
-        }
-
-        $query = ApprovalRequest::where('business_id', $businessId)
-            ->where('status', 'approved')
-            ->whereIn('action', $actions);
-
-        if (! empty($payload['approval_request_id'])) {
-            return (clone $query)->where('id', $payload['approval_request_id'])
-                ->where('subject_type', $subjectType)
-                ->exists();
-        }
-
-        return $query->where('subject_type', $subjectType)
-            ->where('subject_id', $subjectId)
-            ->exists();
     }
 
     /**
