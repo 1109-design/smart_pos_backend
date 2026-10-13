@@ -1591,10 +1591,20 @@ class SyncProcessor
                 // An optional location_id (set by location-aware callers, e.g. the
                 // BackOffice create form) attributes the opening quantity to that
                 // location too, instead of leaving it in the flat total only.
+                // An older till build (or any caller that doesn't know its
+                // location) sends no location_id. A single-location business
+                // has only one place the stock can be, so attribute it there —
+                // an untagged opening line is invisible to that location's
+                // ledger, and the next recomputeLocationStock() would rebuild
+                // the location's quantity without it.
+                $openingLocationId = $payload['location_id'] ?? null;
+                if (! $productExisted && $openingStock != 0 && empty($openingLocationId)) {
+                    $openingLocationId = $this->soleLocationId($payload['business_id'] ?? null);
+                }
                 if (! $productExisted && $openingStock != 0) {
                     $openingMovement = StockMovement::create([
                         'business_id' => $payload['business_id'] ?? null,
-                        'location_id' => $payload['location_id'] ?? null,
+                        'location_id' => $openingLocationId,
                         'product_id' => $uuid,
                         'type' => 'opening_stock',
                         'quantity_change' => $openingStock,
@@ -1602,6 +1612,7 @@ class SyncProcessor
                         'reason' => 'Opening stock (take-on)',
                         'user_id' => $payload['user_id'] ?? null,
                     ]);
+                    $this->broadcastOpeningStockMovement($openingMovement);
                     // Record the take-on value in the books too — see
                     // ProductOpeningStockPostingService for why this ledger
                     // entry alone previously left the balance sheet blind to
@@ -1612,8 +1623,8 @@ class SyncProcessor
                 // If any movements exist for this product, recompute from the ledger
                 // so concurrent pushes from multiple devices converge correctly.
                 $this->recomputeProductStock($uuid);
-                if (! empty($payload['location_id'])) {
-                    $this->recomputeLocationStock($uuid, $payload['location_id']);
+                if (! empty($openingLocationId)) {
+                    $this->recomputeLocationStock($uuid, $openingLocationId);
                 }
                 break;
 
@@ -1924,6 +1935,22 @@ class SyncProcessor
                     }
                 }
 
+                // Same sole-location fallback as the 'products' case, for
+                // till pushes only: a till paired minutes earlier has no
+                // active location yet and pushes untagged movements, which
+                // count toward the product's total but no location's stock —
+                // so the location looks short and staff re-enter the count
+                // there (BARBED WIRE 50KG, 2026-10-05). Server-authored
+                // writes are left alone — e.g. BackOffice's stock reset
+                // deliberately posts an untagged line to cancel legacy
+                // untagged stock. Transfers carry their own from/to.
+                $attributedToSoleLocation = false;
+                if (! $trusted && empty($payload['location_id'])
+                    && ! in_array($payload['type'] ?? null, ['transfer_out', 'transfer_in', 'transfer'], true)) {
+                    $payload['location_id'] = $this->soleLocationId($payload['business_id'] ?? null);
+                    $attributedToSoleLocation = $payload['location_id'] !== null;
+                }
+
                 $movement = StockMovement::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -1941,6 +1968,25 @@ class SyncProcessor
                         'user_id' => $payload['user_id'] ?? null,
                     ]
                 );
+                // The SyncRecord other tills pull is the pushed payload, which
+                // still has no location — re-publish the attributed row.
+                if ($attributedToSoleLocation) {
+                    $this->emitBroadcastSyncRecord('stock_movements', $movement->id, $movement->business_id, [
+                        'business_id' => $movement->business_id,
+                        'location_id' => $movement->location_id,
+                        'to_location_id' => $movement->to_location_id,
+                        'product_id' => $movement->product_id,
+                        'type' => $movement->type,
+                        'quantity_change' => (float) $movement->quantity_change,
+                        'unit_cost' => $movement->unit_cost !== null ? (float) $movement->unit_cost : null,
+                        'running_avg_cost' => $movement->running_avg_cost !== null ? (float) $movement->running_avg_cost : null,
+                        'reason' => $movement->reason,
+                        'reference_id' => $movement->reference_id,
+                        'attachment_path' => $movement->attachment_path,
+                        'user_id' => $movement->user_id,
+                        'created_at' => $movement->created_at?->toIso8601String(),
+                    ]);
+                }
                 // Recompute the product's stock from the full movement ledger.
                 // Both must run: recomputeLocationStock keeps the per-location ledger
                 // (product_stock) accurate, and recomputeProductStock keeps the legacy
@@ -4483,6 +4529,43 @@ class SyncProcessor
             'sheet_cutting_charge' => $product->sheet_cutting_charge !== null ? (float) $product->sheet_cutting_charge : null,
             'sheet_allow_rotate' => (bool) ($product->sheet_allow_rotate ?? true),
         ];
+    }
+
+    /**
+     * Publishes a server-created 'opening_stock' movement to every device.
+     * No device ever pushed it, so without this no till would pull it and
+     * the till's stock history (built purely from its local stock_movements)
+     * would show the product's quantity with no opening-stock line behind
+     * it. Also used by the stock:publish-opening-movements backfill.
+     */
+    public function broadcastOpeningStockMovement(StockMovement $movement): void
+    {
+        $this->emitBroadcastSyncRecord('stock_movements', $movement->id, $movement->business_id, [
+            'business_id' => $movement->business_id,
+            'location_id' => $movement->location_id,
+            'product_id' => $movement->product_id,
+            'type' => $movement->type,
+            'quantity_change' => (float) $movement->quantity_change,
+            'unit_cost' => $movement->unit_cost !== null ? (float) $movement->unit_cost : null,
+            'reason' => $movement->reason,
+            'user_id' => $movement->user_id,
+            'created_at' => $movement->created_at?->toIso8601String(),
+        ]);
+    }
+
+    /**
+     * The business's only location, or null when it has none or several —
+     * with several there's no safe guess, so the caller leaves it unset.
+     */
+    public function soleLocationId(?string $businessId): ?string
+    {
+        if (! $businessId) {
+            return null;
+        }
+
+        $ids = Location::where('business_id', $businessId)->limit(2)->pluck('id');
+
+        return $ids->count() === 1 ? $ids->first() : null;
     }
 
     /**

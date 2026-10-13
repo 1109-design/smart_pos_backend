@@ -7,6 +7,7 @@ use App\Models\StockOversell;
 use App\Models\SyncConflict;
 use App\Models\SyncCursor;
 use App\Models\SyncRecord;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 /**
@@ -115,7 +116,7 @@ class SyncHealthReport
             ));
 
             $actualLiveCount = Schema::hasColumn($table, 'business_id')
-                ? \Illuminate\Support\Facades\DB::table($table)->where('business_id', $tenantId)->count()
+                ? DB::table($table)->where('business_id', $tenantId)->count()
                 : null;
 
             $results[] = [
@@ -130,11 +131,51 @@ class SyncHealthReport
         if (Schema::hasTable($pendingSyncTable) && Schema::hasColumn($pendingSyncTable, 'business_id')) {
             $results[] = [
                 'table' => $pendingSyncTable,
-                'deferred_count' => \Illuminate\Support\Facades\DB::table($pendingSyncTable)
+                'deferred_count' => DB::table($pendingSyncTable)
                     ->where('business_id', $tenantId)->count(),
             ];
         }
 
         return $results;
+    }
+
+    /**
+     * Products whose cross-location total (products.stock_quantity) no
+     * longer equals the sum of their per-location stock (product_stock).
+     * Both are recomputed from the same stock_movements ledger, so a gap
+     * means some movement counts toward the total but no location — e.g.
+     * an untagged opening_stock line that staff then re-entered at the
+     * location as a manual adjustment (HIN007, 2026-10-05: 94 vs 46).
+     * Only flags it; which line is the duplicate needs a human look.
+     *
+     * @return array<int, array{product_id: string, name: string, total: float, locations_sum: float, untagged_movements: float}>
+     */
+    public function stockMismatchesFor(string $tenantId): array
+    {
+        $locationSums = DB::table('product_stock')
+            ->selectRaw('product_id, SUM(quantity) as locations_sum')
+            ->groupBy('product_id');
+
+        $untagged = DB::table('stock_movements')
+            ->selectRaw('product_id, SUM(quantity_change) as untagged')
+            ->whereNull('location_id')
+            ->groupBy('product_id');
+
+        return DB::table('products')
+            ->joinSub($locationSums, 'ls', 'ls.product_id', '=', 'products.id')
+            ->leftJoinSub($untagged, 'um', 'um.product_id', '=', 'products.id')
+            ->where('products.business_id', $tenantId)
+            ->where('products.track_stock', true)
+            ->whereRaw('ABS(products.stock_quantity - ls.locations_sum) > 0.0001')
+            ->orderBy('products.name')
+            ->get(['products.id', 'products.name', 'products.stock_quantity', 'ls.locations_sum', 'um.untagged'])
+            ->map(fn ($row) => [
+                'product_id' => $row->id,
+                'name' => $row->name,
+                'total' => (float) $row->stock_quantity,
+                'locations_sum' => (float) $row->locations_sum,
+                'untagged_movements' => (float) ($row->untagged ?? 0),
+            ])
+            ->all();
     }
 }

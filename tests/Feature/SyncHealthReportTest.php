@@ -3,10 +3,14 @@
 namespace Tests\Feature;
 
 use App\Models\Device;
+use App\Models\Location;
+use App\Models\Product;
+use App\Models\ProductStock;
 use App\Models\StockOversell;
 use App\Models\SyncConflict;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Services\SyncHealthReport;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Tests\TestCase;
@@ -154,5 +158,26 @@ class SyncHealthReportTest extends TestCase
         $response->assertOk();
         $integrity = collect($response->json('integrity'));
         $this->assertTrue($integrity->every(fn ($row) => ($row['mismatch'] ?? false) === false));
+    }
+
+    public function test_flags_products_whose_total_disagrees_with_their_locations(): void
+    {
+        $tenantId = 'tenant-health-stock';
+        $this->tenantToken($tenantId, 'Till 01');
+        $locationId = (string) Str::uuid();
+        Location::create(['id' => $locationId, 'business_id' => $tenantId, 'name' => 'Main', 'type' => 'shop', 'is_active' => true]);
+
+        $ok = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Balanced', 'price' => 1, 'stock_quantity' => 10, 'track_stock' => true]);
+        ProductStock::create(['id' => $ok->id.'|'.$locationId, 'product_id' => $ok->id, 'location_id' => $locationId, 'quantity' => 10]);
+
+        $bad = Product::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Hinge', 'price' => 1, 'stock_quantity' => 94, 'track_stock' => true]);
+        ProductStock::create(['id' => $bad->id.'|'.$locationId, 'product_id' => $bad->id, 'location_id' => $locationId, 'quantity' => 46]);
+
+        $mismatches = app(SyncHealthReport::class)->stockMismatchesFor($tenantId);
+
+        $this->assertCount(1, $mismatches);
+        $this->assertSame('Hinge', $mismatches[0]['name']);
+        $this->assertEquals(94, $mismatches[0]['total']);
+        $this->assertEquals(46, $mismatches[0]['locations_sum']);
     }
 }
