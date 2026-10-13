@@ -56,7 +56,7 @@ class SyncApprovalRequestTransitionTest extends TestCase
         return $plain;
     }
 
-    private function pushApproval(string $token, string $tenantId, string $requestId, string $status): TestResponse
+    private function pushApproval(string $token, string $tenantId, string $requestId, string $status, ?string $reason = null): TestResponse
     {
         return $this->withHeader('Authorization', 'Bearer '.$token)
             ->postJson('/api/v1/sync/push', [
@@ -71,6 +71,7 @@ class SyncApprovalRequestTransitionTest extends TestCase
                         'action' => 'apply_discount',
                         'requested_by_user_id' => '77777777-7777-4777-8777-777777777777',
                         'status' => $status,
+                        'reason' => $reason,
                         'updated_at' => now()->toIso8601String(),
                     ],
                     'updated_at' => now()->toIso8601String(),
@@ -151,6 +152,41 @@ class SyncApprovalRequestTransitionTest extends TestCase
         $this->assertDatabaseHas('approval_requests', [
             'id' => $requestId,
             'status' => 'pending',
+        ]);
+    }
+
+    public function test_a_rejection_synced_from_the_app_records_its_rejection_reason(): void
+    {
+        $tenantId = 'tenant-approval-5';
+        $token = $this->actingDeviceToken($tenantId);
+        $requestId = (string) Str::uuid();
+
+        $this->pushApproval($token, $tenantId, $requestId, 'pending')->assertOk();
+        $this->pushApproval($token, $tenantId, $requestId, 'rejected', 'At least 40% markup')
+            ->assertOk()
+            ->assertJsonCount(0, 'errors');
+
+        $this->assertDatabaseHas('approval_requests', [
+            'id' => $requestId,
+            'status' => 'rejected',
+            'reason' => 'At least 40% markup',
+            'rejection_reason' => 'At least 40% markup',
+        ]);
+    }
+
+    public function test_an_approval_note_is_not_recorded_as_a_rejection_reason(): void
+    {
+        $tenantId = 'tenant-approval-6';
+        $token = $this->actingDeviceToken($tenantId);
+        $requestId = (string) Str::uuid();
+
+        $this->pushApproval($token, $tenantId, $requestId, 'pending')->assertOk();
+        $this->pushApproval($token, $tenantId, $requestId, 'approved', 'Looks good')->assertOk();
+
+        $this->assertDatabaseHas('approval_requests', [
+            'id' => $requestId,
+            'status' => 'approved',
+            'rejection_reason' => null,
         ]);
     }
 }

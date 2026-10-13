@@ -171,6 +171,7 @@ class BackOfficeApprovalsTest extends TestCase
             ->assertRedirect();
 
         $this->assertSame('rejected', $request->fresh()->status);
+        $this->assertSame('Rate looks wrong', $request->fresh()->rejection_reason);
     }
 
     public function test_resolving_an_already_resolved_request_fails_gracefully(): void

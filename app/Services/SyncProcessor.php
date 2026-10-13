@@ -1127,6 +1127,13 @@ class SyncProcessor
                         'branch_id' => $payload['branch_id'] ?? null,
                         'is_delegated' => $payload['is_delegated'] ?? false,
                         'delegated_from_user_id' => $payload['delegated_from_user_id'] ?? null,
+                        // Neither the app nor ApprovalService::resolve() sends
+                        // a separate rejection_reason — both carry the
+                        // decider's note in `reason`. Mirror it here so
+                        // anything reading rejection_reason sees why.
+                        'rejection_reason' => $incomingApprovalStatus === 'rejected'
+                            ? ($payload['rejection_reason'] ?? $payload['reason'] ?? null)
+                            : null,
                     ]
                 );
 
