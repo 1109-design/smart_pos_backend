@@ -73,9 +73,12 @@ class PaymentAccountResolver
 
         // 4. Role Mapping by Canonical Method
         $normalized = str_replace([' ', '-'], '_', strtolower(trim($method)));
+
         return match ($normalized) {
             'exchange_credit' => GlAccount::where('business_id', $businessId)->where('code', '2045')->first()
                 ?? throw new RuntimeException("Exchange clearing GL account (2045) not found for business {$businessId}"),
+            'legacy_deposit' => GlAccount::where('business_id', $businessId)->where('code', '2046')->first()
+                ?? throw new RuntimeException("Old-system deposits GL account (2046) not found for business {$businessId}"),
             'credit' => $this->mappings->resolve($businessId, 'accounts_receivable'),
             'card', 'swipe' => $this->mappings->resolve($businessId, 'default_bank'),
             'bank_transfer', 'bank', 'eft', 'cheque', 'check' => $this->mappings->resolve($businessId, 'default_bank'),

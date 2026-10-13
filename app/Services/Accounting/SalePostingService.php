@@ -191,6 +191,18 @@ class SalePostingService
                 );
             }
 
+            // Old-System Deposit legs ('legacy_deposit') — money paid in the
+            // previous POS, applied to goods collected now — use up
+            // Old-System Customer Deposits.
+            if ($payments->contains(fn ($p) => strtolower((string) $p->method) === 'legacy_deposit')) {
+                $accounts['legacy_deposits'] = app(ChartOfAccountsSeeder::class)->ensureAccount(
+                    $transaction->business_id,
+                    'Liabilities',
+                    'Current Liabilities',
+                    ChartOfAccountsSeeder::OLD_SYSTEM_DEPOSITS,
+                );
+            }
+
             $roundingTotal = 0.0;
             $paymentLines = [];
 
@@ -300,10 +312,13 @@ class SalePostingService
                 provider: $payment->provider,
                 glAccountId: $payment->gl_account_id,
             );
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             $method = strtolower($payment->method ?? '');
             if ($method === 'exchange_credit') {
                 return $accounts['exchange_clearing'];
+            }
+            if ($method === 'legacy_deposit') {
+                return $accounts['legacy_deposits'];
             }
             if ($method === 'credit') {
                 return $accounts['receivable'];

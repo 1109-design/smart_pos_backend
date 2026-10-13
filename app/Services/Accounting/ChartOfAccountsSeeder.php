@@ -173,6 +173,14 @@ class ChartOfAccountsSeeder
     public const EXCHANGE_CLEARING = ['code' => '2045', 'name' => 'Exchange Clearing'];
 
     /**
+     * Deposits customers paid in the business's previous POS system on goods
+     * they hadn't collected at cut-over — loaded as an opening balance, then
+     * used up (Dr) as each collection sale applies one through the till's
+     * 'legacy_deposit' tender. Its balance is what's still unclaimed.
+     */
+    public const OLD_SYSTEM_DEPOSITS = ['code' => '2046', 'name' => 'Old-System Customer Deposits'];
+
+    /**
      * Payroll accounts — see PayRunPostingService. A pay run accrues on
      * approval into these payables, which clear when net pay and statutory
      * remittances go out. [category, sub-category, account].
@@ -222,6 +230,7 @@ class ChartOfAccountsSeeder
                     ['code' => '2020', 'name' => 'Deposits Held'],
                     ['code' => '2030', 'name' => 'Tax Payable'],
                     self::EXCHANGE_CLEARING,
+                    self::OLD_SYSTEM_DEPOSITS,
                     ['code' => '2050', 'name' => 'Net Wages Payable'],
                     ['code' => '2051', 'name' => 'PAYE Payable (USD)'],
                     ['code' => '2052', 'name' => 'PAYE Payable (ZiG)'],
