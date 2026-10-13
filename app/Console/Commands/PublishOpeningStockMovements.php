@@ -16,12 +16,10 @@ use Illuminate\Console\Command;
  * stock_movements SyncRecord yet.
  *
  * A movement with no location_id (older till builds never sent one) is
- * attributed to a location only when that provably reconciles it: there's
- * one candidate location (the product's only product_stock row, or else
- * the business's only location) and that location's ledger is short by
- * exactly this movement's quantity. If the location's ledger already
- * accounts for the stock — e.g. someone keyed the same take-on in again as
- * a manual adjustment — tagging it would double-count, so it's left as is.
+ * first attributed to a location when that's unambiguous: the product's
+ * only product_stock row, or else the business's only location. Without
+ * it, recomputeLocationStock() rebuilds that location's quantity from the
+ * ledger and leaves the opening figure out.
  */
 class PublishOpeningStockMovements extends Command
 {
@@ -65,7 +63,7 @@ class PublishOpeningStockMovements extends Command
             }
 
             if (! $dryRun) {
-                $processor->broadcastStockMovement($movement);
+                $processor->broadcastOpeningStockMovement($movement);
             }
             $published++;
         }
@@ -80,7 +78,7 @@ class PublishOpeningStockMovements extends Command
         ));
 
         if ($unlocated !== []) {
-            $this->warn(count($unlocated).' movement(s) still have no location (product in several locations, no safe guess): '.implode(', ', $unlocated));
+            $this->warn(count($unlocated).' movement(s) left without a location — tagging them would not reconcile the location\'s stock (often a duplicate already counted there), or the product is at several locations. Review with stock:resolve-untagged-lines: '.implode(', ', $unlocated));
         }
 
         return self::SUCCESS;
@@ -90,21 +88,10 @@ class PublishOpeningStockMovements extends Command
     {
         $stockLocations = ProductStock::where('product_id', $movement->product_id)->limit(2)->pluck('location_id');
 
-        $locationId = $stockLocations->count() === 1
-            ? $stockLocations->first()
-            : ($stockLocations->isEmpty() ? $processor->soleLocationId($movement->business_id) : null);
-
-        if ($locationId === null) {
-            return null;
+        if ($stockLocations->count() === 1) {
+            return $stockLocations->first();
         }
 
-        $recorded = (float) (ProductStock::where('product_id', $movement->product_id)
-            ->where('location_id', $locationId)
-            ->value('quantity') ?? 0);
-        $ledger = (float) StockMovement::where('product_id', $movement->product_id)
-            ->where('location_id', $locationId)
-            ->sum('quantity_change');
-
-        return abs(($ledger + (float) $movement->quantity_change) - max(0, $recorded)) < 0.0001 ? $locationId : null;
+        return $processor->soleLocationId($movement->business_id);
     }
 }
