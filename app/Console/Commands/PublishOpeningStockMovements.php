@@ -65,7 +65,7 @@ class PublishOpeningStockMovements extends Command
             }
 
             if (! $dryRun) {
-                $processor->broadcastOpeningStockMovement($movement);
+                $processor->broadcastStockMovement($movement);
             }
             $published++;
         }

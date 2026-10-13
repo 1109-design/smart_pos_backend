@@ -438,4 +438,87 @@ class SyncStockMovementTest extends TestCase
         $this->assertNotNull($republished);
         $this->assertSame($main->id, $republished->payload['location_id']);
     }
+
+    /**
+     * @return array{0: Location, 1: string}
+     */
+    private function productAtMain(string $tenantId, float $recorded, float $total): array
+    {
+        $main = $this->makeLocation($tenantId, 'Main');
+        $productId = (string) Str::uuid();
+        Product::create(['id' => $productId, 'business_id' => $tenantId, 'name' => 'Hinge', 'price' => 5, 'cost_price' => 0.91, 'stock_quantity' => $total]);
+        ProductStock::create(['id' => $productId.'|'.$main->id, 'product_id' => $productId, 'location_id' => $main->id, 'quantity' => $recorded]);
+
+        return [$main, $productId];
+    }
+
+    public function test_resolver_corrects_an_untagged_duplicate_like_hin007(): void
+    {
+        $tenantId = 'tenant-resolve-1';
+        [$main, $productId] = $this->productAtMain($tenantId, 46, 94);
+        $opening = StockMovement::create(['business_id' => $tenantId, 'location_id' => null, 'product_id' => $productId, 'type' => 'opening_stock', 'quantity_change' => 48, 'unit_cost' => 0.91]);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => $main->id, 'product_id' => $productId, 'type' => 'adjustment', 'quantity_change' => 48]);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => $main->id, 'product_id' => $productId, 'type' => 'sale', 'quantity_change' => -2]);
+
+        $this->artisan('stock:resolve-untagged-lines', ['product' => $productId, '--dry-run' => true])->assertSuccessful();
+        $this->assertNull($opening->fresh()->location_id);
+        $this->assertSame(3, StockMovement::where('product_id', $productId)->count());
+
+        $this->artisan('stock:resolve-untagged-lines', ['product' => $productId])->assertSuccessful();
+
+        $this->assertSame($main->id, $opening->fresh()->location_id);
+        $correction = StockMovement::where('product_id', $productId)->where('quantity_change', -48)->first();
+        $this->assertNotNull($correction);
+        $this->assertSame($main->id, $correction->location_id);
+        $this->assertSame($opening->id, $correction->reference_id);
+        $this->assertEquals(46, Product::find($productId)->stock_quantity);
+        $this->assertEquals(46, ProductStock::where('product_id', $productId)->value('quantity'));
+        $this->assertSame(1, SyncRecord::where('record_uuid', $correction->id)->count());
+        $this->assertSame($main->id, SyncRecord::where('record_uuid', $opening->id)->latest('id')->first()->payload['location_id']);
+
+        // Re-running finds nothing left to do.
+        $this->artisan('stock:resolve-untagged-lines', ['product' => $productId])->assertSuccessful();
+        $this->assertSame(4, StockMovement::where('product_id', $productId)->count());
+    }
+
+    public function test_resolver_finds_flagged_products_by_business_and_handles_an_untagged_adjustment(): void
+    {
+        $tenantId = 'tenant-resolve-2';
+        [$main, $productId] = $this->productAtMain($tenantId, 30, 62);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => null, 'product_id' => $productId, 'type' => 'adjustment', 'quantity_change' => 32]);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => $main->id, 'product_id' => $productId, 'type' => 'adjustment', 'quantity_change' => 32]);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => $main->id, 'product_id' => $productId, 'type' => 'sale', 'quantity_change' => -2]);
+
+        $this->artisan('stock:resolve-untagged-lines', ['--business' => $tenantId])->assertSuccessful();
+
+        $this->assertEquals(30, Product::find($productId)->stock_quantity);
+        $this->assertSame(0, StockMovement::where('product_id', $productId)->whereNull('location_id')->count());
+    }
+
+    public function test_resolver_only_tags_an_untagged_line_that_is_the_missing_piece(): void
+    {
+        $tenantId = 'tenant-resolve-3';
+        [$main, $productId] = $this->productAtMain($tenantId, 46, 46);
+        $opening = StockMovement::create(['business_id' => $tenantId, 'location_id' => null, 'product_id' => $productId, 'type' => 'opening_stock', 'quantity_change' => 48]);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => $main->id, 'product_id' => $productId, 'type' => 'sale', 'quantity_change' => -2]);
+
+        $this->artisan('stock:resolve-untagged-lines', ['product' => $productId])->assertSuccessful();
+
+        $this->assertSame($main->id, $opening->fresh()->location_id);
+        $this->assertSame(2, StockMovement::where('product_id', $productId)->count());
+        $this->assertEquals(46, ProductStock::where('product_id', $productId)->value('quantity'));
+    }
+
+    public function test_resolver_leaves_a_product_that_does_not_reconcile(): void
+    {
+        $tenantId = 'tenant-resolve-4';
+        [$main, $productId] = $this->productAtMain($tenantId, 40, 60);
+        $untagged = StockMovement::create(['business_id' => $tenantId, 'location_id' => null, 'product_id' => $productId, 'type' => 'adjustment', 'quantity_change' => 15]);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => $main->id, 'product_id' => $productId, 'type' => 'adjustment', 'quantity_change' => 45]);
+
+        $this->artisan('stock:resolve-untagged-lines', ['product' => $productId])->assertSuccessful();
+
+        $this->assertNull($untagged->fresh()->location_id);
+        $this->assertSame(2, StockMovement::where('product_id', $productId)->count());
+    }
 }

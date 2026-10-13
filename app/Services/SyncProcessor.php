@@ -1612,7 +1612,7 @@ class SyncProcessor
                         'reason' => 'Opening stock (take-on)',
                         'user_id' => $payload['user_id'] ?? null,
                     ]);
-                    $this->broadcastOpeningStockMovement($openingMovement);
+                    $this->broadcastStockMovement($openingMovement);
                     // Record the take-on value in the books too — see
                     // ProductOpeningStockPostingService for why this ledger
                     // entry alone previously left the balance sheet blind to
@@ -1971,21 +1971,7 @@ class SyncProcessor
                 // The SyncRecord other tills pull is the pushed payload, which
                 // still has no location — re-publish the attributed row.
                 if ($attributedToSoleLocation) {
-                    $this->emitBroadcastSyncRecord('stock_movements', $movement->id, $movement->business_id, [
-                        'business_id' => $movement->business_id,
-                        'location_id' => $movement->location_id,
-                        'to_location_id' => $movement->to_location_id,
-                        'product_id' => $movement->product_id,
-                        'type' => $movement->type,
-                        'quantity_change' => (float) $movement->quantity_change,
-                        'unit_cost' => $movement->unit_cost !== null ? (float) $movement->unit_cost : null,
-                        'running_avg_cost' => $movement->running_avg_cost !== null ? (float) $movement->running_avg_cost : null,
-                        'reason' => $movement->reason,
-                        'reference_id' => $movement->reference_id,
-                        'attachment_path' => $movement->attachment_path,
-                        'user_id' => $movement->user_id,
-                        'created_at' => $movement->created_at?->toIso8601String(),
-                    ]);
+                    $this->broadcastStockMovement($movement);
                 }
                 // Recompute the product's stock from the full movement ledger.
                 // Both must run: recomputeLocationStock keeps the per-location ledger
@@ -4532,22 +4518,26 @@ class SyncProcessor
     }
 
     /**
-     * Publishes a server-created 'opening_stock' movement to every device.
-     * No device ever pushed it, so without this no till would pull it and
-     * the till's stock history (built purely from its local stock_movements)
-     * would show the product's quantity with no opening-stock line behind
-     * it. Also used by the stock:publish-opening-movements backfill.
+     * Publishes a stock movement's current server state to every device. For
+     * movements no device pushed (a server-created 'opening_stock' line) or
+     * whose stored push payload is now stale (a location the server filled
+     * in): without this no till would pull them, and the till's stock
+     * history (built purely from its local stock_movements) would be wrong.
      */
-    public function broadcastOpeningStockMovement(StockMovement $movement): void
+    public function broadcastStockMovement(StockMovement $movement): void
     {
         $this->emitBroadcastSyncRecord('stock_movements', $movement->id, $movement->business_id, [
             'business_id' => $movement->business_id,
             'location_id' => $movement->location_id,
+            'to_location_id' => $movement->to_location_id,
             'product_id' => $movement->product_id,
             'type' => $movement->type,
             'quantity_change' => (float) $movement->quantity_change,
             'unit_cost' => $movement->unit_cost !== null ? (float) $movement->unit_cost : null,
+            'running_avg_cost' => $movement->running_avg_cost !== null ? (float) $movement->running_avg_cost : null,
             'reason' => $movement->reason,
+            'reference_id' => $movement->reference_id,
+            'attachment_path' => $movement->attachment_path,
             'user_id' => $movement->user_id,
             'created_at' => $movement->created_at?->toIso8601String(),
         ]);
