@@ -7,6 +7,7 @@ use App\Models\Business;
 use App\Models\Device;
 use App\Models\Payroll\EmployeeLeaveEntry;
 use App\Models\Payroll\EmployeePayProfile;
+use App\Models\Payroll\PayrollAuditEntry;
 use App\Models\Payroll\PayrollPeriodLock;
 use App\Models\Payroll\PayRun;
 use App\Models\Payroll\PayRunEmployee;
@@ -324,5 +325,112 @@ class SyncPayrollTest extends TestCase
         foreach ($net as $value) {
             $this->assertEqualsWithDelta(0, (float) $value, 0.001);
         }
+    }
+
+    public function test_payroll_audit_log_is_append_only_and_keeps_the_tills_time(): void
+    {
+        $id = (string) Str::uuid();
+        $payload = [
+            'business_id' => $this->tenantId,
+            'entity_table' => 'employee_pay_profiles',
+            'entity_id' => (string) Str::uuid(),
+            'employee_id' => (string) Str::uuid(),
+            'action' => 'updated',
+            'changes' => json_encode(['basic_usd' => [500, 600]]),
+            'user_id' => $this->owner->id,
+            'created_at' => '2026-10-01T08:30:00.000Z',
+        ];
+        $this->push([['table' => 'payroll_audit_log', 'uuid' => $id, 'payload' => $payload]])->assertJsonCount(1, 'accepted');
+        $this->push([['table' => 'payroll_audit_log', 'uuid' => $id, 'payload' => ['action' => 'deleted'] + $payload]])->assertOk();
+        $this->push([['table' => 'payroll_audit_log', 'uuid' => $id, 'operation' => 'delete', 'payload' => ['business_id' => $this->tenantId]]])->assertOk();
+
+        $row = PayrollAuditEntry::findOrFail($id);
+        $this->assertSame('updated', $row->action);
+        $this->assertStringStartsWith('2026-10-01 08:30', (string) $row->logged_at);
+        $this->assertSame(['basic_usd' => [500, 600]], json_decode($row->changes, true));
+    }
+
+    /** An approved run whose totals, results and lines all agree. */
+    private function seedBalancedApprovedRun(array $runOverrides = []): string
+    {
+        $runId = (string) Str::uuid();
+        $empRowId = (string) Str::uuid();
+        $line = fn (string $code, string $kind, float $usd) => [
+            'table' => 'pay_run_lines', 'uuid' => (string) Str::uuid(), 'payload' => [
+                'business_id' => $this->tenantId,
+                'pay_run_id' => $runId,
+                'pay_run_employee_id' => $empRowId,
+                'component_code' => $code,
+                'name' => $code,
+                'kind' => $kind,
+                'source' => 'statutory',
+                'amount' => $usd,
+                'amount_usd' => $usd,
+            ],
+        ];
+        $this->push([
+            ['table' => 'pay_runs', 'uuid' => $runId, 'payload' => $this->runPayload('calculated', $runOverrides + [
+                'total_net_usd' => 805,
+                'total_paye_usd' => 150,
+                'total_employer_cost_usd' => 55,
+            ])],
+            ['table' => 'pay_run_employees', 'uuid' => $empRowId, 'payload' => [
+                'business_id' => $this->tenantId,
+                'pay_run_id' => $runId,
+                'employee_id' => (string) Str::uuid(),
+                'employee_name' => 'Alice',
+                'gross_usd' => 1000,
+                'paye_usd' => 150,
+                'nssa_employee_usd' => 45,
+                'net_total_usd' => 805,
+                'net_pay_usd' => 805,
+                'nssa_employer_usd' => 45,
+                'zimdef_usd' => 10,
+            ]],
+            $line('BASIC', 'earning', 1000),
+            $line('PAYE', 'deduction', 150),
+            $line('NSSA', 'deduction', 45),
+            $line('NSSA_ER', 'employer_contribution', 45),
+            $line('ZIMDEF', 'employer_contribution', 10),
+        ])->assertJsonCount(7, 'accepted');
+        $this->lock($runId)->assertOk();
+        $this->push([['table' => 'pay_runs', 'uuid' => $runId, 'payload' => $this->runPayload('approved', $runOverrides + [
+            'total_net_usd' => 805,
+            'total_paye_usd' => 150,
+            'total_employer_cost_usd' => 55,
+        ])]])->assertJsonCount(1, 'accepted');
+
+        return $runId;
+    }
+
+    public function test_sweep_checks_a_locked_runs_totals_once(): void
+    {
+        $runId = $this->seedBalancedApprovedRun();
+
+        // Not checked until the run has settled.
+        $this->artisan('accounting:post-pending-payroll')->assertSuccessful();
+        $this->assertNull(PayRun::findOrFail($runId)->totals_checked_at);
+
+        $this->travel(10)->minutes();
+        $this->artisan('accounting:post-pending-payroll')->assertSuccessful();
+        $run = PayRun::findOrFail($runId);
+        $this->assertNotNull($run->totals_checked_at);
+        $this->assertNull($run->totals_mismatch);
+    }
+
+    public function test_sweep_flags_a_run_that_does_not_add_up(): void
+    {
+        $runId = $this->seedBalancedApprovedRun(['total_gross_usd' => 1200, 'headcount' => 2]);
+        // A payslip line the till lost on the way.
+        PayRunLine::where('pay_run_id', $runId)->where('component_code', 'PAYE')->delete();
+
+        $this->travel(10)->minutes();
+        $this->artisan('accounting:post-pending-payroll')->assertSuccessful();
+
+        $problems = PayRun::findOrFail($runId)->totals_mismatch;
+        $this->assertCount(3, $problems);
+        $this->assertStringContainsString('Headcount 2', $problems[0]);
+        $this->assertStringContainsString('Run Gross USD: 1200.00 recorded, 1000.00', $problems[1]);
+        $this->assertStringContainsString('Alice: deductions vs gross − net: 195.00 recorded, 45.00', $problems[2]);
     }
 }

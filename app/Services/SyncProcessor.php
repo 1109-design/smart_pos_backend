@@ -67,6 +67,7 @@ use App\Models\Payroll\EmployeePayProfile;
 use App\Models\Payroll\EmployeePaySplit;
 use App\Models\Payroll\EmployeeRecurringComponent;
 use App\Models\Payroll\PayComponent;
+use App\Models\Payroll\PayrollAuditEntry;
 use App\Models\Payroll\PayrollSetting;
 use App\Models\Payroll\PayRun;
 use App\Models\Payroll\PayRunEmployee;
@@ -335,6 +336,7 @@ class SyncProcessor
         'pay_run_lines' => PayRunLine::class,
         'statutory_remittances' => StatutoryRemittance::class,
         'employee_leave_entries' => EmployeeLeaveEntry::class,
+        'payroll_audit_log' => PayrollAuditEntry::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,

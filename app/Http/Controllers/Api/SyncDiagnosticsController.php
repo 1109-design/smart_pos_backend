@@ -7,6 +7,7 @@ use App\Models\Device;
 use App\Models\DeviceDbSnapshot;
 use App\Models\DeviceSyncHealth;
 use App\Models\DeviceSyncIssue;
+use App\Models\Payroll\PayRun;
 use App\Models\PendingSyncRecord;
 use App\Models\SyncConflict;
 use App\Services\DeviceResolver;
@@ -358,11 +359,19 @@ class SyncDiagnosticsController extends Controller
             ->selectRaw('s.table_name, COUNT(*) as live_uuids')
             ->pluck('live_uuids', 'table_name');
 
+        // Locked pay runs whose totals don't match their synced employees
+        // and lines (PayRunTotalsCheck, run by accounting:post-pending-payroll).
+        $payrollMismatches = PayRun::where('business_id', $tenantId)
+            ->whereNotNull('totals_mismatch')
+            ->orderByDesc('period_year')->orderByDesc('period_month')
+            ->get(['id', 'run_number', 'kind', 'status', 'period_year', 'period_month', 'totals_checked_at', 'totals_mismatch']);
+
         return [
             'pending_conflicts' => $pendingConflicts,
             'conflict_summary_30d' => $conflictSummary,
             'deferred_records' => $deferred,
             'changelog_live_uuids_per_table' => $tableCounts,
+            'payroll_totals_mismatches' => $payrollMismatches,
         ];
     }
 }

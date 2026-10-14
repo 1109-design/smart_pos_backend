@@ -8,6 +8,7 @@ use App\Models\Payroll\EmployeePayProfile;
 use App\Models\Payroll\EmployeePaySplit;
 use App\Models\Payroll\EmployeeRecurringComponent;
 use App\Models\Payroll\PayComponent;
+use App\Models\Payroll\PayrollAuditEntry;
 use App\Models\Payroll\PayrollModel;
 use App\Models\Payroll\PayrollPeriodLock;
 use App\Models\Payroll\PayrollSetting;
@@ -34,7 +35,8 @@ use Illuminate\Support\Facades\Schema;
  *  - A regular run can only become approved while it holds its month's
  *    lock (payroll_period_locks, claimed online at approval), approved by
  *    someone holding approvePayroll.
- *  - Leave entries and statutory remittances are append-only.
+ *  - Leave entries, statutory remittances and the payroll audit log are
+ *    append-only.
  *
  * It then posts journals for businesses the server still posts for (see
  * PayRunPostingService).
@@ -57,9 +59,10 @@ class PayrollSync
         'pay_run_lines' => PayRunLine::class,
         'statutory_remittances' => StatutoryRemittance::class,
         'employee_leave_entries' => EmployeeLeaveEntry::class,
+        'payroll_audit_log' => PayrollAuditEntry::class,
     ];
 
-    public const APPEND_ONLY = ['statutory_remittances', 'employee_leave_entries'];
+    public const APPEND_ONLY = ['statutory_remittances', 'employee_leave_entries', 'payroll_audit_log'];
 
     private const LOCKED_STATUSES = ['approved', 'paid', 'reversed'];
 
@@ -101,6 +104,10 @@ class PayrollSync
     {
         $model = self::MODELS[$table];
         $data = $this->clean($table, $payload);
+        if ($table === 'payroll_audit_log' && isset($payload['created_at'])) {
+            // The till's time of the change; created_at is the server's.
+            $data['logged_at'] = Carbon::parse((string) $payload['created_at']);
+        }
         $existing = $model::find($uuid);
 
         if (in_array($table, self::APPEND_ONLY, true) && $existing) {
