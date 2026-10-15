@@ -13,6 +13,7 @@ use App\Http\Controllers\Api\SubscriptionController;
 use App\Http\Controllers\Api\SyncController;
 use App\Http\Controllers\Api\SyncDiagnosticsController;
 use App\Http\Controllers\Api\SyncHealthController;
+use App\Http\Controllers\Api\TakeOnFileController;
 use App\Http\Controllers\Api\TillController;
 use App\Http\Controllers\Api\WebhookController;
 use Illuminate\Support\Facades\Route;
@@ -73,6 +74,9 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::post('business/letterhead', [BusinessBrandingController::class, 'uploadLetterhead']);
     Route::post('business/footer-image', [BusinessBrandingController::class, 'uploadFooterImage']);
     Route::put('business/footer-text', [BusinessBrandingController::class, 'updateFooterText']);
+
+    // Take-on (Phase 3) — the original file a batch was imported from.
+    Route::post('take-on/batches/{batchId}/file', [TakeOnFileController::class, 'store']);
 
     // Reports back a location a cashier picked on-device (the fallback
     // prompt shown when no admin assignment exists) so the web portal's

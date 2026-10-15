@@ -212,6 +212,16 @@ class ChartOfAccountsSeeder
         ['Expenses', 'Other Expenses', ['code' => '6045', 'name' => 'Bad Debts']],
     ];
 
+    /**
+     * Take-on (Phase 3): every opening balance posts against Take-on
+     * Clearing, which must be exactly zero before take-on is finalised;
+     * supplier prepayments brought forward need an asset of their own.
+     */
+    public const PHASE3_ACCOUNTS = [
+        ['Assets', 'Current Assets', ['code' => '1170', 'name' => 'Supplier Prepayments']],
+        ['Equity', "Shareholders' Equity", ['code' => '3025', 'name' => 'Take-on Clearing']],
+    ];
+
     private const CHART = [
         [
             'name' => 'Assets', 'code' => 1000, 'is_debit_normal' => true, 'statement_type' => 'balance_sheet',
@@ -225,6 +235,7 @@ class ChartOfAccountsSeeder
                     // AP module — recoverable input tax on supplier invoices.
                     ['code' => '1150', 'name' => 'Input VAT'],
                     ['code' => '1160', 'name' => 'Staff Loans & Advances'],
+                    ['code' => '1170', 'name' => 'Supplier Prepayments'],
                     ['code' => '1200', 'name' => 'Inventory', 'control_type' => 'inventory'],
                 ]],
                 ['name' => 'Fixed Assets', 'accounts' => [
@@ -269,6 +280,9 @@ class ChartOfAccountsSeeder
                     // AP/AR take-on — the offsetting entry for an opening
                     // balance imported from a business's pre-SmartPOS books.
                     ['code' => '3020', 'name' => 'Opening Balance Equity'],
+                    // Take-on (Phase 3) — the other side of every opening
+                    // balance; must net to zero before take-on is finalised.
+                    ['code' => '3025', 'name' => 'Take-on Clearing'],
                 ]],
             ],
         ],

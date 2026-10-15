@@ -10,6 +10,8 @@ use App\Models\Accounting\GeneralLedgerEntry;
 use App\Models\Accounting\GlAccount;
 use App\Models\Accounting\JournalHeader;
 use App\Models\Accounting\JournalLine;
+use App\Models\Accounting\TakeOnBatch;
+use App\Models\Accounting\TakeOnRow;
 use App\Models\AccountRoleMapping;
 use App\Models\ApprovalDelegation;
 use App\Models\ApprovalGroup;
@@ -1473,6 +1475,13 @@ class SyncProcessor
                     'accounting_period_end_guard_days' => isset($payload['period_end_guard_days'])
                         ? max(0, (int) $payload['period_end_guard_days'])
                         : $business->accounting_period_end_guard_days,
+                    // Finalising take-on (Phase 3) is one-way: once set it
+                    // never clears, and the first finalisation stands.
+                    'take_on_finalised_at' => $business->take_on_finalised_at
+                        ?? ($payload['take_on_finalised_at'] ?? null),
+                    'take_on_finalised_by_user_id' => $business->take_on_finalised_at !== null
+                        ? $business->take_on_finalised_by_user_id
+                        : ($payload['take_on_finalised_by_user_id'] ?? null),
                 ]);
 
                 // Fan out to every other till so the whole fleet converges
@@ -3588,6 +3597,14 @@ class SyncProcessor
                 $this->applyAccountingPeriod($uuid, $payload, $trusted, $actingUser);
                 break;
 
+            case 'take_on_batches':
+                $this->applyTakeOnBatch($uuid, $payload, $trusted);
+                break;
+
+            case 'take_on_rows':
+                $this->applyTakeOnRow($uuid, $payload);
+                break;
+
                 // Client-posted journals — a plain mirror. The client (Flutter,
                 // once cut over via client_gl_posting_enabled_at) has already
                 // computed and "posted" this journal locally; Laravel never
@@ -4756,6 +4773,99 @@ class SyncProcessor
             'closed_by_device_id' => $payload['closed_by_device_id'] ?? null,
             'reopened_at' => $payload['reopened_at'] ?? null,
             'reopened_by_user_id' => $payload['reopened_by_user_id'] ?? null,
+        ]);
+    }
+
+    /**
+     * A take-on batch captured on a device (Phase 3). Stored and relayed
+     * as it arrives; once it moves to posting / posted / reversed it must
+     * cite an approved take_on_batch request for this business, approved
+     * by someone other than the uploader. Nothing changes after take-on is
+     * finalised, and a stale change (older updated_at) is ignored.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function applyTakeOnBatch(string $uuid, array $payload, bool $trusted): void
+    {
+        $businessId = (string) ($payload['business_id'] ?? '');
+        $status = $payload['status'] ?? 'draft';
+        $type = $payload['type'] ?? '';
+        if (! in_array($type, TakeOnBatch::TYPES, true) || ! in_array($status, TakeOnBatch::STATUSES, true)) {
+            throw new \RuntimeException('take_on_batches: unknown type or status.');
+        }
+
+        $existing = TakeOnBatch::find($uuid);
+        if ($existing !== null && (string) $existing->business_id !== $businessId) {
+            throw new \RuntimeException('take_on_batches: batch belongs to another business.');
+        }
+        $incomingAt = isset($payload['updated_at']) ? Carbon::parse($payload['updated_at']) : null;
+        if ($existing && $incomingAt && $existing->updated_at && $incomingAt->lt($existing->updated_at)) {
+            return;
+        }
+        if (Business::whereKey($businessId)->whereNotNull('take_on_finalised_at')->exists()
+            && ($existing?->status ?? null) !== $status) {
+            throw new \RuntimeException('take_on_batches: take-on is finalised; corrections go through journals.');
+        }
+
+        $uploader = $payload['uploaded_by_user_id'] ?? $existing?->uploaded_by_user_id;
+        if (! $trusted && in_array($status, TakeOnBatch::APPROVED, true)) {
+            $approved = ! empty($payload['approval_request_id']) && ApprovalRequest::where('id', $payload['approval_request_id'])
+                ->where('business_id', $businessId)
+                ->where('action', 'take_on_batch')
+                ->where('status', 'approved')
+                ->where(fn ($q) => $q->whereNull('approver_user_id')->orWhere('approver_user_id', '!=', (string) $uploader))
+                ->exists();
+            if (! $approved) {
+                throw new \RuntimeException('take_on_batches: posting a batch needs a take_on_batch approval by someone other than the uploader.');
+            }
+        }
+
+        $attributes = [
+            'business_id' => $businessId,
+            'type' => $type,
+            'status' => $status,
+            'source' => $payload['source'] ?? 'import',
+            'file_name' => $payload['file_name'] ?? null,
+            'row_count' => (int) ($payload['row_count'] ?? 0),
+            'totals' => $payload['totals'] ?? null,
+            'approval_request_id' => $payload['approval_request_id'] ?? null,
+            'uploaded_by_user_id' => $uploader,
+            'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
+            'posted_at' => $payload['posted_at'] ?? null,
+            'posted_by_device_id' => $payload['posted_by_device_id'] ?? null,
+            'reversed_at' => $payload['reversed_at'] ?? null,
+            'reversed_by_user_id' => $payload['reversed_by_user_id'] ?? null,
+        ];
+        if (is_string($attributes['totals'])) {
+            $attributes['totals'] = json_decode($attributes['totals'], true);
+        }
+
+        TakeOnBatch::updateOrCreate(['id' => $uuid], $attributes);
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    private function applyTakeOnRow(string $uuid, array $payload): void
+    {
+        $batch = TakeOnBatch::find($payload['batch_id'] ?? '');
+        if ($batch === null) {
+            throw new MissingParentRecordException('take_on_rows: the batch has not arrived yet.');
+        }
+        if ((string) $batch->business_id !== (string) ($payload['business_id'] ?? '')) {
+            throw new \RuntimeException('take_on_rows: row belongs to another business.');
+        }
+        $json = fn ($v) => is_string($v) ? json_decode($v, true) : $v;
+
+        TakeOnRow::updateOrCreate(['id' => $uuid], [
+            'batch_id' => $batch->id,
+            'business_id' => $batch->business_id,
+            'row_no' => (int) ($payload['row_no'] ?? 0),
+            'data' => $json($payload['data'] ?? []) ?? [],
+            'errors' => $json($payload['errors'] ?? null),
+            'status' => $payload['status'] ?? 'valid',
+            'journal_id' => $payload['journal_id'] ?? null,
+            'ref_id' => $payload['ref_id'] ?? null,
         ]);
     }
 

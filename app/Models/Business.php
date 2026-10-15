@@ -38,6 +38,8 @@ class Business extends Model
         'client_gl_posting_enabled_at',
         'accounting_offline_window_hours',
         'accounting_period_end_guard_days',
+        'take_on_finalised_at',
+        'take_on_finalised_by_user_id',
     ];
 
     protected function casts(): array
@@ -51,6 +53,7 @@ class Business extends Model
             'workflow_settings' => 'array',
             'accounting_go_live_date' => 'date',
             'client_gl_posting_enabled_at' => 'datetime',
+            'take_on_finalised_at' => 'datetime',
         ];
     }
 
@@ -98,6 +101,8 @@ class Business extends Model
                 'client_gl_posting_enabled_at' => $this->client_gl_posting_enabled_at?->toIso8601String(),
                 'offline_window_hours' => $this->accounting_offline_window_hours,
                 'period_end_guard_days' => $this->accounting_period_end_guard_days,
+                'take_on_finalised_at' => $this->take_on_finalised_at?->toIso8601String(),
+                'take_on_finalised_by_user_id' => $this->take_on_finalised_by_user_id,
             ],
             'source_updated_at' => now(),
             'synced_at' => now(),

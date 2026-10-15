@@ -9,6 +9,8 @@ use App\Models\Accounting\GeneralLedgerEntry;
 use App\Models\Accounting\GlAccount;
 use App\Models\Accounting\JournalHeader;
 use App\Models\Accounting\JournalLine;
+use App\Models\Accounting\TakeOnBatch;
+use App\Models\Business;
 use App\Models\Device;
 use App\Models\SyncRecord;
 use App\Models\User;
@@ -61,6 +63,7 @@ class JournalBundleIngestor
             $this->assertLines($businessId, $lines);
             $this->assertPeriodOpen($businessId, (string) ($header['trans_date'] ?? ''), $this->moduleOf($header), ($header['journal_type'] ?? null) === 'year_end');
             $this->assertUnique($businessId, $journalId, $header);
+            $this->assertTakeOnAllowed($businessId, $header);
             $original = $this->reversedJournal($businessId, $header);
 
             $journal = JournalHeader::create([
@@ -280,6 +283,39 @@ class JournalBundleIngestor
         }
         if (JournalHeader::where('business_id', $businessId)->where('journal_number', $number)->exists()) {
             throw new JournalRejectedException('duplicate_number', "Journal number {$number} is already used.");
+        }
+    }
+
+    /**
+     * Take-on journals (Phase 3) post only from an approved batch, and
+     * neither they nor their reversals are accepted once take-on is
+     * finalised — corrections then go through ordinary journals. A batch
+     * that hasn't arrived yet defers the journal.
+     *
+     * @param  array<string, mixed>  $header
+     */
+    private function assertTakeOnAllowed(string $businessId, array $header): void
+    {
+        $sourceType = $header['source_type'] ?? null;
+        $reversesTakeOn = ! empty($header['reversal_of_journal_id'])
+            && JournalHeader::where('id', $header['reversal_of_journal_id'])->value('source_type') === 'take_on';
+        if ($sourceType !== 'take_on' && ! $reversesTakeOn) {
+            return;
+        }
+
+        if (Business::whereKey($businessId)->whereNotNull('take_on_finalised_at')->exists()) {
+            throw new JournalRejectedException('take_on_finalised', 'Take-on is finalised — correct opening balances with a journal instead.');
+        }
+        if ($sourceType !== 'take_on') {
+            return;
+        }
+
+        $batch = TakeOnBatch::find($header['batch_id'] ?? '');
+        if ($batch === null) {
+            throw new MissingParentRecordException('journal_postings: the take-on batch has not arrived yet.');
+        }
+        if ((string) $batch->business_id !== $businessId || ! in_array($batch->status, TakeOnBatch::APPROVED, true)) {
+            throw new JournalRejectedException('forbidden', 'This take-on batch has not been approved.');
         }
     }
 
