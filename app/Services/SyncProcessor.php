@@ -2427,7 +2427,8 @@ class SyncProcessor
                     ['id' => $uuid],
                     [
                         'business_id' => $payload['business_id'] ?? null,
-                        'customer_receipt_id' => $payload['customer_receipt_id'] ?? null,
+                        // Devices send receipt_id.
+                        'customer_receipt_id' => $payload['customer_receipt_id'] ?? $payload['receipt_id'] ?? null,
                         'invoice_id' => $payload['invoice_id'] ?? null,
                         'allocated_amount' => $payload['allocated_amount'] ?? 0,
                         'tender_amount' => $payload['tender_amount'] ?? null,
@@ -2436,6 +2437,9 @@ class SyncProcessor
                         'allocated_by_user_id' => $payload['allocated_by_user_id'] ?? null,
                     ]
                 );
+                if (! empty($payload['invoice_id'])) {
+                    $this->recomputeInvoiceAmountPaid($payload['invoice_id']);
+                }
                 break;
 
             case 'customer_debit_notes':
@@ -3565,8 +3569,14 @@ class SyncProcessor
                         'tax_total' => $payload['tax_total'] ?? 0,
                         'total' => $payload['total'] ?? 0,
                         'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                        // Posted on the device (Phase 5.2); what's left after
+                        // crediting its invoice stays as customer credit.
+                        ...array_intersect_key($payload, array_flip(['status', 'is_gl_posted', 'journal_header_id', 'unallocated_amount', 'posted_at'])),
                     ]
                 );
+                if (! empty($payload['invoice_id'])) {
+                    $this->recomputeInvoiceAmountPaid($payload['invoice_id']);
+                }
                 break;
 
             case 'credit_note_items':
@@ -5192,7 +5202,15 @@ class SyncProcessor
      */
     protected function recomputeInvoiceAmountPaid(string $invoiceId): void
     {
-        $amountPaid = max(0, InvoicePayment::where('invoice_id', $invoiceId)->sum('base_equivalent'));
+        // Payments, receipts / deposits allocated to it, and the part of
+        // any posted credit note that credited it (Phase 5).
+        $credited = CreditNote::where('invoice_id', $invoiceId)
+            ->where('is_gl_posted', true)
+            ->get(['total', 'unallocated_amount'])
+            ->sum(fn ($n) => max(0, (float) $n->total - (float) $n->unallocated_amount));
+        $amountPaid = max(0, InvoicePayment::where('invoice_id', $invoiceId)->sum('base_equivalent')
+            + CustomerReceiptAllocation::where('invoice_id', $invoiceId)->sum('allocated_amount')
+            + $credited);
         $invoice = Invoice::find($invoiceId);
         if (! $invoice) {
             return;

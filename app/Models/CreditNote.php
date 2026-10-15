@@ -15,6 +15,7 @@ class CreditNote extends Model
     protected $fillable = [
         'id', 'business_id', 'invoice_id', 'customer_id', 'credit_note_number',
         'reason', 'subtotal', 'tax_total', 'total', 'created_by_user_id',
+        'status', 'posted_at', 'is_gl_posted', 'unallocated_amount', 'journal_header_id',
     ];
 
     protected static function booted(): void
