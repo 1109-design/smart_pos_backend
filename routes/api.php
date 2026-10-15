@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\BusinessBrandingController;
 use App\Http\Controllers\Api\DeviceAuthController;
 use App\Http\Controllers\Api\DeviceDbSnapshotController;
 use App\Http\Controllers\Api\JournalAttachmentFileController;
+use App\Http\Controllers\Api\LedgerSummaryController;
 use App\Http\Controllers\Api\LocalSyncConflictController;
 use App\Http\Controllers\Api\LocationController;
 use App\Http\Controllers\Api\PayrollPeriodLockController;
@@ -119,6 +120,10 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     // offline devices can't both approve the same payroll (see
     // PayrollPeriodLockController and PayrollSync).
     Route::post('payroll/period-locks', [PayrollPeriodLockController::class, 'store']);
+
+    // The ledger month by month, read-only: a device compares its own copy
+    // of the books to it (Phase 12.1 integrity check).
+    Route::get('accounting/ledger-summary', [LedgerSummaryController::class, 'show']);
 });
 
 // Webhooks (no auth — verified by payload signature)

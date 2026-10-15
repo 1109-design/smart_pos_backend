@@ -32,6 +32,7 @@ use App\Models\ArCollectionActivity;
 use App\Models\ArDispute;
 use App\Models\ArPromiseToPay;
 use App\Models\Asset;
+use App\Models\AuditLog;
 use App\Models\BankAccount;
 use App\Models\BankReconciliation;
 use App\Models\Bundle;
@@ -218,6 +219,8 @@ class SyncProcessor
         // A fiscal document ZIMRA holds is corrected by another note,
         // never deleted (Phase 11.2).
         'fiscal_documents',
+        // The audit trail is append-only (Phase 12.2).
+        'audit_logs',
         // An asset is disposed (status: disposed), never deleted — see
         // AssetPostingService::recordDisposal().
         'assets',
@@ -262,6 +265,7 @@ class SyncProcessor
         'payment_vouchers' => PaymentVoucher::class,
         'cost_centres' => CostCentre::class,
         'fiscal_documents' => FiscalDocument::class,
+        'audit_logs' => AuditLog::class,
         'pending_collections' => PendingCollection::class,
         'locations' => Location::class,
         'categories' => Category::class,
@@ -3664,6 +3668,25 @@ class SyncProcessor
 
             case 'fiscal_documents':
                 $this->applyFiscalDocument($uuid, $payload);
+                break;
+
+            case 'audit_logs':
+                // Append-only (Phase 12.2): the first copy stands, a replay
+                // never rewrites it.
+                if (! AuditLog::whereKey($uuid)->exists()) {
+                    AuditLog::create([
+                        'id' => $uuid,
+                        'business_id' => $payload['business_id'] ?? null,
+                        'user_id' => $payload['user_id'] ?? null,
+                        'device_id' => $payload['device_id'] ?? null,
+                        'model' => (string) ($payload['model'] ?? ''),
+                        'record_id' => (string) ($payload['record_id'] ?? ''),
+                        'action' => (string) ($payload['action'] ?? 'update'),
+                        'before' => $payload['before'] ?? null,
+                        'after' => $payload['after'] ?? null,
+                        'at' => $payload['at'] ?? now(),
+                    ]);
+                }
                 break;
 
             case 'cost_centres':

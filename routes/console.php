@@ -36,3 +36,11 @@ Schedule::command('invoices:generate-recurring')
 // old accounting:post-pending-* and post-asset-depreciation sweeps raced the
 // app's own postings (2026-10-05: duplicate sale journals, the server's
 // without COGS), so they no longer run.
+
+// The nightly read-only integrity check of every live business's books
+// (Phase 12.1): trial balance, journals, control accounts, take-on.
+Schedule::command('accounting:integrity-check')
+    ->dailyAt('02:30')
+    ->timezone('Africa/Harare')
+    ->withoutOverlapping()
+    ->onOneServer();
