@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\AppReleaseController;
 use App\Http\Controllers\Api\BackOfficeAccessController;
 use App\Http\Controllers\Api\BusinessBrandingController;
 use App\Http\Controllers\Api\DeviceAuthController;
@@ -21,6 +22,12 @@ Route::prefix('v1')->group(function () {
     Route::get('health', fn () => response()->json(['ok' => true]));
 });
 
+// CI reports each newly published app installer (shared-secret auth, see
+// AppReleaseController::store) — relayed to devices on /sync/pull.
+Route::prefix('v1')->middleware(['throttle:30,1'])->group(function () {
+    Route::post('app-releases', [AppReleaseController::class, 'store']);
+});
+
 // POS device authentication (no tenant context needed yet — tenant resolved by business_code)
 Route::prefix('v1')->middleware(['throttle:device-auth'])->group(function () {
     Route::post('auth/register', [DeviceAuthController::class, 'register']);
@@ -34,6 +41,7 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::post('sync/push', [SyncController::class, 'push']);
     Route::post('sync/fiscalise/{transactionId}', [SyncController::class, 'fiscalise']);
     Route::get('sync/pull', [SyncController::class, 'pull']);
+    Route::get('app-releases', [AppReleaseController::class, 'index']);
     Route::get('sync/status', [SyncController::class, 'status']);
     Route::get('sync/conflicts', [SyncController::class, 'conflicts']);
     Route::post('sync/conflicts/{id}/resolve', [SyncController::class, 'resolveConflict']);

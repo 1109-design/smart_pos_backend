@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Events\SyncTablesChanged;
 use App\Exceptions\MissingParentRecordException;
 use App\Http\Controllers\Controller;
+use App\Models\AppRelease;
 use App\Models\Device;
 use App\Models\PendingSyncRecord;
 use App\Models\StockOversell;
@@ -643,6 +644,9 @@ class SyncController extends Controller
             // history next cycle — never a wipe of the whole local database,
             // and the outbox (pending pushes) is untouched either way.
             'reconciliation_required' => $reconciliationRequired,
+            // Newest app installer per platform — how devices learn of an
+            // update without polling GitHub (see AppRelease).
+            'app_releases' => (object) AppRelease::latestByPlatform(),
         ]);
     }
 
