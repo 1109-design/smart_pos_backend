@@ -197,6 +197,21 @@ class ChartOfAccountsSeeder
         ['Expenses', 'Operating Expenses', ['code' => '6025', 'name' => 'Employer Payroll Costs']],
     ];
 
+    /**
+     * Accounts the posting roles need that older charts lacked (Phase 1):
+     * change still owed to a customer (a liability until claimed), the
+     * contra-revenue accounts sales returns and sales discounts belong in
+     * (they used to fall into Other Income / Cash Vault Variance), and Bad
+     * Debts (which used to fall into Bank Charges). [category,
+     * sub-category, account].
+     */
+    public const PHASE1_ACCOUNTS = [
+        ['Liabilities', 'Current Liabilities', ['code' => '2025', 'name' => 'Change Owed']],
+        ['Revenue', 'Sales', ['code' => '4050', 'name' => 'Sales Returns']],
+        ['Revenue', 'Sales', ['code' => '4060', 'name' => 'Sales Discounts']],
+        ['Expenses', 'Other Expenses', ['code' => '6045', 'name' => 'Bad Debts']],
+    ];
+
     private const CHART = [
         [
             'name' => 'Assets', 'code' => 1000, 'is_debit_normal' => true, 'statement_type' => 'balance_sheet',
@@ -228,6 +243,7 @@ class ChartOfAccountsSeeder
                     // owed to the tax authority rather than the supplier.
                     ['code' => '2015', 'name' => 'Withholding Tax Payable'],
                     ['code' => '2020', 'name' => 'Deposits Held'],
+                    ['code' => '2025', 'name' => 'Change Owed'],
                     ['code' => '2030', 'name' => 'Tax Payable'],
                     self::EXCHANGE_CLEARING,
                     self::OLD_SYSTEM_DEPOSITS,
@@ -261,6 +277,10 @@ class ChartOfAccountsSeeder
             'sub_categories' => [
                 ['name' => 'Sales', 'accounts' => [
                     ['code' => '4000', 'name' => 'Sales Revenue'],
+                    // Contra-revenue: carry debit balances, shown as
+                    // deductions from sales.
+                    ['code' => '4050', 'name' => 'Sales Returns'],
+                    ['code' => '4060', 'name' => 'Sales Discounts'],
                 ]],
                 ['name' => 'Other Income', 'accounts' => [
                     ['code' => '4010', 'name' => 'Other Income'],
@@ -296,6 +316,7 @@ class ChartOfAccountsSeeder
                     ['code' => '6090', 'name' => 'General Expenses'],
                 ]],
                 ['name' => 'Other Expenses', 'accounts' => [
+                    ['code' => '6045', 'name' => 'Bad Debts'],
                     ['code' => '6050', 'name' => 'Stock Loss / Write-offs'],
                     ['code' => '6060', 'name' => 'Cash Rounding Variance'],
                     ['code' => '6065', 'name' => 'Cash Vault Variance'],

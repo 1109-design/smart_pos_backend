@@ -66,6 +66,13 @@ class AccountRoleMappingService
         // keeps for good — see the Flutter side's identical note. Shares
         // '4010' Other Income rather than a new code.
         'deposit_forfeiture_income' => ['category' => 'Revenue', 'subCategory' => 'Other Income', 'code' => '4010', 'name' => 'Other Income'],
+        // Accounts Receivable and till roles the app posts with (Phase 1):
+        // returns and discounts reduce sales (contra-revenue), bad debts is
+        // its own expense, and change owed is a liability until claimed.
+        'sales_returns' => ['category' => 'Revenue', 'subCategory' => 'Sales', 'code' => '4050', 'name' => 'Sales Returns'],
+        'sales_discount' => ['category' => 'Revenue', 'subCategory' => 'Sales', 'code' => '4060', 'name' => 'Sales Discounts'],
+        'bad_debts' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6045', 'name' => 'Bad Debts'],
+        'change_owed_liability' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2025', 'name' => 'Change Owed'],
         // Payroll — see PayRunPostingService and the Flutter side's
         // identical roles (account_role_mapping_service.dart).
         'employer_payroll_expense' => ['category' => 'Expenses', 'subCategory' => 'Operating Expenses', 'code' => '6025', 'name' => 'Employer Payroll Costs'],
