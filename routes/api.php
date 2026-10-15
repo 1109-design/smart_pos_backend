@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\AppReleaseController;
 use App\Http\Controllers\Api\BackOfficeAccessController;
 use App\Http\Controllers\Api\BusinessBrandingController;
 use App\Http\Controllers\Api\DeviceAuthController;
+use App\Http\Controllers\Api\DeviceOverviewController;
 use App\Http\Controllers\Api\DeviceDbSnapshotController;
 use App\Http\Controllers\Api\LocalSyncConflictController;
 use App\Http\Controllers\Api\LocationController;
@@ -42,6 +43,7 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::post('sync/fiscalise/{transactionId}', [SyncController::class, 'fiscalise']);
     Route::get('sync/pull', [SyncController::class, 'pull']);
     Route::get('app-releases', [AppReleaseController::class, 'index']);
+    Route::get('devices/overview', [DeviceOverviewController::class, 'index']);
     Route::get('sync/status', [SyncController::class, 'status']);
     Route::get('sync/conflicts', [SyncController::class, 'conflicts']);
     Route::post('sync/conflicts/{id}/resolve', [SyncController::class, 'resolveConflict']);

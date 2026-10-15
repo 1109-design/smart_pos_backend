@@ -539,6 +539,13 @@ class SyncController extends Controller
         $tables = $request->input('tables', []);
         $serverTime = now();
 
+        // Pulls run every few seconds whether or not the device has anything
+        // to push, so they're what makes last_seen_at mean "online now" on
+        // the Devices screen. Throttled to keep it to a write per 30s.
+        if ($device && (! $device->last_seen_at || $device->last_seen_at->lt($serverTime->copy()->subSeconds(30)))) {
+            $device->forceFill(['last_seen_at' => $serverTime])->saveQuietly();
+        }
+
         $reconciliationRequired = $device
             ? $this->detectReconciliationRequired($request, $device, $tables)
             : [];
@@ -679,6 +686,17 @@ class SyncController extends Controller
         $recordsArray = $records->toArray();
 
         foreach ($recordsArray as &$record) {
+            // A record with nothing in it — notably a server-side delete,
+            // stored with an empty payload — would otherwise go out as `[]`,
+            // which every app version fails to read as a record and skips
+            // for good (2026-10: deleted approval rules and quotation lines
+            // stayed on every till). Always send an object.
+            if (($record['payload'] ?? null) === [] || ! array_key_exists('payload', $record) || $record['payload'] === null) {
+                $record['payload'] = (object) [];
+
+                continue;
+            }
+
             if (($record['table_name'] ?? null) !== 'approval_requests') {
                 continue;
             }
