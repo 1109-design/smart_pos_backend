@@ -32,7 +32,7 @@ class SupplierInvoice extends Model
         'exchange_rate', 'subtotal', 'discount_total', 'tax_total',
         'withholding_tax_total', 'other_charges_total', 'amount', 'status',
         'match_status', 'description', 'created_by_user_id',
-        'approved_by_user_id', 'approved_at', 'posted_at',
+        'approved_by_user_id', 'approved_at', 'posted_at', 'replaces_invoice_id',
     ];
 
     protected function casts(): array

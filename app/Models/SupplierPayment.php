@@ -15,7 +15,7 @@ class SupplierPayment extends Model
         'id', 'business_id', 'supplier_id', 'amount', 'currency_code',
         'exchange_rate_used', 'base_equivalent',
         'payment_date', 'method', 'reference', 'recorded_by_user_id',
-        'bank_account_id', 'provider', 'gl_account_id',
+        'bank_account_id', 'provider', 'gl_account_id', 'is_prepayment',
     ];
 
     protected static function booted(): void
@@ -34,6 +34,7 @@ class SupplierPayment extends Model
         return [
             'payment_date' => 'date',
             'amount' => 'decimal:4',
+            'is_prepayment' => 'boolean',
         ];
     }
 

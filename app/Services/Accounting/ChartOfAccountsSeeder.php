@@ -212,11 +212,11 @@ class ChartOfAccountsSeeder
         ['Expenses', 'Other Expenses', ['code' => '6045', 'name' => 'Bad Debts']],
     ];
 
-    /**
-     * Take-on (Phase 3): every opening balance posts against Take-on
-     * Clearing, which must be exactly zero before take-on is finalised;
-     * supplier prepayments brought forward need an asset of their own.
-     */
+    /** Payment vouchers (Phase 8): approved expense vouchers not yet paid. */
+    public const PHASE8_ACCOUNTS = [
+        ['Liabilities', 'Current Liabilities', ['code' => '2070', 'name' => 'Payment Vouchers Payable']],
+    ];
+
     /** Till (Phase 7): cash shortages / overages, and lay-by money held. */
     public const PHASE7_ACCOUNTS = [
         ['Expenses', 'Other Expenses', ['code' => '6067', 'name' => 'Cash Over/Short']],
@@ -228,6 +228,11 @@ class ChartOfAccountsSeeder
         ['Assets', 'Current Assets', ['code' => '1210', 'name' => 'Stock in Transit']],
     ];
 
+    /**
+     * Take-on (Phase 3): every opening balance posts against Take-on
+     * Clearing, which must be exactly zero before take-on is finalised;
+     * supplier prepayments brought forward need an asset of their own.
+     */
     public const PHASE3_ACCOUNTS = [
         ['Assets', 'Current Assets', ['code' => '1170', 'name' => 'Supplier Prepayments']],
         ['Equity', "Shareholders' Equity", ['code' => '3025', 'name' => 'Take-on Clearing']],
@@ -268,6 +273,7 @@ class ChartOfAccountsSeeder
                     ['code' => '2020', 'name' => 'Deposits Held'],
                     ['code' => '2025', 'name' => 'Change Owed'],
                     ['code' => '2060', 'name' => 'Layby Deposits'],
+                    ['code' => '2070', 'name' => 'Payment Vouchers Payable'],
                     ['code' => '2030', 'name' => 'Tax Payable'],
                     self::EXCHANGE_CLEARING,
                     self::OLD_SYSTEM_DEPOSITS,

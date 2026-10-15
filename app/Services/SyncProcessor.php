@@ -14,6 +14,7 @@ use App\Models\Accounting\JournalLine;
 use App\Models\Accounting\JournalTemplate;
 use App\Models\Accounting\ManualJournal;
 use App\Models\Accounting\ManualJournalLine;
+use App\Models\Accounting\PaymentVoucher;
 use App\Models\Accounting\StockPostingRule;
 use App\Models\Accounting\TakeOnBatch;
 use App\Models\Accounting\TakeOnRow;
@@ -252,6 +253,7 @@ class SyncProcessor
         'take_on_batches' => TakeOnBatch::class,
         'stock_posting_rules' => StockPostingRule::class,
         'z_reports' => ZReport::class,
+        'payment_vouchers' => PaymentVoucher::class,
         'pending_collections' => PendingCollection::class,
         'locations' => Location::class,
         'categories' => Category::class,
@@ -2227,6 +2229,7 @@ class SyncProcessor
                         'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
                         'approved_at' => $payload['approved_at'] ?? null,
                         'posted_at' => $payload['posted_at'] ?? null,
+                        'replaces_invoice_id' => $payload['replaces_invoice_id'] ?? null,
                     ]
                 );
                 break;
@@ -3638,6 +3641,10 @@ class SyncProcessor
                 $this->applyZReport($uuid, $payload);
                 break;
 
+            case 'payment_vouchers':
+                $this->applyPaymentVoucher($uuid, $payload);
+                break;
+
             case 'stock_posting_rules':
                 // Which accounts stock movements post to — owner / manager
                 // only, like the chart of accounts.
@@ -4139,6 +4146,7 @@ class SyncProcessor
                         'bank_account_id' => $payload['bank_account_id'] ?? null,
                         'provider' => $payload['provider'] ?? null,
                         'gl_account_id' => $payload['gl_account_id'] ?? null,
+                        'is_prepayment' => (bool) ($payload['is_prepayment'] ?? false),
                     ]
                 );
                 break;
@@ -5027,6 +5035,76 @@ class SyncProcessor
                 ]);
             }
         });
+    }
+
+    /**
+     * A payment voucher (Phase 8.2). Whoever raised it can't be the one who
+     * approved it; once approved it only moves forward, what's been paid
+     * never shrinks, and its history is only ever added to.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function applyPaymentVoucher(string $uuid, array $payload): void
+    {
+        $json = fn ($v) => is_string($v) ? json_decode($v, true) : $v;
+        $status = array_key_exists($payload['status'] ?? '', PaymentVoucher::STATUS_RANK) ? $payload['status'] : 'draft';
+        $rank = PaymentVoucher::STATUS_RANK[$status];
+        $createdBy = $payload['created_by_user_id'] ?? null;
+        $approvedBy = $payload['approved_by_user_id'] ?? null;
+        if ($rank >= 1 && ($approvedBy === null || ($createdBy !== null && (string) $approvedBy === (string) $createdBy))) {
+            throw new \RuntimeException('payment_vouchers: a voucher must be approved by someone other than whoever raised it.');
+        }
+
+        $values = [
+            'business_id' => $payload['business_id'] ?? null,
+            'voucher_number' => $payload['voucher_number'] ?? '',
+            'voucher_type' => $payload['voucher_type'] ?? 'expense',
+            'supplier_id' => $payload['supplier_id'] ?? null,
+            'payee' => $payload['payee'] ?? '',
+            'voucher_date' => $payload['voucher_date'] ?? now()->toDateString(),
+            'description' => $payload['description'] ?? null,
+            'total' => (float) ($payload['total'] ?? 0),
+            'paid_amount' => (float) ($payload['paid_amount'] ?? 0),
+            'status' => $status,
+            'close_reason' => $payload['close_reason'] ?? null,
+            'lines' => $json($payload['lines'] ?? []) ?? [],
+            'payments' => $json($payload['payments'] ?? []) ?? [],
+            'history' => $json($payload['history'] ?? []) ?? [],
+            'approval_request_id' => $payload['approval_request_id'] ?? null,
+            'accrual_journal_id' => $payload['accrual_journal_id'] ?? null,
+            'created_by_user_id' => $createdBy,
+            'approved_by_user_id' => $approvedBy,
+            'approved_at' => $payload['approved_at'] ?? null,
+        ];
+
+        $existing = PaymentVoucher::find($uuid);
+        if ($existing === null) {
+            PaymentVoucher::create(['id' => $uuid, ...$values]);
+
+            return;
+        }
+        if ((string) $existing->business_id !== (string) $values['business_id']) {
+            throw new \RuntimeException('payment_vouchers: voucher belongs to another business.');
+        }
+        $existingRank = PaymentVoucher::STATUS_RANK[$existing->status] ?? 0;
+        if ($existingRank >= 1) {
+            // Approved: what it's for and who approved it are settled — a
+            // stale push can't move it back or shrink what's been paid.
+            if ($rank < $existingRank || ($rank === $existingRank && $existing->status !== $status && $existing->status === 'closed')) {
+                return;
+            }
+            foreach (['voucher_type', 'supplier_id', 'payee', 'voucher_date', 'total', 'lines', 'created_by_user_id', 'approved_by_user_id', 'approved_at', 'approval_request_id', 'accrual_journal_id'] as $key) {
+                unset($values[$key]);
+            }
+            $values['paid_amount'] = max((float) $existing->paid_amount, $values['paid_amount']);
+            if (count($values['payments']) < count($existing->payments ?? [])) {
+                $values['payments'] = $existing->payments;
+            }
+        }
+        if (count($values['history']) < count($existing->history ?? [])) {
+            $values['history'] = $existing->history;
+        }
+        $existing->update($values);
     }
 
     /**
