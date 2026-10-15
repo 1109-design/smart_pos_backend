@@ -142,8 +142,6 @@ use App\Models\User;
 use App\Models\WarehouseBin;
 use App\Services\Accounting\JournalBundleIngestor;
 use App\Services\Accounting\JournalEntryApprovalService;
-use App\Services\Accounting\OpeningBalanceService;
-use App\Services\Accounting\ProductOpeningStockPostingService;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use App\Services\Payroll\PayrollSync;
 use App\Services\Zimra\ZimraSalesService;
@@ -1623,12 +1621,8 @@ class SyncProcessor
                         'user_id' => $payload['user_id'] ?? null,
                     ]);
                     $this->broadcastStockMovement($openingMovement);
-                    // Record the take-on value in the books too — see
-                    // ProductOpeningStockPostingService for why this ledger
-                    // entry alone previously left the balance sheet blind to
-                    // any stock a business took on when it started using the
-                    // system (e.g. via a sheet/CSV import).
-                    app(ProductOpeningStockPostingService::class)->recordTakeOn($openingMovement);
+                    // Booked by the device, not here — the server never
+                    // posts (ProductOpeningStockPostingService on the device).
                 }
                 // If any movements exist for this product, recompute from the ledger
                 // so concurrent pushes from multiple devices converge correctly.
@@ -2013,7 +2007,8 @@ class SyncProcessor
                 // re-import's quantity reconciliation. The 'products' case
                 // above covers a brand-new product's own initial quantity;
                 // this covers every later adjustment to a take-on figure.
-                app(ProductOpeningStockPostingService::class)->recordTakeOn($movement);
+                // Booked by the device that recorded it — the server never
+                // posts.
                 break;
 
             case 'loyalty_transactions':
@@ -2054,23 +2049,10 @@ class SyncProcessor
                 if (! empty($payload['customer_id'])) {
                     $this->recomputeCustomerBalances($payload['customer_id']);
                 }
-                // A one-time opening balance also needs to land in the
-                // formal books (if this business has any) — see
-                // OpeningBalanceService's doc comment. The till-side ledger
-                // update above already happened regardless of whether
-                // accounting is switched on.
-                if (($payload['type'] ?? null) === 'opening_balance' && ! empty($payload['customer_id'])) {
-                    $businessId = Customer::where('id', $payload['customer_id'])->value('business_id');
-                    if ($businessId) {
-                        app(OpeningBalanceService::class)->recordCustomerOpeningBalance(
-                            $businessId,
-                            $payload['customer_id'],
-                            (float) ($payload['amount'] ?? 0),
-                            isset($payload['created_at']) ? Carbon::parse($payload['created_at'])->toDateString() : now()->toDateString(),
-                            $payload['reference'] ?? null,
-                        );
-                    }
-                }
+                // A one-time opening balance is booked by the device that
+                // recorded it (set_opening_balance_sheet.dart) — the server
+                // never posts. (It used to post again here, under a
+                // different source id, so the two never matched.)
                 break;
 
             case 'container_deposit_ledger':

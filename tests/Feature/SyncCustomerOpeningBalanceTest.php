@@ -47,7 +47,7 @@ class SyncCustomerOpeningBalanceTest extends TestCase
         return GlAccount::where('business_id', $businessId)->where('code', $code)->firstOrFail();
     }
 
-    public function test_opening_balance_updates_till_balance_and_posts_to_the_ledger_when_accounting_is_live(): void
+    public function test_opening_balance_updates_till_balance_but_the_server_does_not_post_it(): void
     {
         $tenantId = 'tenant-opening-balance-live';
         Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);
@@ -84,9 +84,12 @@ class SyncCustomerOpeningBalanceTest extends TestCase
 
         $this->assertDatabaseHas('customers', ['id' => $customerId, 'credit_balance' => 150]);
 
+        // The device that recorded it posts its journal
+        // (set_opening_balance_sheet.dart); the server used to post a
+        // second one under a different source id, which never matched.
         $ledger = app(PartyLedgerService::class);
-        $this->assertSame(150.0, $ledger->currentBalance($tenantId, 'customer', $customerId));
-        $this->assertSame(150.0, $this->account($tenantId, '1100')->balance());
+        $this->assertSame(0.0, $ledger->currentBalance($tenantId, 'customer', $customerId));
+        $this->assertSame(0.0, $this->account($tenantId, '1100')->balance());
     }
 
     public function test_opening_balance_updates_till_balance_only_when_accounting_is_not_live(): void

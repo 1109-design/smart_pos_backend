@@ -7,6 +7,7 @@ use App\Models\Accounting\JournalHeader;
 use App\Models\Business;
 use App\Models\Device;
 use App\Models\Product;
+use App\Models\StockMovement;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Services\Accounting\ChartOfAccountsSeeder;
@@ -15,14 +16,13 @@ use Illuminate\Support\Str;
 use Tests\TestCase;
 
 /**
- * End-to-end coverage through the real /api/v1/sync/push endpoint — proving
- * both places an 'opening_stock' take-on figure reaches the server (a
- * brand-new product's own initial quantity via the 'products' case, and a
- * later adjustment via a plain 'stock_movements' upsert — what
- * ProductsController::applyLocationBalance() and the till's
- * CostService.adjustStock() both send) trigger
- * ProductOpeningStockPostingService, not just the service in isolation
- * (already covered by ProductOpeningStockPostingServiceTest).
+ * End-to-end through the real /api/v1/sync/push endpoint: both places an
+ * 'opening_stock' take-on figure reaches the server (a brand-new product's
+ * own initial quantity via the 'products' case, and a later adjustment via
+ * a plain 'stock_movements' upsert) record the stock — and post nothing.
+ * The device that records a take-on books it (the app's
+ * ProductOpeningStockPostingService); the server never posts, so it can't
+ * book the same take-on a second time.
  */
 class SyncTriggersProductOpeningStockPostingTest extends TestCase
 {
@@ -49,7 +49,7 @@ class SyncTriggersProductOpeningStockPostingTest extends TestCase
         return $plain;
     }
 
-    public function test_a_new_products_own_initial_stock_quantity_posts_a_take_on_journal(): void
+    public function test_a_new_products_own_initial_stock_quantity_is_recorded_but_not_posted_by_the_server(): void
     {
         $tenantId = 'tenant-e2e-opening-stock-new-product';
         $token = $this->actingDeviceToken($tenantId);
@@ -77,15 +77,13 @@ class SyncTriggersProductOpeningStockPostingTest extends TestCase
 
         $response->assertOk();
 
-        $journal = JournalHeader::where('source_type', 'product_opening_stock')->where('business_id', $tenantId)->first();
-        $this->assertNotNull($journal, 'a GL entry should have been posted for the new product take-on');
-        $this->assertSame('posted', $journal->status);
-
+        $this->assertSame(10.0, (float) StockMovement::where('product_id', $productId)->where('type', 'opening_stock')->sum('quantity_change'));
+        $this->assertFalse(JournalHeader::where('source_type', 'product_opening_stock')->where('business_id', $tenantId)->exists());
         $inventory = GlAccount::where('business_id', $tenantId)->where('code', '1200')->first();
-        $this->assertSame(80.0, $inventory->balance()); // 10 units * $8
+        $this->assertSame(0.0, $inventory->balance());
     }
 
-    public function test_an_opening_balance_correction_via_a_plain_stock_movement_posts_a_take_on_journal(): void
+    public function test_an_opening_balance_correction_via_a_plain_stock_movement_is_recorded_but_not_posted_by_the_server(): void
     {
         $tenantId = 'tenant-e2e-opening-stock-correction';
         $token = $this->actingDeviceToken($tenantId);
@@ -118,9 +116,9 @@ class SyncTriggersProductOpeningStockPostingTest extends TestCase
 
         $response->assertOk();
 
-        $journal = JournalHeader::where('source_type', 'product_opening_stock')->where('business_id', $tenantId)->first();
-        $this->assertNotNull($journal);
+        $this->assertSame(12.0, (float) StockMovement::where('product_id', $product->id)->where('type', 'opening_stock')->sum('quantity_change'));
+        $this->assertFalse(JournalHeader::where('source_type', 'product_opening_stock')->where('business_id', $tenantId)->exists());
         $inventory = GlAccount::where('business_id', $tenantId)->where('code', '1200')->first();
-        $this->assertSame(60.0, $inventory->balance()); // 12 units * $5
+        $this->assertSame(0.0, $inventory->balance());
     }
 }
