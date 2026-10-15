@@ -8,6 +8,7 @@ use App\Models\Device;
 use App\Models\DeviceSyncHealth;
 use App\Models\DeviceSyncIssue;
 use App\Models\Location;
+use App\Models\SyncConflict;
 use App\Services\DeviceResolver;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -22,6 +23,17 @@ use Illuminate\Http\Request;
  */
 class DeviceOverviewController extends Controller
 {
+    /** Reported for the record, not a problem to act on. */
+    private const INFORMATIONAL_CATEGORIES = [
+        'conflict_auto_accepted',
+        'duplicate_journals_removed',
+        'approval_dead_letters_replayed',
+        'given_up_retried',
+    ];
+
+    /** Issues not seen again for this long don't count as open. */
+    private const ISSUE_WINDOW_DAYS = 3;
+
     public function __construct(private readonly DeviceResolver $deviceResolver) {}
 
     public function index(Request $request): JsonResponse
@@ -35,12 +47,25 @@ class DeviceOverviewController extends Controller
         $health = DeviceSyncHealth::whereIn('device_id', $devices->pluck('id'))
             ->get()
             ->keyBy('device_id');
+        // Live problems only: notes like "stale conflict closed" aren't
+        // problems, and a one-off network blip from last week isn't either.
         $issues = DeviceSyncIssue::where('business_id', $me->tenant_id)
             ->whereNull('resolved_at')
+            ->whereNotIn('category', self::INFORMATIONAL_CATEGORIES)
+            ->where('last_seen_at', '>=', now()->subDays(self::ISSUE_WINDOW_DAYS))
             ->groupBy('device_id')
             ->selectRaw('device_id, COUNT(*) as issues, SUM(occurrences) as occurrences, MAX(last_seen_at) as latest')
             ->get()
             ->keyBy('device_id');
+
+        // A device keeps a note of every push the server answered with a
+        // conflict, even after the server settled it — count the ones the
+        // server still has open instead.
+        $openConflicts = SyncConflict::where('business_id', $me->tenant_id)
+            ->where('status', 'pending')
+            ->groupBy('device_id')
+            ->selectRaw('device_id, COUNT(*) as n')
+            ->pluck('n', 'device_id');
 
         $locationIds = $devices->pluck('location_id')
             ->merge($health->map(fn ($h) => $h->snapshot['active_location_id'] ?? null))
@@ -51,12 +76,12 @@ class DeviceOverviewController extends Controller
         return response()->json([
             'server_time' => now()->toIso8601String(),
             'app_releases' => (object) AppRelease::latestByPlatform(),
-            'devices' => $devices->map(function (Device $d) use ($me, $health, $issues, $locations) {
+            'devices' => $devices->map(function (Device $d) use ($me, $health, $issues, $locations, $openConflicts) {
                 $h = $health->get($d->id);
                 $snapshot = $h?->snapshot ?? [];
                 $locationId = $snapshot['active_location_id'] ?? $d->location_id;
 
-                $queue = ['pending' => 0, 'failing' => 0, 'gave_up' => 0, 'conflicts' => 0];
+                $queue = ['pending' => 0, 'failing' => 0, 'gave_up' => 0];
                 $oldestPending = null;
                 foreach (($snapshot['tables'] ?? []) as $table) {
                     foreach ($queue as $key => $sum) {
@@ -87,7 +112,10 @@ class DeviceOverviewController extends Controller
                     'last_successful_sync_at' => $h?->last_successful_sync_at?->toIso8601String(),
                     'health_reported_at' => $h?->reported_at?->toIso8601String(),
                     'schema_version' => $snapshot['schema_version'] ?? null,
-                    'queue' => $queue + ['oldest_pending_at' => $oldestPending],
+                    'queue' => $queue + [
+                        'conflicts' => (int) ($openConflicts[$d->id] ?? 0),
+                        'oldest_pending_at' => $oldestPending,
+                    ],
                     'unreported_lan_conflicts' => (int) ($snapshot['unreported_lan_conflicts'] ?? 0),
                     'last_error_messages' => array_slice($snapshot['last_error_messages'] ?? [], 0, 5),
                     'open_issues' => (int) ($issue?->issues ?? 0),
