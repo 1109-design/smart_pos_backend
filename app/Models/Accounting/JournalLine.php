@@ -13,7 +13,7 @@ class JournalLine extends Model
     protected $fillable = [
         'id', 'journal_header_id', 'gl_account_id', 'debit', 'credit',
         'currency_code', 'exchange_rate', 'foreign_debit', 'foreign_credit',
-        'party_type', 'party_id', 'description',
+        'party_type', 'party_id', 'description', 'cost_centre_id', 'line_no',
     ];
 
     protected function casts(): array

@@ -78,7 +78,7 @@ class SyncApprovalRequestAndVoidReasonTest extends TestCase
 
         // A different device on the same business must see it on pull.
         $otherToken = $this->actingDeviceToken($tenantId.'-other-owner');
-        Device::where('tenant_id', $tenantId.'-other-owner')->update(['tenant_id' => $tenantId]);
+        Device::where('tenant_id', $tenantId.'-other-owner')->get()->each->update(['tenant_id' => $tenantId]);
 
         $pull = $this->withHeader('Authorization', 'Bearer '.$otherToken)
             ->getJson('/api/v1/sync/pull?'.http_build_query(['tables' => ['approval_requests']]));
@@ -176,7 +176,7 @@ class SyncApprovalRequestAndVoidReasonTest extends TestCase
         ])->assertOk();
 
         $otherToken = $this->actingDeviceToken($tenantId.'-other-owner');
-        Device::where('tenant_id', $tenantId.'-other-owner')->update(['tenant_id' => $tenantId]);
+        Device::where('tenant_id', $tenantId.'-other-owner')->get()->each->update(['tenant_id' => $tenantId]);
 
         $pull = $this->withHeader('Authorization', 'Bearer '.$otherToken)
             ->getJson('/api/v1/sync/pull?'.http_build_query(['tables' => ['approval_requests']]));

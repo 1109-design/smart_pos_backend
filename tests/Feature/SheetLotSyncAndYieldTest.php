@@ -80,7 +80,7 @@ class SheetLotSyncAndYieldTest extends TestCase
         $this->assertSame('available', $lot->status);
 
         $otherToken = $this->actingDeviceToken($tenantId.'-other');
-        Device::where('tenant_id', $tenantId.'-other')->update(['tenant_id' => $tenantId]);
+        Device::where('tenant_id', $tenantId.'-other')->get()->each->update(['tenant_id' => $tenantId]);
         $pull = $this->withHeader('Authorization', 'Bearer '.$otherToken)
             ->getJson('/api/v1/sync/pull?'.http_build_query(['tables' => ['sheet_lots']]));
         $pull->assertOk();

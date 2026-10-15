@@ -15,6 +15,9 @@ class JournalHeader extends Model
         'source_type', 'source_id', 'idempotency_key', 'status', 'posted_at',
         'posted_by_user_id', 'reversed_by_journal_id', 'reversed_at',
         'reversed_by_user_id', 'reversal_of_journal_id', 'location_id',
+        'posting_key', 'journal_type', 'batch_id', 'corrects_journal_id',
+        'auto_reverse_date', 'posted_device_id', 'cost_centre_id',
+        'currency_code', 'exchange_rate',
     ];
 
     protected function casts(): array
@@ -23,6 +26,8 @@ class JournalHeader extends Model
             'trans_date' => 'date',
             'posted_at' => 'datetime',
             'reversed_at' => 'datetime',
+            'auto_reverse_date' => 'date',
+            'exchange_rate' => 'decimal:8',
         ];
     }
 

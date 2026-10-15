@@ -84,7 +84,7 @@ class SyncTillTest extends TestCase
         // The pushing device's own record is excluded from its own pull (echo
         // suppression) — a *different* device on the same business should see it.
         $otherDeviceToken = $this->actingDeviceToken('tenant-sync-till-1-other-device-owner');
-        Device::where('tenant_id', 'tenant-sync-till-1-other-device-owner')->update(['tenant_id' => $tenantId]);
+        Device::where('tenant_id', 'tenant-sync-till-1-other-device-owner')->get()->each->update(['tenant_id' => $tenantId]);
 
         $pullFromOtherDevice = $this->withHeader('Authorization', 'Bearer '.$otherDeviceToken)
             ->getJson('/api/v1/sync/pull?'.http_build_query(['tables' => ['tills']]));
