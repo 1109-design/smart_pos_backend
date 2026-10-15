@@ -13,7 +13,7 @@ class SupplierInvoiceLine extends Model
     protected $fillable = [
         'id', 'supplier_invoice_id', 'purchase_order_item_id', 'grv_item_id',
         'product_id', 'description', 'quantity', 'unit_cost', 'discount_pct',
-        'tax_rate_id', 'gl_account_id', 'line_total',
+        'tax_rate_id', 'gl_account_id', 'line_total', 'cost_centre_id',
     ];
 
     protected function casts(): array

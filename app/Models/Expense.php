@@ -15,6 +15,7 @@ class Expense extends Model
         'amount', 'currency_code', 'base_equivalent', 'exchange_rate',
         'payment_method', 'mobile_provider', 'payment_reference', 'bank_account_id',
         'receipt_path', 'notes', 'expense_date', 'location_id', 'deleted_at',
+        'cost_centre_id',
     ];
 
     protected static function booted(): void

@@ -14,6 +14,7 @@ class Location extends Model
     protected $fillable = [
         'id', 'business_id', 'parent_id', 'name', 'type',
         'address', 'phone', 'email', 'can_sell', 'can_receive', 'is_active',
+        'cost_centre_id',
     ];
 
     protected function casts(): array

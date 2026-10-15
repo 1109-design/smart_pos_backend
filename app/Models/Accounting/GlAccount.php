@@ -13,7 +13,7 @@ class GlAccount extends Model
     protected $fillable = [
         'id', 'business_id', 'code', 'name', 'account_category_id',
         'account_sub_category_id', 'allow_direct_posting', 'control_type',
-        'must_be_positive', 'status',
+        'must_be_positive', 'status', 'default_cost_centre_id',
     ];
 
     protected function casts(): array

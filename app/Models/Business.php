@@ -41,6 +41,7 @@ class Business extends Model
         'take_on_finalised_at',
         'take_on_finalised_by_user_id',
         'cash_up_variance_threshold',
+        'cost_centre_required',
     ];
 
     protected function casts(): array
@@ -105,6 +106,7 @@ class Business extends Model
                 'take_on_finalised_at' => $this->take_on_finalised_at?->toIso8601String(),
                 'take_on_finalised_by_user_id' => $this->take_on_finalised_by_user_id,
                 'cash_up_variance_threshold' => (float) $this->cash_up_variance_threshold,
+                'cost_centre_required' => (bool) $this->cost_centre_required,
             ],
             'source_updated_at' => now(),
             'synced_at' => now(),

@@ -6,6 +6,7 @@ use App\Exceptions\MissingParentRecordException;
 use App\Models\Accounting\AccountCategory;
 use App\Models\Accounting\AccountingPeriod;
 use App\Models\Accounting\AccountSubCategory;
+use App\Models\Accounting\CostCentre;
 use App\Models\Accounting\GeneralLedgerEntry;
 use App\Models\Accounting\GlAccount;
 use App\Models\Accounting\JournalAttachment;
@@ -254,6 +255,7 @@ class SyncProcessor
         'stock_posting_rules' => StockPostingRule::class,
         'z_reports' => ZReport::class,
         'payment_vouchers' => PaymentVoucher::class,
+        'cost_centres' => CostCentre::class,
         'pending_collections' => PendingCollection::class,
         'locations' => Location::class,
         'categories' => Category::class,
@@ -1492,6 +1494,9 @@ class SyncProcessor
                     'cash_up_variance_threshold' => isset($payload['cash_up_variance_threshold'])
                         ? max(0, (float) $payload['cash_up_variance_threshold'])
                         : $business->cash_up_variance_threshold,
+                    'cost_centre_required' => array_key_exists('cost_centre_required', $payload)
+                        ? (bool) $payload['cost_centre_required']
+                        : $business->cost_centre_required,
                     // Finalising take-on (Phase 3) is one-way: once set it
                     // never clears, and the first finalisation stands.
                     'take_on_finalised_at' => $business->take_on_finalised_at
@@ -2249,6 +2254,7 @@ class SyncProcessor
                         'tax_rate_id' => $payload['tax_rate_id'] ?? null,
                         'gl_account_id' => $payload['gl_account_id'] ?? null,
                         'line_total' => $payload['line_total'] ?? 0,
+                        'cost_centre_id' => $payload['cost_centre_id'] ?? null,
                     ]
                 );
                 break;
@@ -3150,6 +3156,7 @@ class SyncProcessor
                         'expense_date' => $payload['expense_date'] ?? now(),
                         'location_id' => $payload['location_id'] ?? null,
                         'deleted_at' => $payload['deleted_at'] ?? null,
+                        'cost_centre_id' => $payload['cost_centre_id'] ?? null,
                     ]
                 );
                 break;
@@ -3647,6 +3654,18 @@ class SyncProcessor
 
             case 'payment_vouchers':
                 $this->applyPaymentVoucher($uuid, $payload);
+                break;
+
+            case 'cost_centres':
+            case 'cost_centre_defaults':
+                // Where revenue and costs are reported — owner / manager
+                // only, like the chart of accounts.
+                if (! $trusted && ! ($actingUser?->hasRole(['business_owner', 'manager']) ?? false)) {
+                    throw new \RuntimeException("{$table}: cost centres need owner or manager access.");
+                }
+                $table === 'cost_centres'
+                    ? $this->applyCostCentre($uuid, $payload)
+                    : $this->applyCostCentreDefault($payload, $actingUser);
                 break;
 
             case 'stock_posting_rules':
@@ -5039,6 +5058,58 @@ class SyncProcessor
                 ]);
             }
         });
+    }
+
+    /**
+     * A cost centre (Phase 10.1). A split's shares must add to 100%.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function applyCostCentre(string $uuid, array $payload): void
+    {
+        $split = $payload['split'] ?? [];
+        $split = is_string($split) ? (json_decode($split, true) ?? []) : $split;
+        $isSplit = (bool) ($payload['is_split'] ?? false);
+        if ($isSplit && abs(array_sum(array_map(fn ($s) => (float) ($s['pct'] ?? 0), $split)) - 100) > 0.001) {
+            throw new \RuntimeException('cost_centres: a split must add up to 100%.');
+        }
+        $existing = CostCentre::find($uuid);
+        if ($existing !== null && (string) $existing->business_id !== (string) ($payload['business_id'] ?? '')) {
+            throw new \RuntimeException('cost_centres: cost centre belongs to another business.');
+        }
+        CostCentre::updateOrCreate(['id' => $uuid], [
+            'business_id' => $payload['business_id'],
+            'code' => $payload['code'] ?? '',
+            'name' => $payload['name'] ?? '',
+            'parent_id' => $payload['parent_id'] ?? null,
+            'is_split' => $isSplit,
+            'split' => $isSplit ? $split : [],
+            'is_active' => (bool) ($payload['is_active'] ?? true),
+        ]);
+    }
+
+    /**
+     * The default cost centre of a location, product category or GL
+     * account (Phase 10.2) — only that one column changes.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function applyCostCentreDefault(array $payload, ?User $actingUser): void
+    {
+        [$model, $column] = match ($payload['kind'] ?? '') {
+            'location' => [Location::class, 'cost_centre_id'],
+            'category' => [Category::class, 'cost_centre_id'],
+            'account' => [GlAccount::class, 'default_cost_centre_id'],
+            default => throw new \RuntimeException('cost_centre_defaults: unknown kind.'),
+        };
+        $row = $model::find($payload['id'] ?? '');
+        if ($row === null) {
+            return;
+        }
+        if ($actingUser !== null && (string) $row->business_id !== (string) $actingUser->business_id) {
+            throw new \RuntimeException('cost_centre_defaults: that belongs to another business.');
+        }
+        $row->forceFill([$column => $payload['cost_centre_id'] ?? null])->save();
     }
 
     /**
