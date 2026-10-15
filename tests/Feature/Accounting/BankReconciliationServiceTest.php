@@ -20,6 +20,14 @@ class BankReconciliationServiceTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        // Builds its fixture journals through the (retired) server engine.
+        JournalService::allowPostingForTestFixtures();
+    }
+
     private function makeLiveBusiness(string $id = 'biz-1'): string
     {
         Tenant::create(['id' => $id, 'business_name' => $id, 'owner_email' => "{$id}@example.com"]);

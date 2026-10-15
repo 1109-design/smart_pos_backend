@@ -65,30 +65,6 @@ class StockTakePostingServiceTest extends TestCase
         return $movement;
     }
 
-    public function test_shrinkage_debits_stock_loss_and_credits_inventory(): void
-    {
-        $movement = $this->makeVarianceMovement(quantityChange: -4, runningAvgCost: 5);
-
-        $this->posting->recordVariance($movement);
-
-        $journal = JournalHeader::where('source_type', 'stock_take_variance')->where('source_id', $movement->id)->first();
-        $this->assertNotNull($journal);
-        $this->assertSame('posted', $journal->status);
-        $this->assertSame(20.0, $this->account('6050')->balance()); // Stock Loss debited (expense, debit-normal)
-        // Inventory (asset, debit-normal) credited — a shrinkage reduces its balance.
-        $this->assertSame(-20.0, $this->account('1200')->balance());
-    }
-
-    public function test_found_stock_debits_inventory_and_credits_stock_loss(): void
-    {
-        $movement = $this->makeVarianceMovement(quantityChange: 3, runningAvgCost: 5);
-
-        $this->posting->recordVariance($movement);
-
-        $this->assertSame(15.0, $this->account('1200')->balance()); // Inventory debited
-        $this->assertSame(-15.0, $this->account('6050')->balance()); // Stock Loss credited, nets against any shrinkage
-    }
-
     public function test_a_movement_with_no_reference_id_is_never_posted(): void
     {
         $movement = $this->makeVarianceMovement(quantityChange: -4, referenceId: null);
@@ -116,17 +92,6 @@ class StockTakePostingServiceTest extends TestCase
         $this->posting->recordVariance($movement);
 
         $this->assertSame(0, JournalHeader::where('source_type', 'stock_take_variance')->count());
-    }
-
-    public function test_processing_the_same_movement_twice_does_not_double_post(): void
-    {
-        $movement = $this->makeVarianceMovement(quantityChange: -4, runningAvgCost: 5);
-
-        $this->posting->recordVariance($movement);
-        $this->posting->recordVariance($movement);
-
-        $this->assertSame(1, JournalHeader::where('source_type', 'stock_take_variance')->count());
-        $this->assertSame(20.0, $this->account('6050')->balance());
     }
 
     public function test_nothing_posts_before_the_accounting_go_live_date(): void

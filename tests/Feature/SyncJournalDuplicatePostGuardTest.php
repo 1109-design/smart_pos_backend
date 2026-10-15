@@ -40,6 +40,14 @@ class SyncJournalDuplicatePostGuardTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        // Builds its fixture journals through the (retired) server engine.
+        JournalService::allowPostingForTestFixtures();
+    }
+
     private function tenantWithChartOfAccounts(string $tenantId): void
     {
         Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);

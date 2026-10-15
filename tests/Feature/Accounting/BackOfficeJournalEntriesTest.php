@@ -4,7 +4,6 @@ namespace Tests\Feature\Accounting;
 
 use App\Http\Middleware\AuthenticateBackOfficeUser;
 use App\Models\Accounting\GlAccount;
-use App\Models\Accounting\JournalHeader;
 use App\Models\Business;
 use App\Models\Tenant;
 use App\Models\User;
@@ -56,28 +55,6 @@ class BackOfficeJournalEntriesTest extends TestCase
         ]]);
     }
 
-    public function test_owner_can_post_a_balanced_manual_journal_entry(): void
-    {
-        $this->actingBackOfficeAs('business_owner');
-        $this->fundCash(1000);
-
-        $response = $this->post('/office/journal-entries', [
-            'trans_date' => '2026-06-01',
-            'description' => 'Opening rent accrual',
-            'lines' => [
-                ['gl_account_id' => $this->account('6000')->id, 'debit' => 150, 'credit' => 0],
-                ['gl_account_id' => $this->account('1000')->id, 'debit' => 0, 'credit' => 150],
-            ],
-        ]);
-
-        $response->assertRedirect();
-        $response->assertSessionHas('success');
-
-        $this->assertSame(850.0, $this->account('1000')->balance());
-        $this->assertSame(150.0, $this->account('6000')->balance());
-        $this->assertDatabaseHas('journal_headers', ['business_id' => $this->tenantId, 'source_type' => 'manual', 'status' => 'posted']);
-    }
-
     public function test_an_unbalanced_entry_is_rejected(): void
     {
         $this->actingBackOfficeAs('business_owner');
@@ -125,52 +102,5 @@ class BackOfficeJournalEntriesTest extends TestCase
                 ['gl_account_id' => $this->account('1000')->id, 'debit' => 0, 'credit' => 10],
             ],
         ])->assertForbidden();
-    }
-
-    public function test_owner_can_reverse_a_posted_manual_entry(): void
-    {
-        $this->actingBackOfficeAs('business_owner');
-        $this->fundCash(1000);
-
-        $this->post('/office/journal-entries', [
-            'trans_date' => '2026-06-01',
-            'description' => 'To be reversed',
-            'lines' => [
-                ['gl_account_id' => $this->account('6000')->id, 'debit' => 150, 'credit' => 0],
-                ['gl_account_id' => $this->account('1000')->id, 'debit' => 0, 'credit' => 150],
-            ],
-        ]);
-
-        $original = JournalHeader::where('business_id', $this->tenantId)->where('source_type', 'manual')->firstOrFail();
-
-        $response = $this->post("/office/journal-entries/{$original->id}/reverse", ['reason' => 'Entered in error']);
-
-        $response->assertRedirect();
-        $this->assertSame(0.0, $this->account('6000')->balance());
-        $this->assertSame(1000.0, $this->account('1000')->balance());
-        $this->assertDatabaseHas('journal_headers', ['id' => $original->id, 'status' => 'reversed']);
-    }
-
-    public function test_index_lists_manual_and_reversal_journals_with_their_lines(): void
-    {
-        $this->actingBackOfficeAs('business_owner');
-        $this->fundCash(1000);
-
-        $this->post('/office/journal-entries', [
-            'trans_date' => '2026-06-01',
-            'description' => 'Listed entry',
-            'lines' => [
-                ['gl_account_id' => $this->account('6000')->id, 'debit' => 20, 'credit' => 0],
-                ['gl_account_id' => $this->account('1000')->id, 'debit' => 0, 'credit' => 20],
-            ],
-        ]);
-
-        $response = $this->get('/office/journal-entries');
-
-        $response->assertOk();
-        $response->assertInertia(fn ($page) => $page
-            ->has('journals.data', 1)
-            ->has('journals.data.0.lines', 2)
-        );
     }
 }

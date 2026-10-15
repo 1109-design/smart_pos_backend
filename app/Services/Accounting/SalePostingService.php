@@ -62,7 +62,7 @@ class SalePostingService
         // which case an old-app-version straggler that never posted its
         // own journal gets posted here instead. See
         // Business::postsFromClientFor() and PostPendingSales.
-        if (! $viaSweep && $business->postsFromClientFor($transDate)) {
+        if ($business->postsFromClientFor($transDate)) {
             return;
         }
 

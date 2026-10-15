@@ -9,13 +9,10 @@ use App\Models\GoodsReceivedVoucher;
 use App\Models\PurchaseOrder;
 use App\Models\StockMovement;
 use App\Models\Supplier;
-use App\Models\SupplierInvoice;
-use App\Models\SupplierPayment;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Services\Accounting\ChartOfAccountsSeeder;
 use App\Services\Accounting\GrvPostingService;
-use App\Services\Accounting\JournalService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Tests\TestCase;
@@ -72,83 +69,6 @@ class BackOfficePurchasingLedgerTest extends TestCase
         app(GrvPostingService::class)->recordReceipt($movement);
 
         return GoodsReceivedVoucher::where('purchase_order_id', $po->id)->firstOrFail();
-    }
-
-    public function test_recording_an_invoice_through_backoffice_clears_suspense_and_shows_on_the_po_page(): void
-    {
-        $tenantId = 'tenant-po-invoice-1';
-        $this->actingBackOfficeSession($tenantId);
-        $supplier = Supplier::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Acme Supplies']);
-        $grv = $this->makePostedGrv($tenantId, $supplier->id, qty: 10, unitCost: 5);
-
-        $response = $this->post("/office/grvs/{$grv->id}/invoice", [
-            'invoice_number' => 'INV-100',
-            'invoice_date' => '2026-06-05',
-            'amount' => 50.0,
-        ]);
-        $response->assertRedirect();
-        $this->assertSame(1, SupplierInvoice::where('grv_id', $grv->id)->count());
-        $this->assertSame(0.0, $this->account($tenantId, '2010')->balance());
-        $this->assertSame(50.0, $this->account($tenantId, '2000')->balance());
-
-        $poId = PurchaseOrder::first()->id;
-        $show = $this->get("/office/purchase-orders/{$poId}");
-        $show->assertInertia(fn ($page) => $page
-            ->where('grvs.0.invoice.invoice_number', 'INV-100')
-            ->where('grvs.0.invoice.amount', 50)
-        );
-    }
-
-    public function test_a_second_invoice_against_the_same_grv_is_rejected_with_a_validation_error(): void
-    {
-        $tenantId = 'tenant-po-invoice-2';
-        $this->actingBackOfficeSession($tenantId);
-        $supplier = Supplier::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Acme Supplies']);
-        $grv = $this->makePostedGrv($tenantId, $supplier->id, qty: 10, unitCost: 5);
-
-        $this->post("/office/grvs/{$grv->id}/invoice", ['invoice_number' => 'INV-1', 'invoice_date' => '2026-06-05', 'amount' => 50.0]);
-        $response = $this->post("/office/grvs/{$grv->id}/invoice", ['invoice_number' => 'INV-2', 'invoice_date' => '2026-06-06', 'amount' => 50.0]);
-
-        $response->assertSessionHasErrors('amount');
-        $this->assertSame(1, SupplierInvoice::where('grv_id', $grv->id)->count());
-    }
-
-    public function test_cashier_cannot_record_an_invoice(): void
-    {
-        $tenantId = 'tenant-po-invoice-3';
-        $this->actingBackOfficeSession($tenantId, 'cashier');
-        $supplier = Supplier::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Acme Supplies']);
-        $grv = $this->makePostedGrv($tenantId, $supplier->id, qty: 10, unitCost: 5);
-
-        $this->post("/office/grvs/{$grv->id}/invoice", ['invoice_number' => 'INV-1', 'invoice_date' => '2026-06-05', 'amount' => 50.0])
-            ->assertForbidden();
-    }
-
-    public function test_recording_a_payment_through_backoffice_reduces_the_suppliers_balance(): void
-    {
-        $tenantId = 'tenant-supplier-payment-1';
-        $this->actingBackOfficeSession($tenantId);
-        $supplier = Supplier::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Acme Supplies']);
-        $grv = $this->makePostedGrv($tenantId, $supplier->id, qty: 10, unitCost: 5);
-        $this->post("/office/grvs/{$grv->id}/invoice", ['invoice_number' => 'INV-1', 'invoice_date' => '2026-06-05', 'amount' => 50.0]);
-
-        // Fund cash so the payment doesn't get rejected for overdrawing it.
-        $journals = app(JournalService::class);
-        $header = $journals->createDraft($tenantId, '2026-06-01', 'capital', (string) Str::uuid());
-        $journals->addLine($header, ['gl_account_id' => $this->account($tenantId, '1000')->id, 'debit' => 1000]);
-        $journals->addLine($header, ['gl_account_id' => $this->account($tenantId, '3000')->id, 'credit' => 1000]);
-        $journals->post($header);
-
-        $response = $this->post("/office/suppliers/{$supplier->id}/payments", [
-            'amount' => 20.0, 'payment_date' => '2026-06-10', 'method' => 'cash', 'reference' => 'EFT-1',
-        ]);
-        $response->assertRedirect();
-
-        $this->assertSame(1, SupplierPayment::where('supplier_id', $supplier->id)->count());
-        $this->assertSame(30.0, $this->account($tenantId, '2000')->balance());
-
-        $show = $this->get("/office/suppliers/{$supplier->id}");
-        $show->assertInertia(fn ($page) => $page->where('aging.total_outstanding', 30));
     }
 
     public function test_cashier_cannot_record_a_supplier_payment(): void

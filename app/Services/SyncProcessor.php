@@ -141,7 +141,6 @@ use App\Models\UnitOfMeasure;
 use App\Models\User;
 use App\Models\WarehouseBin;
 use App\Services\Accounting\JournalBundleIngestor;
-use App\Services\Accounting\JournalEntryApprovalService;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use App\Services\Payroll\PayrollSync;
 use App\Services\Zimra\ZimraSalesService;
@@ -1159,11 +1158,8 @@ class SyncProcessor
                             : app(PurchaseOrderApprovalGate::class)->resolveRejected($decided, $approver);
                     }
 
-                    // A manual journal held for approval posts (or is
-                    // discarded) on its final decision.
-                    if (($payload['action'] ?? null) === JournalEntryApprovalService::ACTION) {
-                        app(JournalEntryApprovalService::class)->applyDecision(ApprovalRequest::find($uuid));
-                    }
+                    // A manual journal's approval no longer posts anything
+                    // here: the device that approves it posts the journal.
                 }
                 break;
 

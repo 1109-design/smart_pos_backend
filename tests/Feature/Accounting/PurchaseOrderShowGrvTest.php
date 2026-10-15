@@ -6,14 +6,10 @@ use App\Http\Middleware\AuthenticateBackOfficeUser;
 use App\Models\Business;
 use App\Models\GoodsReceivedVoucher;
 use App\Models\GrvItem;
-use App\Models\Product;
 use App\Models\PurchaseOrder;
-use App\Models\StockMovement;
-use App\Models\Supplier;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Services\Accounting\ChartOfAccountsSeeder;
-use App\Services\Accounting\GrvPostingService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Tests\TestCase;
@@ -42,40 +38,6 @@ class PurchaseOrderShowGrvTest extends TestCase
         ]]);
 
         return $user;
-    }
-
-    public function test_po_show_page_lists_grvs_created_against_it_with_posted_status(): void
-    {
-        $tenantId = 'tenant-po-grv-1';
-        $this->actingBackOfficeSession($tenantId);
-
-        $supplier = Supplier::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Acme Supplies']);
-        $po = PurchaseOrder::create([
-            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'supplier_id' => $supplier->id,
-            'supplier_name' => $supplier->name, 'po_number' => 'PO-0099', 'status' => 'sent',
-            'total_ordered' => 100, 'total_received' => 0, 'created_by_user_id' => (string) Str::uuid(),
-        ]);
-        $product = Product::create([
-            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Widget',
-            'item_type' => 'product', 'price' => 20, 'track_stock' => true, 'is_active' => true,
-        ]);
-
-        $movement = StockMovement::create([
-            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'product_id' => $product->id,
-            'type' => 'receive', 'quantity_change' => 10, 'unit_cost' => 5,
-            'reference_id' => $po->id, 'user_id' => (string) Str::uuid(),
-        ]);
-        app(GrvPostingService::class)->recordReceipt($movement);
-
-        $response = $this->get("/office/purchase-orders/{$po->id}");
-        $response->assertOk();
-        $response->assertInertia(fn ($page) => $page
-            ->has('grvs', 1)
-            ->where('grvs.0.posted_to_ledger', true)
-            ->has('grvs.0.items', 1)
-            ->where('grvs.0.items.0.product_name', 'Widget')
-            ->where('grvs.0.items.0.quantity_accepted', 10)
-        );
     }
 
     public function test_po_show_page_shows_no_grvs_when_nothing_received_yet(): void

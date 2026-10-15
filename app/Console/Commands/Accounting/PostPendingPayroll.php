@@ -8,10 +8,14 @@ use App\Models\Payroll\EmployeeLoan;
 use App\Models\Payroll\PayRun;
 use App\Models\Payroll\PayRunEmployee;
 use App\Models\Payroll\StatutoryRemittance;
-use App\Services\Accounting\PayRunPostingService;
 use Illuminate\Console\Command;
 
 /**
+ * READ-ONLY since 2026-10-15: the server no longer posts journals —
+ * the device that performs a transaction posts it. This now only
+ * counts what is still unposted; the posting described below no
+ * longer happens.
+ *
  * Posts payroll journals left unposted: pay run accruals (a reversal run's
  * lines reach the server after the run itself, so it is only posted here),
  * net pay payments, statutory remittances and staff loans. For a business
@@ -21,23 +25,19 @@ use Illuminate\Console\Command;
  */
 class PostPendingPayroll extends Command
 {
-    private const GRACE_PERIOD_HOURS = 1;
-
     /** A reversal is posted once its rows have had time to arrive. */
     private const REVERSAL_SETTLE_MINUTES = 5;
 
     protected $signature = 'accounting:post-pending-payroll';
 
-    protected $description = 'Post accounting entries for payroll left unposted (pay runs, net pay, remittances, staff loans)';
+    protected $description = 'Report (read-only) payroll left unposted (pay runs, net pay, remittances, staff loans) — the server no longer posts';
 
-    public function handle(PayRunPostingService $posting): int
+    public function handle(): int
     {
         $attempted = 0;
         foreach (Business::whereNotNull('accounting_go_live_date')->get() as $business) {
             $posted = fn (string $type) => JournalHeader::where('business_id', $business->id)
                 ->where('source_type', $type)->pluck('source_id')->all();
-            $viaSweep = fn ($at) => $business->postsFromClientFor(substr((string) $at, 0, 10))
-                && $at !== null && now()->subHours(self::GRACE_PERIOD_HOURS)->gte($at);
 
             $runs = PayRun::where('business_id', $business->id)
                 ->whereIn('status', ['approved', 'paid', 'reversed'])
@@ -45,7 +45,6 @@ class PostPendingPayroll extends Command
                 ->where('updated_at', '<=', now()->subMinutes(self::REVERSAL_SETTLE_MINUTES))
                 ->get();
             foreach ($runs as $run) {
-                $posting->postAccrual($run, $viaSweep($run->approved_at ?? $run->pay_date));
                 $attempted++;
             }
 
@@ -58,25 +57,22 @@ class PostPendingPayroll extends Command
                     if ($at === null || in_array("{$e->id}:{$currency}", $paidDone, true)) {
                         continue;
                     }
-                    $posting->postPayment($e, $currency, $viaSweep($at));
                     $attempted++;
                 }
             }
 
             foreach (StatutoryRemittance::where('business_id', $business->id)
                 ->whereNotIn('id', $posted('statutory_remittance'))->get() as $r) {
-                $posting->postRemittance($r, $viaSweep($r->paid_at));
                 $attempted++;
             }
 
             foreach (EmployeeLoan::where('business_id', $business->id)
                 ->whereNotIn('id', $posted('staff_loan'))->get() as $loan) {
-                $posting->postLoanIssue($loan, $viaSweep($loan->issued_at));
                 $attempted++;
             }
         }
 
-        $this->info("Attempted {$attempted} pending payroll posting(s).");
+        $this->info("Found {$attempted} unposted payroll posting(s). The server no longer posts — post them on a device.");
 
         return self::SUCCESS;
     }

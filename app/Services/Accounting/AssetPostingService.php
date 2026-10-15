@@ -68,7 +68,7 @@ class AssetPostingService
 
         $business = Business::find($asset->business_id);
         $transDate = $asset->acquisition_date->toDateString();
-        if (! $viaSweep && $business->postsFromClientFor($transDate)) {
+        if ($business->postsFromClientFor($transDate)) {
             return;
         }
 

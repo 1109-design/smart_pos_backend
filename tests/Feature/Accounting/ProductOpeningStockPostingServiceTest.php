@@ -64,29 +64,6 @@ class ProductOpeningStockPostingServiceTest extends TestCase
         return $movement;
     }
 
-    public function test_take_on_debits_inventory_and_credits_opening_balance_equity(): void
-    {
-        $movement = $this->makeOpeningStockMovement(quantityChange: 10, unitCost: 5);
-
-        $this->posting->recordTakeOn($movement);
-
-        $journal = JournalHeader::where('source_type', 'product_opening_stock')->where('source_id', $movement->id)->first();
-        $this->assertNotNull($journal);
-        $this->assertSame('posted', $journal->status);
-        $this->assertSame(50.0, $this->account('1200')->balance()); // Inventory debited
-        $this->assertSame(50.0, $this->account('3020')->balance()); // Opening Balance Equity credited
-    }
-
-    public function test_downward_correction_reverses_the_entry(): void
-    {
-        $movement = $this->makeOpeningStockMovement(quantityChange: -4, unitCost: 5);
-
-        $this->posting->recordTakeOn($movement);
-
-        $this->assertSame(-20.0, $this->account('1200')->balance());
-        $this->assertSame(-20.0, $this->account('3020')->balance());
-    }
-
     public function test_non_opening_stock_movement_types_are_never_posted(): void
     {
         $movement = $this->makeOpeningStockMovement(quantityChange: 10);
@@ -104,17 +81,6 @@ class ProductOpeningStockPostingServiceTest extends TestCase
         $this->posting->recordTakeOn($movement);
 
         $this->assertSame(0, JournalHeader::where('source_type', 'product_opening_stock')->count());
-    }
-
-    public function test_processing_the_same_movement_twice_does_not_double_post(): void
-    {
-        $movement = $this->makeOpeningStockMovement(quantityChange: 10, unitCost: 5);
-
-        $this->posting->recordTakeOn($movement);
-        $this->posting->recordTakeOn($movement);
-
-        $this->assertSame(1, JournalHeader::where('source_type', 'product_opening_stock')->count());
-        $this->assertSame(50.0, $this->account('1200')->balance());
     }
 
     public function test_nothing_posts_before_the_accounting_go_live_date(): void

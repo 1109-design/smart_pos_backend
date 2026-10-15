@@ -53,76 +53,6 @@ class BackOfficeCashVaultTest extends TestCase
         $journals->post($header);
     }
 
-    public function test_index_shows_the_current_balance_and_activity(): void
-    {
-        $tenantId = 'tenant-vault-1';
-        $this->actingBackOfficeSession($tenantId);
-        $this->fundCash($tenantId, 500);
-        $this->post('/office/cash-vault/drop', ['amount' => 200, 'date' => '2026-06-05']);
-
-        $response = $this->get('/office/cash-vault');
-        $response->assertOk();
-        $response->assertInertia(fn ($page) => $page
-            ->where('balance', 200)
-            ->has('activity', 1)
-        );
-    }
-
-    public function test_recording_a_drop_reduces_cash_and_increases_the_vault(): void
-    {
-        $tenantId = 'tenant-vault-2';
-        $this->actingBackOfficeSession($tenantId);
-        $this->fundCash($tenantId, 500);
-
-        $this->post('/office/cash-vault/drop', ['amount' => 150, 'date' => '2026-06-05', 'note' => 'EOD drop'])
-            ->assertRedirect();
-
-        $this->assertSame(350.0, $this->account($tenantId, '1000')->balance());
-        $this->assertSame(150.0, $this->account($tenantId, '1005')->balance());
-    }
-
-    public function test_recording_a_deposit_moves_vault_funds_to_bank(): void
-    {
-        $tenantId = 'tenant-vault-3';
-        $this->actingBackOfficeSession($tenantId);
-        $this->fundCash($tenantId, 500);
-        $this->post('/office/cash-vault/drop', ['amount' => 300, 'date' => '2026-06-05']);
-
-        $this->post('/office/cash-vault/deposit', ['amount' => 200, 'date' => '2026-06-06'])->assertRedirect();
-
-        $this->assertSame(100.0, $this->account($tenantId, '1005')->balance());
-        $this->assertSame(200.0, $this->account($tenantId, '1010')->balance());
-    }
-
-    public function test_recording_a_withdrawal_moves_bank_funds_to_the_vault(): void
-    {
-        $tenantId = 'tenant-vault-7';
-        $this->actingBackOfficeSession($tenantId);
-        $this->fundCash($tenantId, 500);
-        $this->post('/office/cash-vault/drop', ['amount' => 300, 'date' => '2026-06-05']);
-        $this->post('/office/cash-vault/deposit', ['amount' => 250, 'date' => '2026-06-06']);
-
-        $this->post('/office/cash-vault/withdraw', ['amount' => 100, 'date' => '2026-06-07'])->assertRedirect();
-
-        $this->assertSame(150.0, $this->account($tenantId, '1010')->balance());
-        $this->assertSame(150.0, $this->account($tenantId, '1005')->balance());
-    }
-
-    public function test_recording_a_count_with_a_shortfall_posts_a_variance(): void
-    {
-        $tenantId = 'tenant-vault-4';
-        $this->actingBackOfficeSession($tenantId);
-        $this->fundCash($tenantId, 500);
-        $this->post('/office/cash-vault/drop', ['amount' => 200, 'date' => '2026-06-05']);
-
-        $response = $this->post('/office/cash-vault/count', ['counted_amount' => 180, 'date' => '2026-06-10']);
-        $response->assertRedirect();
-        $response->assertSessionHas('success');
-
-        $this->assertSame(180.0, $this->account($tenantId, '1005')->balance());
-        $this->assertSame(20.0, $this->account($tenantId, '6065')->balance());
-    }
-
     public function test_cashier_cannot_access_the_cash_vault(): void
     {
         $tenantId = 'tenant-vault-5';
@@ -130,17 +60,5 @@ class BackOfficeCashVaultTest extends TestCase
 
         $this->get('/office/cash-vault')->assertForbidden();
         $this->post('/office/cash-vault/drop', ['amount' => 10, 'date' => '2026-06-05'])->assertForbidden();
-    }
-
-    public function test_a_drop_that_would_overdraw_cash_shows_a_validation_error(): void
-    {
-        $tenantId = 'tenant-vault-6';
-        $this->actingBackOfficeSession($tenantId);
-        $this->fundCash($tenantId, 100);
-
-        $response = $this->post('/office/cash-vault/drop', ['amount' => 500, 'date' => '2026-06-05']);
-
-        $response->assertSessionHasErrors('amount');
-        $this->assertSame(0.0, $this->account($tenantId, '1005')->balance());
     }
 }

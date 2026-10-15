@@ -26,6 +26,9 @@ class FinancialStatementServiceTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+
+        // Builds its fixture journals through the (retired) server engine.
+        JournalService::allowPostingForTestFixtures();
         $this->statements = app(FinancialStatementService::class);
         $this->journals = app(JournalService::class);
 

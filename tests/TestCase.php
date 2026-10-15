@@ -2,6 +2,7 @@
 
 namespace Tests;
 
+use App\Services\Accounting\JournalService;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
 
 abstract class TestCase extends BaseTestCase
@@ -15,5 +16,12 @@ abstract class TestCase extends BaseTestCase
         // `npm run build` (public/build is gitignored) being newer than
         // the page it renders, and fails with a Vite manifest error.
         $this->withoutVite();
+    }
+
+    protected function tearDown(): void
+    {
+        JournalService::allowPostingForTestFixtures(false);
+
+        parent::tearDown();
     }
 }

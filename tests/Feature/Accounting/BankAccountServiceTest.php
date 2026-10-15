@@ -4,14 +4,12 @@ namespace Tests\Feature\Accounting;
 
 use App\Models\Accounting\GlAccount;
 use App\Models\Business;
-use App\Models\Payment;
 use App\Models\StockMovement;
 use App\Models\Tenant;
 use App\Models\Transaction;
 use App\Models\TransactionItem;
 use App\Services\Accounting\BankAccountService;
 use App\Services\Accounting\ChartOfAccountsSeeder;
-use App\Services\Accounting\SalePostingService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -110,51 +108,5 @@ class BankAccountServiceTest extends TestCase
         ]);
 
         return $tx->fresh();
-    }
-
-    public function test_a_sale_tagged_with_a_bank_account_posts_against_that_accounts_own_gl_line_instead_of_the_generic_bank_account(): void
-    {
-        $businessId = $this->makeLiveBusiness();
-        $bankAccount = app(BankAccountService::class)->create($businessId, 'CBZ Main Account');
-
-        $tx = $this->makeSale($businessId);
-        Payment::create([
-            'id' => (string) Str::uuid(),
-            'transaction_id' => $tx->id,
-            'method' => 'Bank Transfer',
-            'amount' => 100,
-            'currency_code' => 'USD',
-            'base_equivalent' => 100,
-            'bank_account_id' => $bankAccount->id,
-        ]);
-
-        app(SalePostingService::class)->postIfReady($tx);
-
-        $genericBank = GlAccount::where('business_id', $businessId)->where('code', '1010')->firstOrFail();
-        $namedBank = GlAccount::find($bankAccount->gl_account_id);
-
-        $this->assertSame(0.0, $genericBank->balance());
-        $this->assertSame(100.0, $namedBank->balance());
-    }
-
-    public function test_a_sale_with_no_bank_account_specified_still_posts_to_the_generic_bank_account(): void
-    {
-        $businessId = $this->makeLiveBusiness();
-        app(BankAccountService::class)->create($businessId, 'CBZ Main Account'); // exists but not chosen
-
-        $tx = $this->makeSale($businessId);
-        Payment::create([
-            'id' => (string) Str::uuid(),
-            'transaction_id' => $tx->id,
-            'method' => 'Bank Transfer',
-            'amount' => 100,
-            'currency_code' => 'USD',
-            'base_equivalent' => 100,
-        ]);
-
-        app(SalePostingService::class)->postIfReady($tx);
-
-        $genericBank = GlAccount::where('business_id', $businessId)->where('code', '1010')->firstOrFail();
-        $this->assertSame(100.0, $genericBank->balance());
     }
 }

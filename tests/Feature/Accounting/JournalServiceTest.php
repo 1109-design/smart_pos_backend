@@ -22,6 +22,9 @@ class JournalServiceTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+
+        // Builds its fixture journals through the (retired) server engine.
+        JournalService::allowPostingForTestFixtures();
         $this->journals = app(JournalService::class);
     }
 

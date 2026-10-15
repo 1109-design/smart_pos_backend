@@ -2,7 +2,6 @@
 
 namespace App\Models;
 
-use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Storage;
@@ -63,30 +62,16 @@ class Business extends Model
     }
 
     /**
-     * True once this business has been cut over to Flutter posting its own
-     * journals locally for the given transaction/receipt date — at which
-     * point SalePostingService/GrvPostingService stand down for anything
-     * on or after that date, deferring to whatever journal the client
-     * pushes up. See the client_gl_posting_enabled_at migration.
-     *
-     * Compared by calendar day: callers pass a bare date ('2026-10-05'),
-     * which parses to midnight, while the cutover is a full timestamp set
-     * mid-day. Comparing those directly told the server it still owned
-     * every document dated on the cutover day, while the till (comparing
-     * full timestamps) posted its own journal for anything after the
-     * cutover time, so both posted and the till's was rejected as a
-     * duplicate. On the cutover day the server now stands down; documents
-     * from before the cutover time were already posted inline before the
-     * flag existed, and the pending-* sweeps still catch stragglers.
+     * Always true: the device that performs a transaction posts its
+     * journal, and the server never posts — it only checks, stores and
+     * relays journals (JournalBundleIngestor). Every server posting service
+     * checks this first and stands down; JournalService refuses outright
+     * (ServerPostingRetiredException) for anything that doesn't.
+     * client_gl_posting_enabled_at no longer decides anything.
      */
     public function postsFromClientFor(string $transDate): bool
     {
-        if ($this->client_gl_posting_enabled_at === null) {
-            return false;
-        }
-
-        return Carbon::parse($transDate)->startOfDay()
-            ->greaterThanOrEqualTo($this->client_gl_posting_enabled_at->copy()->startOfDay());
+        return true;
     }
 
     /**

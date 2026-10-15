@@ -2,7 +2,6 @@
 
 namespace Tests\Feature;
 
-use App\Models\Accounting\JournalHeader;
 use App\Models\Business;
 use App\Models\Device;
 use App\Models\Payroll\EmployeeLeaveEntry;
@@ -13,10 +12,8 @@ use App\Models\Payroll\PayRunEmployee;
 use App\Models\Payroll\PayRunLine;
 use App\Models\Tenant;
 use App\Models\User;
-use App\Services\Accounting\ChartOfAccountsSeeder;
 use Database\Seeders\RolesAndPermissionsSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -243,86 +240,5 @@ class SyncPayrollTest extends TestCase
         $this->push([['table' => 'employee_leave_entries', 'uuid' => $id, 'operation' => 'delete', 'payload' => ['business_id' => $this->tenantId]]])->assertOk();
 
         $this->assertEqualsWithDelta(2.5, (float) EmployeeLeaveEntry::findOrFail($id)->days, 0.001);
-    }
-
-    public function test_server_posts_accrual_and_payment_when_it_owns_posting(): void
-    {
-        DB::table('businesses')->where('id', $this->tenantId)->update(['accounting_go_live_date' => '2026-01-01']);
-        app(ChartOfAccountsSeeder::class)->seedForBusiness($this->tenantId);
-
-        [$runId, $empRowId] = $this->seedCalculatedRun();
-        $this->lock($runId)->assertOk();
-        $this->push([['table' => 'pay_runs', 'uuid' => $runId, 'payload' => $this->runPayload('approved')]])->assertOk();
-
-        $accrual = JournalHeader::where('source_type', 'pay_run')->where('source_id', $runId)->firstOrFail();
-        $this->assertSame('posted', $accrual->status);
-        $this->assertEqualsWithDelta(
-            (float) $accrual->lines()->sum('debit'),
-            (float) $accrual->lines()->sum('credit'),
-            0.001,
-        );
-
-        $this->push([['table' => 'pay_run_employees', 'uuid' => $empRowId, 'payload' => [
-            'business_id' => $this->tenantId,
-            'pay_run_id' => $runId,
-            'paid_usd_at' => '2026-09-30T12:00:00.000Z',
-            // Cash and bank can't go negative in an empty ledger.
-            'paid_usd_method' => 'mobile_money',
-        ]]])->assertOk();
-        $this->assertTrue(JournalHeader::where('source_type', 'pay_run_payment')->where('source_id', "{$empRowId}:USD")->exists());
-    }
-
-    public function test_reversal_is_accepted_and_posted_by_the_sweep(): void
-    {
-        DB::table('businesses')->where('id', $this->tenantId)->update(['accounting_go_live_date' => '2026-01-01']);
-        app(ChartOfAccountsSeeder::class)->seedForBusiness($this->tenantId);
-
-        [$runId, $empRowId] = $this->seedCalculatedRun();
-        $this->lock($runId)->assertOk();
-        $this->push([['table' => 'pay_runs', 'uuid' => $runId, 'payload' => $this->runPayload('approved')]])->assertOk();
-
-        $revId = (string) Str::uuid();
-        $revEmpId = (string) Str::uuid();
-        $this->lock($runId, ['kind' => 'reversal', 'releases_run_id' => $runId])->assertOk();
-        $this->push([
-            ['table' => 'pay_runs', 'uuid' => $revId, 'payload' => $this->runPayload('approved', [
-                'run_number' => 'REV-202609-2',
-                'kind' => 'reversal',
-                'reverses_run_id' => $runId,
-                'total_gross_usd' => -1000,
-                'total_net_usd' => -800,
-            ])],
-            ['table' => 'pay_runs', 'uuid' => $runId, 'payload' => $this->runPayload('reversed')],
-            ['table' => 'pay_run_employees', 'uuid' => $revEmpId, 'payload' => [
-                'business_id' => $this->tenantId,
-                'pay_run_id' => $revId,
-                'employee_id' => (string) Str::uuid(),
-                'employee_name' => 'Alice',
-                'gross_usd' => -1000,
-                'paye_usd' => -150,
-                'nssa_employee_usd' => -45,
-                'net_total_usd' => -805,
-                'net_pay_usd' => -805,
-                'nssa_employer_usd' => -45,
-                'zimdef_usd' => -10,
-            ]],
-        ])->assertJsonCount(3, 'accepted');
-        $this->assertSame('reversed', PayRun::findOrFail($runId)->status);
-        $this->assertFalse(JournalHeader::where('source_id', $revId)->exists());
-
-        $this->travel(10)->minutes();
-        $this->artisan('accounting:post-pending-payroll')->assertSuccessful();
-
-        $reversal = JournalHeader::where('source_type', 'pay_run')->where('source_id', $revId)->firstOrFail();
-        $this->assertSame('posted', $reversal->status);
-        // Together the accrual and its reversal net every account to zero.
-        $net = DB::table('journal_lines')
-            ->join('journal_headers', 'journal_headers.id', '=', 'journal_lines.journal_header_id')
-            ->where('journal_headers.source_type', 'pay_run')
-            ->selectRaw('journal_lines.gl_account_id, SUM(debit) - SUM(credit) AS net')
-            ->groupBy('journal_lines.gl_account_id')->pluck('net');
-        foreach ($net as $value) {
-            $this->assertEqualsWithDelta(0, (float) $value, 0.001);
-        }
     }
 }

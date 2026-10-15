@@ -40,6 +40,9 @@ class JournalPostingRaceIdempotencyTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+
+        // Builds its fixture journals through the (retired) server engine.
+        JournalService::allowPostingForTestFixtures();
         $this->journals = app(JournalService::class);
     }
 
@@ -238,42 +241,6 @@ class JournalPostingRaceIdempotencyTest extends TestCase
         }
 
         return Transaction::where('id', $txId)->firstOrFail();
-    }
-
-    public function test_sale_posting_service_does_not_crash_or_duplicate_when_create_draft_hands_back_a_posted_header(): void
-    {
-        $businessId = 'biz-race-sale';
-        $transaction = $this->readyTransaction($businessId);
-
-        // Simulate the race: another in-flight request already won and
-        // posted a journal for this exact sale, so createDraft() returns
-        // that (non-draft) header instead of a fresh one.
-        $winningHeader = new JournalHeader([
-            'id' => (string) Str::uuid(),
-            'business_id' => $businessId,
-            'journal_number' => 'JNL-2026-99999',
-            'trans_date' => '2026-06-10',
-            'source_type' => 'sale',
-            'source_id' => $transaction->id,
-            'status' => 'posted',
-        ]);
-        $winningHeader->exists = true;
-
-        $mockJournals = Mockery::mock(JournalService::class);
-        $mockJournals->shouldReceive('createDraft')->once()->andReturn($winningHeader);
-        $mockJournals->shouldNotReceive('addLine');
-        $mockJournals->shouldNotReceive('post');
-
-        $service = new SalePostingService($mockJournals);
-
-        // Must not throw — the old behavior (no guard) would let addLine()
-        // throw "Cannot add a line ... it is posted, not draft" here, which
-        // would only have been masked by SalePostingService::post()'s own
-        // outer try/catch, logging a misleading "failed to post sale"
-        // warning for what is actually a benign lost race.
-        $service->postIfReady($transaction);
-
-        $this->assertTrue(true);
     }
 
     // ── OpeningBalanceService: both methods lacked any try/catch, so a lost

@@ -27,6 +27,9 @@ class PartyLedgerServiceTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+
+        // Builds its fixture journals through the (retired) server engine.
+        JournalService::allowPostingForTestFixtures();
         $this->ledger = app(PartyLedgerService::class);
         $this->journals = app(JournalService::class);
         $this->customerId = (string) Str::uuid();

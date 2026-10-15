@@ -26,6 +26,14 @@ class BackOfficeDebtorCreditorLedgerTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        // Builds its fixture journals through the (retired) server engine.
+        JournalService::allowPostingForTestFixtures();
+    }
+
     private function actingBackOfficeSession(string $tenantId, string $role = 'business_owner'): User
     {
         $this->withoutMiddleware(AuthenticateBackOfficeUser::class);

@@ -58,7 +58,7 @@ class InvoicePaymentPostingService
             return;
         }
 
-        if (! $viaSweep && $business->postsFromClientFor($transDate)) {
+        if ($business->postsFromClientFor($transDate)) {
             return;
         }
 

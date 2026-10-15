@@ -10,11 +10,9 @@ use App\Models\Accounting\JournalHeader;
 use App\Models\Accounting\JournalLine;
 use App\Models\Business;
 use App\Models\Device;
-use App\Models\Payment;
 use App\Models\SyncRecord;
 use App\Models\Tenant;
 use App\Models\Transaction;
-use App\Models\TransactionItem;
 use App\Models\User;
 use App\Services\Accounting\ChartOfAccountsSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -131,18 +129,6 @@ class ClientGlPostingCutoverTest extends TestCase
             JournalHeader::where('business_id', $tenantId)->where('source_type', 'sale')->where('source_id', $txId)->first(),
             'the server must stand down for a cutover business and wait for the client\'s own journal'
         );
-    }
-
-    public function test_the_client_owns_the_whole_cutover_day(): void
-    {
-        // Cutover switched on mid-day. Callers pass bare dates (midnight),
-        // which used to compare as "before the cutover" and left the server
-        // posting the same day the app was posting (2026-10-05).
-        $business = new Business(['client_gl_posting_enabled_at' => '2026-06-10 10:04:43']);
-
-        $this->assertFalse($business->postsFromClientFor('2026-06-09'));
-        $this->assertTrue($business->postsFromClientFor('2026-06-10'));
-        $this->assertTrue($business->postsFromClientFor('2026-06-11'));
     }
 
     public function test_sync_never_posts_a_journal_even_without_a_cutover(): void
@@ -288,47 +274,5 @@ class ClientGlPostingCutoverTest extends TestCase
 
         $accountCount = AccountCategory::where('business_id', $tenantId)->count();
         $this->assertSame($accountCount, SyncRecord::where('business_id', $tenantId)->where('table_name', 'account_categories')->count());
-    }
-
-    public function test_post_pending_sales_defers_within_the_grace_period_and_posts_after_it_elapses(): void
-    {
-        $tenantId = 'tenant-cutover-sweep';
-        Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);
-        Business::create([
-            'id' => $tenantId, 'name' => $tenantId, 'currency_code' => 'USD',
-            'accounting_go_live_date' => '2026-01-01', 'client_gl_posting_enabled_at' => '2026-06-01 00:00:00',
-        ]);
-        (new ChartOfAccountsSeeder)->seedForBusiness($tenantId);
-
-        // A straggler sale that arrived via sync (items+payments included)
-        // but never got its own client-posted journal — as if it came from
-        // an old app version that doesn't know how to post locally.
-        $txId = (string) Str::uuid();
-        Transaction::create([
-            'id' => $txId, 'business_id' => $tenantId, 'user_id' => (string) Str::uuid(), 'subtotal' => 40,
-            'tax_total' => 0, 'discount_total' => 0, 'total' => 40, 'base_currency' => 'USD', 'status' => 'completed',
-        ]);
-        Transaction::where('id', $txId)->update(['created_at' => now()->subMinutes(30)]);
-        TransactionItem::create([
-            'id' => (string) Str::uuid(), 'transaction_id' => $txId, 'product_id' => (string) Str::uuid(),
-            'product_name' => 'Widget', 'quantity' => 1, 'unit_price' => 40, 'line_total' => 40,
-        ]);
-        Payment::create([
-            'id' => (string) Str::uuid(), 'transaction_id' => $txId, 'method' => 'Cash',
-            'amount' => 40, 'currency_code' => 'USD', 'base_equivalent' => 40,
-        ]);
-
-        $this->artisan(PostPendingSales::class)->assertSuccessful();
-        $this->assertNull(
-            JournalHeader::where('business_id', $tenantId)->where('source_id', $txId)->first(),
-            'inside the grace period the sweep must still defer to the client'
-        );
-
-        Transaction::where('id', $txId)->update(['created_at' => now()->subHours(2)]);
-
-        $this->artisan(PostPendingSales::class)->assertSuccessful();
-        $journal = JournalHeader::where('business_id', $tenantId)->where('source_id', $txId)->first();
-        $this->assertNotNull($journal, 'past the grace period the sweep must post the straggler server-side');
-        $this->assertSame('posted', $journal->status);
     }
 }

@@ -2,6 +2,7 @@
 
 namespace App\Services\Accounting;
 
+use App\Exceptions\ServerPostingRetiredException;
 use App\Models\Accounting\AccountingPeriod;
 use App\Models\Accounting\GeneralLedgerEntry;
 use App\Models\Accounting\GlAccount;
@@ -22,6 +23,27 @@ use RuntimeException;
  */
 class JournalService
 {
+    /**
+     * The server no longer posts (ServerPostingRetiredException). Tests of
+     * read-side features (ledgers, statements, reconciliation) still build
+     * their fixture journals through this engine, so they switch this on;
+     * production code never does, and tests/TestCase resets it after
+     * every test.
+     */
+    private static bool $postingAllowedForTestFixtures = false;
+
+    public static function allowPostingForTestFixtures(bool $allowed = true): void
+    {
+        self::$postingAllowedForTestFixtures = $allowed;
+    }
+
+    private function assertServerPostingAllowed(): void
+    {
+        if (! self::$postingAllowedForTestFixtures) {
+            throw new ServerPostingRetiredException;
+        }
+    }
+
     /**
      * @param  string|null  $idempotencyKey  Set this ONLY for a posting path
      *                                       that creates at most one journal
@@ -50,6 +72,7 @@ class JournalService
         ?string $description = null,
         ?string $idempotencyKey = null,
     ): JournalHeader {
+        $this->assertServerPostingAllowed();
         try {
             return DB::transaction(function () use ($businessId, $transDate, $sourceType, $sourceId, $description, $idempotencyKey) {
                 return JournalHeader::create([
@@ -143,6 +166,8 @@ class JournalService
      */
     public function post(JournalHeader $header, ?string $userId = null): JournalHeader
     {
+        $this->assertServerPostingAllowed();
+
         return DB::transaction(function () use ($header, $userId) {
             $header = JournalHeader::where('id', $header->id)->lockForUpdate()->firstOrFail();
 
@@ -210,6 +235,8 @@ class JournalService
      */
     public function reverse(JournalHeader $original, ?string $userId = null, ?string $reason = null): JournalHeader
     {
+        $this->assertServerPostingAllowed();
+
         return DB::transaction(function () use ($original, $userId, $reason) {
             $original = JournalHeader::where('id', $original->id)->lockForUpdate()->firstOrFail();
 

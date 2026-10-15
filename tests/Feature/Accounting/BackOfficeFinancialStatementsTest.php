@@ -23,6 +23,9 @@ class BackOfficeFinancialStatementsTest extends TestCase
     {
         parent::setUp();
 
+        // Builds its fixture journals through the (retired) server engine.
+        JournalService::allowPostingForTestFixtures();
+
         $this->withoutMiddleware(AuthenticateBackOfficeUser::class);
 
         Tenant::create(['id' => $this->tenantId, 'business_name' => $this->tenantId, 'owner_email' => 'a@example.com', 'pairing_code' => substr(md5($this->tenantId), 0, 6)]);

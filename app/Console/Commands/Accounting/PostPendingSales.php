@@ -9,6 +9,11 @@ use App\Services\Accounting\SalePostingService;
 use Illuminate\Console\Command;
 
 /**
+ * READ-ONLY since 2026-10-15: the server no longer posts journals —
+ * the device that performs a transaction posts it. This now only
+ * counts what is still unposted; the posting described below no
+ * longer happens.
+ *
  * RECOVERY / FALLBACK ONLY — not the accounting engine.
  *
  * The primary posting path is Flutter itself: the till creates the sale AND
@@ -35,13 +40,11 @@ use Illuminate\Console\Command;
  */
 class PostPendingSales extends Command
 {
-    private const GRACE_PERIOD_HOURS = 1;
-
     protected $signature = 'accounting:post-pending-sales';
 
-    protected $description = 'Retry accounting posting for sales left unposted after their first sync';
+    protected $description = 'Report (read-only) sales left unposted after their first sync — the server no longer posts';
 
-    public function handle(SalePostingService $posting): int
+    public function handle(): int
     {
         $businesses = Business::whereNotNull('accounting_go_live_date')->get();
 
@@ -60,15 +63,12 @@ class PostPendingSales extends Command
 
             foreach ($pending as $transaction) {
                 $transDate = $transaction->created_at->toDateString();
-                $viaSweep = $business->postsFromClientFor($transDate)
-                    && $transaction->created_at->lte(now()->subHours(self::GRACE_PERIOD_HOURS));
 
-                $posting->postIfReady($transaction, $viaSweep);
                 $attempted++;
             }
         }
 
-        $this->info("Attempted {$attempted} pending sale(s) across {$businesses->count()} live business(es).");
+        $this->info("Found {$attempted} unposted sale(s) across {$businesses->count()} live business(es). The server no longer posts — post them on a device.");
 
         return self::SUCCESS;
     }

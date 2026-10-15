@@ -9,6 +9,11 @@ use App\Services\Accounting\SupplierPaymentService;
 use Illuminate\Console\Command;
 
 /**
+ * READ-ONLY since 2026-10-15: the server no longer posts journals —
+ * the device that performs a transaction posts it. This now only
+ * counts what is still unposted; the posting described below no
+ * longer happens.
+ *
  * Two jobs in one, same shape as `accounting:post-pending-sales`:
  *
  * 1. Ongoing sweep — catches a supplier payment SupplierPaymentService's
@@ -22,13 +27,11 @@ use Illuminate\Console\Command;
  */
 class PostPendingSupplierPayments extends Command
 {
-    private const GRACE_PERIOD_HOURS = 1;
-
     protected $signature = 'accounting:post-pending-supplier-payments';
 
-    protected $description = 'Post accounting entries for supplier payments left unposted (sweep + one-off backfill)';
+    protected $description = 'Report (read-only) supplier payments left unposted — the server no longer posts';
 
-    public function handle(SupplierPaymentService $posting): int
+    public function handle(): int
     {
         $businesses = Business::whereNotNull('accounting_go_live_date')->get();
 
@@ -46,15 +49,12 @@ class PostPendingSupplierPayments extends Command
 
             foreach ($pending as $payment) {
                 $transDate = ($payment->payment_date ?? now())->toDateString();
-                $viaSweep = $business->postsFromClientFor($transDate)
-                    && ($payment->payment_date ?? now())->lte(now()->subHours(self::GRACE_PERIOD_HOURS));
 
-                $posting->postIfReady($payment, $viaSweep);
                 $attempted++;
             }
         }
 
-        $this->info("Attempted {$attempted} pending supplier payment(s) across {$businesses->count()} live business(es).");
+        $this->info("Found {$attempted} unposted supplier payment(s) across {$businesses->count()} live business(es). The server no longer posts — post them on a device.");
 
         return self::SUCCESS;
     }

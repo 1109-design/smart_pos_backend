@@ -59,7 +59,7 @@ class PayRunPostingService
         if ($transDate < $business->accounting_go_live_date->toDateString()) {
             return null;
         }
-        if (! $viaSweep && $business->postsFromClientFor($transDate)) {
+        if ($business->postsFromClientFor($transDate)) {
             return null;
         }
 

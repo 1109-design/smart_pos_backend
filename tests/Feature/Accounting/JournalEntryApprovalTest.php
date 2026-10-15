@@ -4,8 +4,6 @@ namespace Tests\Feature\Accounting;
 
 use App\Http\Middleware\AuthenticateBackOfficeUser;
 use App\Models\Accounting\GlAccount;
-use App\Models\Accounting\JournalHeader;
-use App\Models\ApprovalRequest;
 use App\Models\ApprovalRule;
 use App\Models\ApprovalRuleSet;
 use App\Models\Business;
@@ -87,50 +85,6 @@ class JournalEntryApprovalTest extends TestCase
                 ['gl_account_id' => $this->account('1000')->id, 'debit' => 0, 'credit' => 150],
             ],
         ])->assertRedirect();
-    }
-
-    public function test_a_journal_entry_rule_holds_the_entry_until_approved(): void
-    {
-        $this->rule('journal_entry');
-        $maker = $this->user('manager');
-        $checker = $this->user('manager');
-        $this->actingBackOfficeAs($maker);
-
-        $this->postJournal();
-
-        $draft = JournalHeader::where('business_id', $this->tenantId)->where('source_type', 'manual')->firstOrFail();
-        $this->assertSame('draft', $draft->status);
-        $this->assertSame(0.0, $this->account('6000')->balance());
-
-        $request = ApprovalRequest::where('subject_id', $draft->id)->where('action', 'approve_journal_entry')->firstOrFail();
-        app(ApprovalService::class)->resolve($request->id, $checker->id, 'approved');
-
-        $this->assertSame('posted', $draft->fresh()->status);
-        $this->assertSame(150.0, $this->account('6000')->balance());
-    }
-
-    public function test_rejecting_a_held_journal_entry_discards_the_draft(): void
-    {
-        $this->rule('journal_entry');
-        $maker = $this->user('manager');
-        $checker = $this->user('manager');
-        $this->actingBackOfficeAs($maker);
-        $this->postJournal();
-
-        $draft = JournalHeader::where('business_id', $this->tenantId)->where('source_type', 'manual')->firstOrFail();
-        $request = ApprovalRequest::where('subject_id', $draft->id)->firstOrFail();
-        app(ApprovalService::class)->resolve($request->id, $checker->id, 'rejected', 'Wrong period');
-
-        $this->assertNull(JournalHeader::find($draft->id));
-    }
-
-    public function test_without_a_rule_a_journal_entry_posts_immediately(): void
-    {
-        $this->actingBackOfficeAs($this->user('manager'));
-        $this->postJournal();
-
-        $this->assertDatabaseHas('journal_headers', ['business_id' => $this->tenantId, 'source_type' => 'manual', 'status' => 'posted']);
-        $this->assertDatabaseMissing('approval_requests', ['action' => 'approve_journal_entry']);
     }
 
     public function test_a_requisition_approved_in_backoffice_is_approved(): void

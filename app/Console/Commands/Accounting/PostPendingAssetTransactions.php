@@ -8,6 +8,11 @@ use App\Services\Accounting\AssetPostingService;
 use Illuminate\Console\Command;
 
 /**
+ * READ-ONLY since 2026-10-15: the server no longer posts journals —
+ * the device that performs a transaction posts it. This now only
+ * counts what is still unposted; the posting described below no
+ * longer happens.
+ *
  * Two jobs in one, same shape as `accounting:post-pending-sales` — but only
  * for acquisition/disposal (see AssetPostingService::postIfReady()'s doc
  * comment for why monthly depreciation is excluded: it stays its own
@@ -24,13 +29,11 @@ use Illuminate\Console\Command;
  */
 class PostPendingAssetTransactions extends Command
 {
-    private const GRACE_PERIOD_HOURS = 1;
-
     protected $signature = 'accounting:post-pending-asset-transactions';
 
-    protected $description = 'Post accounting entries for asset acquisitions/disposals left unposted (sweep + one-off backfill)';
+    protected $description = 'Report (read-only) asset acquisitions/disposals left unposted — the server no longer posts';
 
-    public function handle(AssetPostingService $posting): int
+    public function handle(): int
     {
         $businesses = Business::whereNotNull('accounting_go_live_date')->get();
 
@@ -43,15 +46,12 @@ class PostPendingAssetTransactions extends Command
 
             foreach ($assets as $asset) {
                 $transDate = $asset->acquisition_date->toDateString();
-                $viaSweep = $business->postsFromClientFor($transDate)
-                    && $asset->acquisition_date->lte(now()->subHours(self::GRACE_PERIOD_HOURS));
 
-                $posting->postIfReady($asset, $viaSweep);
                 $attempted++;
             }
         }
 
-        $this->info("Attempted {$attempted} pending asset(s) across {$businesses->count()} live business(es).");
+        $this->info("Found {$attempted} unposted asset(s) across {$businesses->count()} live business(es). The server no longer posts — post them on a device.");
 
         return self::SUCCESS;
     }
