@@ -80,7 +80,7 @@ class PublishOpeningStockMovements extends Command
         ));
 
         if ($unlocated !== []) {
-            $this->warn(count($unlocated).' movement(s) still have no location (product in several locations, no safe guess): '.implode(', ', $unlocated));
+            $this->warn(count($unlocated).' movement(s) left without a location — tagging them would not reconcile the location\'s stock (often a duplicate already counted there), or the product is at several locations. Review with stock:resolve-untagged-lines: '.implode(', ', $unlocated));
         }
 
         return self::SUCCESS;
