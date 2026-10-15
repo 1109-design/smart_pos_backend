@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Events\SyncTablesChanged;
+use App\Exceptions\JournalRejectedException;
 use App\Exceptions\MissingParentRecordException;
 use App\Http\Controllers\Controller;
 use App\Models\Device;
@@ -294,7 +295,16 @@ class SyncController extends Controller
                             $enrichedPayload,
                             trusted: false,
                             actingUser: $actingUser,
+                            device: $device,
                         );
+
+                        // A journal bundle is relayed by the ingestor as
+                        // ordinary journal records — not as itself.
+                        if ($record['table'] === 'journal_postings') {
+                            $acceptedInGroup[] = ['table' => $record['table'], 'uuid' => $record['uuid']];
+
+                            continue;
+                        }
 
                         SyncRecord::create([
                             'business_id' => $device?->tenant_id,
@@ -386,6 +396,10 @@ class SyncController extends Controller
                         'table' => $item['record']['table'],
                         'uuid' => $item['record']['uuid'],
                         'reason' => $e->getMessage(),
+                        // Machine-readable for records the device must
+                        // not retry (a rejected journal) — see
+                        // JournalRejectedException.
+                        'code' => $e instanceof JournalRejectedException ? $e->reasonCode : null,
                     ];
                 }
             }
@@ -477,7 +491,12 @@ class SyncController extends Controller
                             $enrichedPayload,
                             trusted: false,
                             actingUser: $actingUser,
+                            device: $row->device_id ? Device::find($row->device_id) : null,
                         );
+
+                        if ($row->table_name === 'journal_postings') {
+                            return;
+                        }
 
                         SyncRecord::create([
                             'business_id' => $row->business_id,

@@ -46,6 +46,7 @@ use App\Models\CustomerReconciliationItem;
 use App\Models\CustomerWriteOff;
 use App\Models\DeliveryNote;
 use App\Models\DeliveryNoteItem;
+use App\Models\Device;
 use App\Models\DocumentBrandingSetting;
 use App\Models\DocumentSignature;
 use App\Models\Employee;
@@ -139,6 +140,7 @@ use App\Models\TransactionTax;
 use App\Models\UnitOfMeasure;
 use App\Models\User;
 use App\Models\WarehouseBin;
+use App\Services\Accounting\JournalBundleIngestor;
 use App\Services\Accounting\JournalEntryApprovalService;
 use App\Services\Accounting\OpeningBalanceService;
 use App\Services\Accounting\ProductOpeningStockPostingService;
@@ -418,8 +420,16 @@ class SyncProcessor
      *                         server-authored (BackOffice controllers, artisan
      *                         commands), so the default is true.
      */
-    public function process(string $table, string $uuid, string $operation, array $payload, bool $trusted = true, ?User $actingUser = null): void
+    public function process(string $table, string $uuid, string $operation, array $payload, bool $trusted = true, ?User $actingUser = null, ?Device $device = null): void
     {
+        // A device-posted journal, header and lines together — validated
+        // and stored whole, or rejected whole. See JournalBundleIngestor.
+        if ($table === 'journal_postings') {
+            app(JournalBundleIngestor::class)->ingest($uuid, $payload, $trusted, $actingUser, $device);
+
+            return;
+        }
+
         $this->assertOwnership($table, $uuid, $payload);
 
         // Idempotent — SyncController already applies this before storing the
