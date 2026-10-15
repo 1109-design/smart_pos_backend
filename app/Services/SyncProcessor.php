@@ -8,8 +8,12 @@ use App\Models\Accounting\AccountingPeriod;
 use App\Models\Accounting\AccountSubCategory;
 use App\Models\Accounting\GeneralLedgerEntry;
 use App\Models\Accounting\GlAccount;
+use App\Models\Accounting\JournalAttachment;
 use App\Models\Accounting\JournalHeader;
 use App\Models\Accounting\JournalLine;
+use App\Models\Accounting\JournalTemplate;
+use App\Models\Accounting\ManualJournal;
+use App\Models\Accounting\ManualJournalLine;
 use App\Models\Accounting\TakeOnBatch;
 use App\Models\Accounting\TakeOnRow;
 use App\Models\AccountRoleMapping;
@@ -240,6 +244,10 @@ class SyncProcessor
     // inert for push()/pull() and this explicit check is the real protection
     // there.
     private const TENANT_SCOPED_MODELS = [
+        'manual_journals' => ManualJournal::class,
+        'journal_attachments' => JournalAttachment::class,
+        'journal_templates' => JournalTemplate::class,
+        'take_on_batches' => TakeOnBatch::class,
         'pending_collections' => PendingCollection::class,
         'locations' => Location::class,
         'categories' => Category::class,
@@ -3605,6 +3613,31 @@ class SyncProcessor
                 $this->applyTakeOnRow($uuid, $payload);
                 break;
 
+            case 'manual_journals':
+                $this->applyManualJournal($uuid, $payload, $trusted, $actingUser);
+                break;
+
+            case 'journal_attachments':
+                JournalAttachment::updateOrCreate(['id' => $uuid], [
+                    'business_id' => $payload['business_id'],
+                    'manual_journal_id' => $payload['manual_journal_id'] ?? '',
+                    'file_name' => $payload['file_name'] ?? 'file',
+                    'size_bytes' => (int) ($payload['size_bytes'] ?? 0),
+                    'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                ]);
+                break;
+
+            case 'journal_templates':
+                JournalTemplate::updateOrCreate(['id' => $uuid], [
+                    'business_id' => $payload['business_id'],
+                    'name' => $payload['name'] ?? '',
+                    'journal_type' => $payload['journal_type'] ?? 'general',
+                    'narration' => $payload['narration'] ?? null,
+                    'lines' => is_string($payload['lines'] ?? null) ? json_decode($payload['lines'], true) : ($payload['lines'] ?? []),
+                    'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                ]);
+                break;
+
                 // Client-posted journals — a plain mirror. The client (Flutter,
                 // once cut over via client_gl_posting_enabled_at) has already
                 // computed and "posted" this journal locally; Laravel never
@@ -4844,6 +4877,113 @@ class SyncProcessor
     }
 
     /**
+     * A manual journal (Phase 4) with all its lines. Stored and relayed as
+     * it arrives; a journal becoming approved / posted / reversed needs the
+     * pusher to hold finance.gl.post (and finance.journal.post_control when
+     * it has customer or supplier lines), or an approved manual_journal_post
+     * request naming it. A posted or reversed journal never goes back, and
+     * a stale change (older updated_at) is ignored.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function applyManualJournal(string $uuid, array $payload, bool $trusted, ?User $actingUser): void
+    {
+        $businessId = (string) ($payload['business_id'] ?? '');
+        $status = $payload['status'] ?? 'draft';
+        if (! in_array($status, ManualJournal::STATUSES, true)
+            || ! in_array($payload['journal_type'] ?? 'general', ManualJournal::TYPES, true)) {
+            throw new \RuntimeException('manual_journals: unknown type or status.');
+        }
+        $lines = $payload['lines'] ?? null;
+        if (is_string($lines)) {
+            $lines = json_decode($lines, true);
+        }
+
+        $existing = ManualJournal::find($uuid);
+        $incomingAt = isset($payload['updated_at']) ? Carbon::parse($payload['updated_at']) : null;
+        if ($existing && $incomingAt && $existing->updated_at && $incomingAt->lt($existing->updated_at)) {
+            return;
+        }
+        $wasFinal = in_array($existing?->status, ['posted', 'reversed'], true);
+        if ($wasFinal && ! in_array($status, ['posted', 'reversed'], true)) {
+            throw new \RuntimeException('manual_journals: a posted journal can only be reversed, never reopened.');
+        }
+
+        $becomesApproved = in_array($status, ManualJournal::APPROVED, true)
+            && ! in_array($existing?->status, ManualJournal::APPROVED, true);
+        if (! $trusted && $becomesApproved) {
+            $hasPartyLines = collect(is_array($lines) ? $lines : [])
+                ->contains(fn ($l) => in_array($l['line_type'] ?? 'gl', ['customer', 'supplier'], true));
+            $approved = ApprovalRequest::where('business_id', $businessId)
+                ->where('action', 'manual_journal_post')
+                ->where('status', 'approved')
+                ->where(fn ($q) => $q->where('subject_id', $uuid)->orWhere('payload_json', 'like', '%'.$uuid.'%'))
+                ->exists();
+            $authorizer = app(BackOfficeAuthorizer::class);
+            $role = $actingUser?->getRoleNames()->first();
+            $mayPost = $authorizer->can($businessId, $role, BackOfficePermission::FINANCE_GL_POST)
+                && (! $hasPartyLines || $authorizer->can($businessId, $role, BackOfficePermission::FINANCE_JOURNAL_POST_CONTROL));
+            if (! $approved && ! $mayPost) {
+                throw new \RuntimeException('manual_journals: posting a journal needs approval or the finance.gl.post permission'.($hasPartyLines ? ' (and finance.journal.post_control for customer / supplier lines)' : '').'.');
+            }
+        }
+
+        DB::transaction(function () use ($uuid, $payload, $businessId, $status, $lines, $wasFinal) {
+            ManualJournal::updateOrCreate(['id' => $uuid], [
+                'business_id' => $businessId,
+                'document_number' => $payload['document_number'] ?? $uuid,
+                'journal_type' => $payload['journal_type'] ?? 'general',
+                'trans_date' => $payload['trans_date'],
+                'reference' => $payload['reference'] ?? null,
+                'narration' => $payload['narration'] ?? '',
+                'location_id' => $payload['location_id'] ?? null,
+                'currency_code' => $payload['currency_code'] ?? null,
+                'exchange_rate' => $payload['exchange_rate'] ?? 1,
+                'status' => $status,
+                'auto_reverse_date' => $payload['auto_reverse_date'] ?? null,
+                'corrects_journal_id' => $payload['corrects_journal_id'] ?? null,
+                'import_ref' => $payload['import_ref'] ?? null,
+                'approval_request_id' => $payload['approval_request_id'] ?? null,
+                'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                'submitted_at' => $payload['submitted_at'] ?? null,
+                'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
+                'approved_at' => $payload['approved_at'] ?? null,
+                'rejected_reason' => $payload['rejected_reason'] ?? null,
+                'posted_journal_id' => $payload['posted_journal_id'] ?? null,
+                'reversed_by_user_id' => $payload['reversed_by_user_id'] ?? null,
+                'reversed_at' => $payload['reversed_at'] ?? null,
+            ]);
+
+            // A posted journal's lines are what it posted — never replaced.
+            if (! is_array($lines) || $wasFinal) {
+                return;
+            }
+            ManualJournalLine::where('manual_journal_id', $uuid)->delete();
+            foreach ($lines as $line) {
+                ManualJournalLine::create([
+                    'id' => $line['id'],
+                    'manual_journal_id' => $uuid,
+                    'line_no' => (int) ($line['line_no'] ?? 0),
+                    'line_type' => in_array($line['line_type'] ?? 'gl', ManualJournal::LINE_TYPES, true) ? $line['line_type'] ?? 'gl' : 'gl',
+                    'gl_account_id' => $line['gl_account_id'] ?? null,
+                    'party_id' => $line['party_id'] ?? null,
+                    'bank_account_id' => $line['bank_account_id'] ?? null,
+                    'description' => $line['description'] ?? null,
+                    'debit' => (float) ($line['debit'] ?? 0),
+                    'credit' => (float) ($line['credit'] ?? 0),
+                    'currency_code' => $line['currency_code'] ?? null,
+                    'exchange_rate' => $line['exchange_rate'] ?? 1,
+                    'foreign_amount' => $line['foreign_amount'] ?? null,
+                    'cost_centre_id' => $line['cost_centre_id'] ?? null,
+                    'location_id' => $line['location_id'] ?? null,
+                    'tax_rate_id' => $line['tax_rate_id'] ?? null,
+                    'is_tax_line' => (bool) ($line['is_tax_line'] ?? false),
+                ]);
+            }
+        });
+    }
+
+    /**
      * @param  array<string, mixed>  $payload
      */
     private function applyTakeOnRow(string $uuid, array $payload): void
@@ -5213,6 +5353,17 @@ class SyncProcessor
     protected function handleDelete(string $table, string $uuid, bool $trusted = true, ?User $actingUser = null): void
     {
         if (in_array($table, self::IMMUTABLE)) {
+            return;
+        }
+
+        // Only a manual journal nobody has submitted can be deleted.
+        if ($table === 'manual_journals') {
+            $journal = ManualJournal::find($uuid);
+            if ($journal !== null && in_array($journal->status, ['draft', 'rejected'], true)) {
+                $journal->lines()->delete();
+                $journal->delete();
+            }
+
             return;
         }
 

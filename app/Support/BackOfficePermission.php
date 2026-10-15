@@ -123,6 +123,9 @@ final class BackOfficePermission
 
     public const FINANCE_GL_APPROVE = 'finance.gl.approve';
 
+    /** Journal lines on receivables / payables / stock control accounts. */
+    public const FINANCE_JOURNAL_POST_CONTROL = 'finance.journal.post_control';
+
     public const FINANCE_PAYMENT_VIEW = 'finance.payment.view';
 
     public const FINANCE_PAYMENT_CREATE = 'finance.payment.create';
@@ -314,6 +317,7 @@ final class BackOfficePermission
         self::FINANCE_GL_POST => 'Post general ledger entries',
         self::FINANCE_GL_REVERSE => 'Reverse general ledger entries',
         self::FINANCE_GL_APPROVE => 'Approve general ledger entries',
+        self::FINANCE_JOURNAL_POST_CONTROL => 'Journal to control accounts',
         self::FINANCE_PAYMENT_VIEW => 'View payments',
         self::FINANCE_PAYMENT_CREATE => 'Create payments',
         self::FINANCE_PAYMENT_APPROVE => 'Approve payments',
@@ -440,7 +444,7 @@ final class BackOfficePermission
             self::FINANCE_GL_VIEW, self::FINANCE_GL_POST, self::FINANCE_CREDIT_NOTE_CREATE, self::FINANCE_WRITE_OFF_CREATE, self::FINANCE_BANK_RECONCILE, self::APPROVALS_VIEW, self::APPROVALS_DECIDE,
         ]);
         $finance_manager = array_merge($accountant, [
-            self::FINANCE_GL_REVERSE, self::FINANCE_GL_APPROVE, self::FINANCE_PAYMENT_APPROVE, self::FINANCE_PERIOD_CLOSE, self::FINANCE_PERIOD_REOPEN, self::FINANCE_AR_ADJUST, self::FINANCE_AP_ADJUST, self::FINANCE_EXCHANGE_RATE_EDIT, self::FINANCE_WRITE_OFF_APPROVE, self::REPORTS_FINANCE,
+            self::FINANCE_GL_REVERSE, self::FINANCE_GL_APPROVE, self::FINANCE_JOURNAL_POST_CONTROL, self::FINANCE_PAYMENT_APPROVE, self::FINANCE_PERIOD_CLOSE, self::FINANCE_PERIOD_REOPEN, self::FINANCE_AR_ADJUST, self::FINANCE_AP_ADJUST, self::FINANCE_EXCHANGE_RATE_EDIT, self::FINANCE_WRITE_OFF_APPROVE, self::REPORTS_FINANCE,
         ]);
         $hr_officer = [
             self::EMPLOYEES_VIEW, self::EMPLOYEES_MANAGE, self::EMPLOYEES_PAYROLL_VIEW, self::EMPLOYEES_PAYROLL_PROCESS,

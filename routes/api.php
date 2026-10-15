@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\BackOfficeAccessController;
 use App\Http\Controllers\Api\BusinessBrandingController;
 use App\Http\Controllers\Api\DeviceAuthController;
 use App\Http\Controllers\Api\DeviceDbSnapshotController;
+use App\Http\Controllers\Api\JournalAttachmentFileController;
 use App\Http\Controllers\Api\LocalSyncConflictController;
 use App\Http\Controllers\Api\LocationController;
 use App\Http\Controllers\Api\PayrollPeriodLockController;
@@ -77,6 +78,9 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
 
     // Take-on (Phase 3) — the original file a batch was imported from.
     Route::post('take-on/batches/{batchId}/file', [TakeOnFileController::class, 'store']);
+
+    // General journals (Phase 4) — the file behind a journal attachment.
+    Route::post('journal-attachments/{attachmentId}/file', [JournalAttachmentFileController::class, 'store']);
 
     // Reports back a location a cashier picked on-device (the fallback
     // prompt shown when no admin assignment exists) so the web portal's

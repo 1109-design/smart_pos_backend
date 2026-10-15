@@ -9,6 +9,7 @@ use App\Models\Accounting\GeneralLedgerEntry;
 use App\Models\Accounting\GlAccount;
 use App\Models\Accounting\JournalHeader;
 use App\Models\Accounting\JournalLine;
+use App\Models\Accounting\ManualJournal;
 use App\Models\Accounting\TakeOnBatch;
 use App\Models\Business;
 use App\Models\Device;
@@ -64,6 +65,7 @@ class JournalBundleIngestor
             $this->assertPeriodOpen($businessId, (string) ($header['trans_date'] ?? ''), $this->moduleOf($header), ($header['journal_type'] ?? null) === 'year_end');
             $this->assertUnique($businessId, $journalId, $header);
             $this->assertTakeOnAllowed($businessId, $header);
+            $this->assertManualJournalApproved($businessId, $header);
             $original = $this->reversedJournal($businessId, $header);
 
             $journal = JournalHeader::create([
@@ -316,6 +318,27 @@ class JournalBundleIngestor
         }
         if ((string) $batch->business_id !== $businessId || ! in_array($batch->status, TakeOnBatch::APPROVED, true)) {
             throw new JournalRejectedException('forbidden', 'This take-on batch has not been approved.');
+        }
+    }
+
+    /**
+     * A manual journal's ledger journal (Phase 4) posts only once the
+     * journal is approved. The journal itself syncs first; one that hasn't
+     * arrived yet defers this.
+     *
+     * @param  array<string, mixed>  $header
+     */
+    private function assertManualJournalApproved(string $businessId, array $header): void
+    {
+        if (($header['source_type'] ?? null) !== 'manual_journal') {
+            return;
+        }
+        $journal = ManualJournal::find($header['source_id'] ?? '');
+        if ($journal === null) {
+            throw new MissingParentRecordException('journal_postings: the manual journal has not arrived yet.');
+        }
+        if ((string) $journal->business_id !== $businessId || ! in_array($journal->status, ManualJournal::APPROVED, true)) {
+            throw new JournalRejectedException('forbidden', "Journal {$journal->document_number} has not been approved.");
         }
     }
 
