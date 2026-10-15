@@ -40,6 +40,7 @@ class Business extends Model
         'accounting_period_end_guard_days',
         'take_on_finalised_at',
         'take_on_finalised_by_user_id',
+        'cash_up_variance_threshold',
     ];
 
     protected function casts(): array
@@ -103,6 +104,7 @@ class Business extends Model
                 'period_end_guard_days' => $this->accounting_period_end_guard_days,
                 'take_on_finalised_at' => $this->take_on_finalised_at?->toIso8601String(),
                 'take_on_finalised_by_user_id' => $this->take_on_finalised_by_user_id,
+                'cash_up_variance_threshold' => (float) $this->cash_up_variance_threshold,
             ],
             'source_updated_at' => now(),
             'synced_at' => now(),

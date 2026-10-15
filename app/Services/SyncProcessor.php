@@ -17,6 +17,7 @@ use App\Models\Accounting\ManualJournalLine;
 use App\Models\Accounting\StockPostingRule;
 use App\Models\Accounting\TakeOnBatch;
 use App\Models\Accounting\TakeOnRow;
+use App\Models\Accounting\ZReport;
 use App\Models\AccountRoleMapping;
 use App\Models\ApprovalDelegation;
 use App\Models\ApprovalGroup;
@@ -250,6 +251,7 @@ class SyncProcessor
         'journal_templates' => JournalTemplate::class,
         'take_on_batches' => TakeOnBatch::class,
         'stock_posting_rules' => StockPostingRule::class,
+        'z_reports' => ZReport::class,
         'pending_collections' => PendingCollection::class,
         'locations' => Location::class,
         'categories' => Category::class,
@@ -1485,6 +1487,9 @@ class SyncProcessor
                     'accounting_period_end_guard_days' => isset($payload['period_end_guard_days'])
                         ? max(0, (int) $payload['period_end_guard_days'])
                         : $business->accounting_period_end_guard_days,
+                    'cash_up_variance_threshold' => isset($payload['cash_up_variance_threshold'])
+                        ? max(0, (float) $payload['cash_up_variance_threshold'])
+                        : $business->cash_up_variance_threshold,
                     // Finalising take-on (Phase 3) is one-way: once set it
                     // never clears, and the first finalisation stands.
                     'take_on_finalised_at' => $business->take_on_finalised_at
@@ -3629,6 +3634,10 @@ class SyncProcessor
                 $this->applyManualJournal($uuid, $payload, $trusted, $actingUser);
                 break;
 
+            case 'z_reports':
+                $this->applyZReport($uuid, $payload);
+                break;
+
             case 'stock_posting_rules':
                 // Which accounts stock movements post to — owner / manager
                 // only, like the chart of accounts.
@@ -5021,6 +5030,57 @@ class SyncProcessor
     }
 
     /**
+     * A Z-report (Phase 7.3). Its figures are fixed when it's made — a
+     * later push may only record the cash-up's approval and printing.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function applyZReport(string $uuid, array $payload): void
+    {
+        $existing = ZReport::find($uuid);
+        $json = fn ($v) => is_string($v) ? json_decode($v, true) : $v;
+        $settled = [
+            'status' => in_array($payload['status'] ?? '', ['pending_approval', 'approved', 'rejected'], true) ? $payload['status'] : 'approved',
+            'approval_request_id' => $payload['approval_request_id'] ?? null,
+            'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
+            'approved_at' => $payload['approved_at'] ?? null,
+            'variance_journal_id' => $payload['variance_journal_id'] ?? null,
+            'printed_at' => $payload['printed_at'] ?? null,
+        ];
+        if ($existing !== null) {
+            if ((string) $existing->business_id !== (string) ($payload['business_id'] ?? '')) {
+                throw new \RuntimeException('z_reports: report belongs to another business.');
+            }
+            // Nothing recorded is ever cleared: printed stays printed,
+            // approved stays approved (with who approved it).
+            foreach (['approval_request_id', 'approved_by_user_id', 'approved_at', 'variance_journal_id', 'printed_at'] as $key) {
+                $settled[$key] = $existing->{$key} ?? $settled[$key];
+            }
+            if ($existing->status === 'approved') {
+                $settled['status'] = 'approved';
+                $settled['approved_by_user_id'] = $existing->approved_by_user_id ?? $settled['approved_by_user_id'];
+            }
+            $existing->update($settled);
+
+            return;
+        }
+        ZReport::create([
+            'id' => $uuid,
+            'business_id' => $payload['business_id'],
+            'location_id' => $payload['location_id'] ?? null,
+            'till_id' => $payload['till_id'] ?? null,
+            'shift_id' => $payload['shift_id'],
+            'cashier_id' => $payload['cashier_id'],
+            'report_number' => $payload['report_number'],
+            'opened_at' => $payload['opened_at'],
+            'closed_at' => $payload['closed_at'],
+            'data' => $json($payload['data'] ?? []) ?? [],
+            'variance' => (float) ($payload['variance'] ?? 0),
+            ...$settled,
+        ]);
+    }
+
+    /**
      * @param  array<string, mixed>  $payload
      */
     private function applyTakeOnRow(string $uuid, array $payload): void
@@ -5353,7 +5413,18 @@ class SyncProcessor
             ->get()
             ->sum(fn (ChangeOwedLedger $l) => abs((float) $l->amount));
 
-        $expectedCash = (float) $shift->opening_float + $cashSales - $depositRefundsCash - $changeClaimsCash;
+        // Cash moved in / out of the drawer during the shift — vault drops,
+        // float top-ups, paid-outs (Phase 7) — converted to base.
+        $baseCurrency = Business::whereKey($shift->business_id)->value('currency_code') ?? 'USD';
+        $tillCash = 0.0;
+        foreach (TillCashMovement::where('shift_id', $shift->id)->whereIn('type', ['cash_in', 'cash_out'])->get() as $movement) {
+            $currency = $movement->currency_code ?: $baseCurrency;
+            $rate = $currency === $baseCurrency ? 1.0 : (float) (ExchangeRate::where('business_id', $shift->business_id)
+                ->where('from_currency', $currency)->latest()->value('rate') ?: 1.0);
+            $tillCash += ($movement->type === 'cash_in' ? 1 : -1) * (float) $movement->amount / ($rate > 0 ? $rate : 1.0);
+        }
+
+        $expectedCash = (float) $shift->opening_float + $cashSales - $depositRefundsCash - $changeClaimsCash + round($tillCash, 4);
 
         $shift->forceFill([
             'total_sales' => $grossSales,

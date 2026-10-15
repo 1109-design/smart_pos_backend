@@ -217,6 +217,12 @@ class ChartOfAccountsSeeder
      * Clearing, which must be exactly zero before take-on is finalised;
      * supplier prepayments brought forward need an asset of their own.
      */
+    /** Till (Phase 7): cash shortages / overages, and lay-by money held. */
+    public const PHASE7_ACCOUNTS = [
+        ['Expenses', 'Other Expenses', ['code' => '6067', 'name' => 'Cash Over/Short']],
+        ['Liabilities', 'Current Liabilities', ['code' => '2060', 'name' => 'Layby Deposits']],
+    ];
+
     /** Stock between locations (Phase 6): a transfer's dispatched value. */
     public const PHASE6_ACCOUNTS = [
         ['Assets', 'Current Assets', ['code' => '1210', 'name' => 'Stock in Transit']],
@@ -261,6 +267,7 @@ class ChartOfAccountsSeeder
                     ['code' => '2015', 'name' => 'Withholding Tax Payable'],
                     ['code' => '2020', 'name' => 'Deposits Held'],
                     ['code' => '2025', 'name' => 'Change Owed'],
+                    ['code' => '2060', 'name' => 'Layby Deposits'],
                     ['code' => '2030', 'name' => 'Tax Payable'],
                     self::EXCHANGE_CLEARING,
                     self::OLD_SYSTEM_DEPOSITS,
@@ -340,6 +347,7 @@ class ChartOfAccountsSeeder
                     ['code' => '6050', 'name' => 'Stock Loss / Write-offs'],
                     ['code' => '6060', 'name' => 'Cash Rounding Variance'],
                     ['code' => '6065', 'name' => 'Cash Vault Variance'],
+                    ['code' => '6067', 'name' => 'Cash Over/Short'],
                     ['code' => '6070', 'name' => 'Depreciation Expense'],
                     ['code' => '6075', 'name' => 'Gain/Loss on Disposal of Assets'],
                     ['code' => '6080', 'name' => 'FX Loss'],

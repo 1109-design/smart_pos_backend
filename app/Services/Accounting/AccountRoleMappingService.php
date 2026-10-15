@@ -74,6 +74,8 @@ class AccountRoleMappingService
         'bad_debts' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6045', 'name' => 'Bad Debts'],
         'change_owed_liability' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2025', 'name' => 'Change Owed'],
         // Take-on (Phase 3).
+        'cash_over_short' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6067', 'name' => 'Cash Over/Short'],
+        'layby_deposits' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2060', 'name' => 'Layby Deposits'],
         'stock_in_transit' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1210', 'name' => 'Stock in Transit'],
         'take_on_clearing' => ['category' => 'Equity', 'subCategory' => "Shareholders' Equity", 'code' => '3025', 'name' => 'Take-on Clearing'],
         'supplier_prepayments' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1170', 'name' => 'Supplier Prepayments'],

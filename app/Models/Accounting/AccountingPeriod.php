@@ -18,7 +18,7 @@ class AccountingPeriod extends Model
 
     /** Source types per module; anything else is finance. */
     private const MODULE_SOURCES = [
-        'sales' => ['sale', 'sale_cogs', 'sale_order_allocation', 'change_owed_claim', 'container_return', 'container_forfeit'],
+        'sales' => ['layby_payment', 'sale', 'sale_cogs', 'sale_order_allocation', 'change_owed_claim', 'container_return', 'container_forfeit'],
         'stock' => ['grv', 'stock_adjustment', 'stock_take', 'stock_write_off', 'sheet_loss', 'product_opening_stock', 'requisition_issue', 'delivery_note', 'stock_transfer', 'grv_walk_in'],
         'ar' => ['ar_invoice', 'customer_receipt', 'customer_write_off', 'customer_adjustment', 'ar_opening_balance', 'opening_balance_customer', 'advance_allocation', 'credit_payment', 'invoice_payment', 'credit_note', 'customer_debit_note'],
         'ap' => ['supplier_invoice', 'supplier_payment', 'supplier_credit_note'],
