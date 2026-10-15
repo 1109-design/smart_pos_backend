@@ -14,6 +14,7 @@ use App\Models\Accounting\JournalLine;
 use App\Models\Accounting\JournalTemplate;
 use App\Models\Accounting\ManualJournal;
 use App\Models\Accounting\ManualJournalLine;
+use App\Models\Accounting\StockPostingRule;
 use App\Models\Accounting\TakeOnBatch;
 use App\Models\Accounting\TakeOnRow;
 use App\Models\AccountRoleMapping;
@@ -248,6 +249,7 @@ class SyncProcessor
         'journal_attachments' => JournalAttachment::class,
         'journal_templates' => JournalTemplate::class,
         'take_on_batches' => TakeOnBatch::class,
+        'stock_posting_rules' => StockPostingRule::class,
         'pending_collections' => PendingCollection::class,
         'locations' => Location::class,
         'categories' => Category::class,
@@ -3625,6 +3627,31 @@ class SyncProcessor
 
             case 'manual_journals':
                 $this->applyManualJournal($uuid, $payload, $trusted, $actingUser);
+                break;
+
+            case 'stock_posting_rules':
+                // Which accounts stock movements post to — owner / manager
+                // only, like the chart of accounts.
+                if (! $trusted) {
+                    $this->requireOwnerOrManager($actingUser, 'stock_posting_rules: changing stock posting rules');
+                }
+                if (! in_array($payload['movement_type'] ?? '', StockPostingRule::MOVEMENT_TYPES, true)) {
+                    throw new \RuntimeException('stock_posting_rules: unknown movement type.');
+                }
+                foreach (['debit_account_id', 'credit_account_id'] as $key) {
+                    if (! GlAccount::where('id', $payload[$key] ?? '')->where('business_id', $payload['business_id'])->exists()) {
+                        throw new \RuntimeException("stock_posting_rules: {$key} is not an account of this business.");
+                    }
+                }
+                StockPostingRule::updateOrCreate(['id' => $uuid], [
+                    'business_id' => $payload['business_id'],
+                    'movement_type' => $payload['movement_type'],
+                    'location_id' => $payload['location_id'] ?? null,
+                    'product_category_id' => $payload['product_category_id'] ?? null,
+                    'debit_account_id' => $payload['debit_account_id'],
+                    'credit_account_id' => $payload['credit_account_id'],
+                    'is_active' => (bool) ($payload['is_active'] ?? true),
+                ]);
                 break;
 
             case 'journal_attachments':

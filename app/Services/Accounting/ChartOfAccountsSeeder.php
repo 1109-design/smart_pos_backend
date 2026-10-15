@@ -217,6 +217,11 @@ class ChartOfAccountsSeeder
      * Clearing, which must be exactly zero before take-on is finalised;
      * supplier prepayments brought forward need an asset of their own.
      */
+    /** Stock between locations (Phase 6): a transfer's dispatched value. */
+    public const PHASE6_ACCOUNTS = [
+        ['Assets', 'Current Assets', ['code' => '1210', 'name' => 'Stock in Transit']],
+    ];
+
     public const PHASE3_ACCOUNTS = [
         ['Assets', 'Current Assets', ['code' => '1170', 'name' => 'Supplier Prepayments']],
         ['Equity', "Shareholders' Equity", ['code' => '3025', 'name' => 'Take-on Clearing']],
@@ -237,6 +242,7 @@ class ChartOfAccountsSeeder
                     ['code' => '1160', 'name' => 'Staff Loans & Advances'],
                     ['code' => '1170', 'name' => 'Supplier Prepayments'],
                     ['code' => '1200', 'name' => 'Inventory', 'control_type' => 'inventory'],
+                    ['code' => '1210', 'name' => 'Stock in Transit'],
                 ]],
                 ['name' => 'Fixed Assets', 'accounts' => [
                     ['code' => '1500', 'name' => 'Fixed Assets'],
