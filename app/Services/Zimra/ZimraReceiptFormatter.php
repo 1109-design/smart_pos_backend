@@ -25,13 +25,16 @@ class ZimraReceiptFormatter
      */
     private static function taxCalculator(float $saleAmount, float $taxRate): float
     {
-        if ($taxRate <= 0.0 || $saleAmount <= 0.0) {
+        if ($taxRate <= 0.0 || $saleAmount == 0.0) {
             return 0.0;
         }
 
-        $preTax = $saleAmount / (1 + ($taxRate / 100));
+        // On the magnitude, keeping the sign: a credit note's tax is the
+        // negative of the same sale's (Phase 11.2).
+        $magnitude = abs($saleAmount);
+        $preTax = $magnitude / (1 + ($taxRate / 100));
 
-        return round($saleAmount - $preTax, 2, PHP_ROUND_HALF_UP);
+        return ($saleAmount < 0 ? -1 : 1) * round($magnitude - $preTax, 2, PHP_ROUND_HALF_UP);
     }
 
     /**
@@ -50,8 +53,15 @@ class ZimraReceiptFormatter
         int $receiptCounter,
         ?array $taxCodeMap,
         ?array $applicableTaxes,
-        string $invoiceNo
+        string $invoiceNo,
+        array $options = []
     ): array {
+        // Phase 11.2 — the same receipt as a CreditNote / DebitNote (or a
+        // customer invoice's FiscalInvoice): its type, currency, the receipt
+        // it credits or debits, and the reason ZIMRA requires (RCPT015 /
+        // RCPT034). A credit note's lines and totals arrive negative
+        // (RCPT022 / RCPT028 / RCPT040); quantities stay positive.
+        $receiptType = $options['receiptType'] ?? 'FiscalInvoice';
         $receiptLines = [];
         $lineNo = 0;
 
@@ -61,9 +71,11 @@ class ZimraReceiptFormatter
             $lineTotal = (float) round((float) $item->line_total, 2);
             $taxAmount = (float) round((float) $item->tax_amount, 2);
 
-            // Items store the VAT amount, not the rate — derive the inclusive rate.
-            $netAmount = $lineTotal - $taxAmount;
-            $taxRate = $netAmount > 0 ? round(($taxAmount / $netAmount) * 100, 2) : 0.0;
+            // Items store the VAT amount, not the rate — derive the inclusive
+            // rate (from magnitudes, so a credit note's negative line gives
+            // the same rate as the sale it credits).
+            $netAmount = abs($lineTotal) - abs($taxAmount);
+            $taxRate = $netAmount > 0 ? round((abs($taxAmount) / $netAmount) * 100, 2) : 0.0;
 
             $resolved = self::resolveTax($taxRate, $applicableTaxes);
             $taxId = $resolved['taxID'];
@@ -193,10 +205,10 @@ class ZimraReceiptFormatter
         // Spec §2.4 requires Africa/Harare timestamps; using the sale's original
         // created_at causes RCPT030 when fiscalising older transactions.
         $receiptDate = now('Africa/Harare')->format('Y-m-d\TH:i:s');
-        $currencyCode = $transaction->base_currency ?: 'USD';
+        $currencyCode = $options['currency'] ?? ($transaction->base_currency ?: 'USD');
 
         $receipt = [
-            'receiptType' => 'FiscalInvoice',
+            'receiptType' => $receiptType,
             'receiptCurrency' => $currencyCode,
             'receiptCounter' => $receiptCounter,
             'receiptGlobalNo' => $receiptGlobalNo,
@@ -212,6 +224,12 @@ class ZimraReceiptFormatter
 
         if ($buyerData !== null) {
             $receipt['buyerData'] = $buyerData;
+        }
+        if (! empty($options['creditDebitNote'])) {
+            $receipt['creditDebitNote'] = $options['creditDebitNote'];
+        }
+        if (filled($options['receiptNotes'] ?? null)) {
+            $receipt['receiptNotes'] = (string) $options['receiptNotes'];
         }
 
         // ── Signature (spec §13.2.1) ─────────────────────────────────────────
@@ -229,7 +247,7 @@ class ZimraReceiptFormatter
         }
 
         $stringToSign = $device->device_id
-            .strtoupper('FiscalInvoice')
+            .strtoupper($receiptType)
             .strtoupper($currencyCode)
             .$receiptGlobalNo
             .$receiptDate

@@ -12,6 +12,7 @@ class ZimraSale extends Model
 {
     protected $fillable = [
         'transaction_id',
+        'fiscal_document_id',
         'business_id',
         'tin',
         'device_id',
@@ -45,6 +46,11 @@ class ZimraSale extends Model
     public function transaction(): BelongsTo
     {
         return $this->belongsTo(Transaction::class);
+    }
+
+    public function fiscalDocument(): BelongsTo
+    {
+        return $this->belongsTo(FiscalDocument::class);
     }
 
     public function isFiscalised(): bool

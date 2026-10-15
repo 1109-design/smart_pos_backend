@@ -212,6 +212,12 @@ class ChartOfAccountsSeeder
         ['Expenses', 'Other Expenses', ['code' => '6045', 'name' => 'Bad Debts']],
     ];
 
+    /** VAT return (Phase 11): what is owed to, or due back from, ZIMRA. */
+    public const PHASE11_ACCOUNTS = [
+        ['Liabilities', 'Current Liabilities', ['code' => '2035', 'name' => 'VAT Payable (ZIMRA)']],
+        ['Assets', 'Current Assets', ['code' => '1155', 'name' => 'VAT Refund Due']],
+    ];
+
     /** Month-end revaluation (Phase 9), apart from realised gains / losses. */
     public const PHASE9_ACCOUNTS = [
         ['Revenue', 'Other Income', ['code' => '4025', 'name' => 'Unrealised FX Gain']],
@@ -256,6 +262,7 @@ class ChartOfAccountsSeeder
                     ['code' => '1100', 'name' => 'Accounts Receivable', 'control_type' => 'receivable'],
                     // AP module — recoverable input tax on supplier invoices.
                     ['code' => '1150', 'name' => 'Input VAT'],
+                    ['code' => '1155', 'name' => 'VAT Refund Due'],
                     ['code' => '1160', 'name' => 'Staff Loans & Advances'],
                     ['code' => '1170', 'name' => 'Supplier Prepayments'],
                     ['code' => '1200', 'name' => 'Inventory', 'control_type' => 'inventory'],
@@ -281,6 +288,7 @@ class ChartOfAccountsSeeder
                     ['code' => '2060', 'name' => 'Layby Deposits'],
                     ['code' => '2070', 'name' => 'Payment Vouchers Payable'],
                     ['code' => '2030', 'name' => 'Tax Payable'],
+                    ['code' => '2035', 'name' => 'VAT Payable (ZIMRA)'],
                     self::EXCHANGE_CLEARING,
                     self::OLD_SYSTEM_DEPOSITS,
                     ['code' => '2050', 'name' => 'Net Wages Payable'],

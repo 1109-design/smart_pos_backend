@@ -9,6 +9,7 @@ use App\Models\Payment;
 use App\Models\SyncRecord;
 use App\Models\Transaction;
 use App\Models\TransactionItem;
+use App\Models\Zimra\FiscalDocument;
 use App\Models\Zimra\ZimraDevice;
 use App\Models\Zimra\ZimraSale;
 use Exception;
@@ -41,6 +42,24 @@ class ZimraSalesService
     }
 
     /**
+     * Submits one queued row — a till sale's or a fiscal document's. Null
+     * when what it was for is gone.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function processPending(ZimraSale $zimraSale): ?array
+    {
+        if ($zimraSale->fiscal_document_id) {
+            $document = FiscalDocument::find($zimraSale->fiscal_document_id);
+
+            return $document ? $this->processQueuedDocument($document) : null;
+        }
+        $transaction = $zimraSale->transaction;
+
+        return $transaction ? $this->processQueued($transaction) : null;
+    }
+
+    /**
      * Re-submit every pending/retry sale, oldest first, per device.
      */
     public function retryFailedFiscalisations(): array
@@ -52,13 +71,12 @@ class ZimraSalesService
             ->get();
 
         foreach ($pending as $zimraSale) {
-            $transaction = $zimraSale->transaction;
-            if (! $transaction) {
+            $result = $this->processPending($zimraSale);
+            if ($result === null) {
                 continue;
             }
 
             $results['attempted']++;
-            $result = $this->processQueued($transaction);
             if ($result['fiscalised'] ?? false) {
                 $results['fiscalised']++;
             } else {
@@ -104,6 +122,14 @@ class ZimraSalesService
                 'fiscalised' => false,
                 'skipped' => true,
             ];
+        }
+
+        // Voided before it was ever submitted: nothing to fiscalise (a void
+        // after fiscalisation is a credit note — Phase 11.2).
+        if ($transaction->status === 'voided') {
+            $transaction->update(['fiscal_status' => 'excluded']);
+
+            return ['success' => true, 'message' => 'Voided before fiscalisation', 'fiscalised' => false, 'skipped' => true];
         }
 
         // Environment/host guard: refuse to touch live ZIMRA devices from a
@@ -213,7 +239,7 @@ class ZimraSalesService
                 }
             }
 
-            return $this->submitUnderDeviceLock($transaction, $zimraSale, $device, $taxCodeMap, $submissionInvoiceNo);
+            return $this->submitUnderDeviceLock($this->transactionSubject($transaction), $zimraSale, $device, $taxCodeMap, $submissionInvoiceNo);
         } catch (Exception $e) {
             Log::error('ZIMRA fiscalisation exception', [
                 'transaction_id' => $transaction->id,
@@ -235,8 +261,9 @@ class ZimraSalesService
      * lastReceiptGlobalNo and collide (RCPT012); releasing the lock before the
      * signature hash is persisted breaks the previousReceiptHash chain (RCPT020).
      */
-    private function submitUnderDeviceLock(Transaction $transaction, ZimraSale $zimraSale, ZimraDevice $device, array $taxCodeMap, string $invoiceNo): array
+    private function submitUnderDeviceLock(FiscalSubject $subject, ZimraSale $zimraSale, ZimraDevice $device, array $taxCodeMap, string $invoiceNo): array
     {
+        $setStatus = $subject->setStatus;
         $lockName = 'zimra_device_'.$device->device_id;
         $usingMysqlLock = DB::connection()->getDriverName() === 'mysql';
 
@@ -257,7 +284,7 @@ class ZimraSalesService
                     'result' => 'status_check_failed',
                     'error' => $statusResponse['error'] ?? 'unknown',
                 ]);
-                $transaction->update(['fiscal_status' => 'pending']);
+                $setStatus('pending');
 
                 return [
                     'success' => true,
@@ -274,7 +301,7 @@ class ZimraSalesService
                 $openResult = $this->client->openFiscalDay($device->device_id, $device);
                 if (! $openResult['success']) {
                     $zimraSale->markAsRetry();
-                    $transaction->update(['fiscal_status' => 'pending']);
+                    $setStatus('pending');
 
                     return [
                         'success' => true,
@@ -286,7 +313,7 @@ class ZimraSalesService
                 $statusResponse = $this->client->getStatus($device->device_id, $device);
                 if (! $statusResponse['success']) {
                     $zimraSale->markAsRetry();
-                    $transaction->update(['fiscal_status' => 'pending']);
+                    $setStatus('pending');
 
                     return ['success' => true, 'message' => 'Fiscalisation pending: status re-check failed after day open', 'fiscalised' => false];
                 }
@@ -322,24 +349,22 @@ class ZimraSalesService
 
             $zimraSale->update(['receipt_global_no' => $receiptGlobalNo, 'fiscal_invoice_no' => $invoiceNo]);
 
-            $items = TransactionItem::where('transaction_id', $transaction->id)->get();
-            $payments = Payment::where('transaction_id', $transaction->id)->get();
-            $business = Business::find($transaction->business_id);
-            $customer = $transaction->customer_id ? Customer::find($transaction->customer_id) : null;
+            $business = Business::find($subject->shape->business_id);
 
             $receiptData = ZimraReceiptFormatter::formatReceipt(
-                $transaction,
-                $items,
-                $payments,
+                $subject->shape,
+                $subject->items,
+                $subject->payments,
                 $business,
-                $customer,
+                $subject->customer,
                 $device,
                 $previousHash,
                 $receiptGlobalNo,
                 $receiptCounter,
                 $taxCodeMap,
                 $device->applicable_taxes ?? [],
-                $invoiceNo
+                $invoiceNo,
+                $subject->formatterOptions()
             );
 
             $apiResponse = $this->client->submitReceipt($device->device_id, $receiptData, $device);
@@ -374,12 +399,7 @@ class ZimraSalesService
             // accepted the receipt before the connection dropped. Confirm via
             // GetStatus before treating this as a failure.
             if ($this->recoverAfterNetworkFailure($device, $zimraSale, $receiptGlobalNo, $receiptData)) {
-                $transaction->update([
-                    'fiscal_status' => 'fiscalised',
-                    'fiscal_receipt_number' => 'timeout-recovered-'.$receiptGlobalNo,
-                    'fiscal_qr_code' => $zimraSale->zimra_qr_code,
-                ]);
-                $this->emitFiscalSyncRecord($transaction);
+                $setStatus('fiscalised', 'timeout-recovered-'.$receiptGlobalNo, $zimraSale->zimra_qr_code);
 
                 return ['success' => true, 'message' => 'Fiscalised (recovered after network timeout)', 'fiscalised' => true];
             }
@@ -391,7 +411,7 @@ class ZimraSalesService
                 'result' => 'api_error',
                 'error' => $apiResponse['error'] ?? 'ZIMRA unavailable',
             ]);
-            $transaction->update(['fiscal_status' => 'pending']);
+            $setStatus('pending');
 
             return [
                 'success' => true,
@@ -413,10 +433,10 @@ class ZimraSalesService
         if (! empty($redErrors)) {
             $codes = implode(', ', array_column($redErrors, 'validationErrorCode'));
             $zimraSale->update(['error_message' => 'ZIMRA red validation errors: '.$codes]);
-            $transaction->update(['fiscal_status' => 'failed']);
+            $setStatus('failed', null, null, 'ZIMRA red validation errors: '.$codes);
 
             Log::error('ZIMRA red validation errors', [
-                'transaction_id' => $transaction->id,
+                'subject' => $subject->label,
                 'codes' => $codes,
             ]);
 
@@ -428,12 +448,7 @@ class ZimraSalesService
             ];
         }
 
-        $transaction->update([
-            'fiscal_status' => 'fiscalised',
-            'fiscal_receipt_number' => $zimraData['receiptID'] ?? null,
-            'fiscal_qr_code' => $zimraSale->zimra_qr_code,
-        ]);
-        $this->emitFiscalSyncRecord($transaction);
+        $setStatus('fiscalised', isset($zimraData['receiptID']) ? (string) $zimraData['receiptID'] : null, $zimraSale->zimra_qr_code);
 
         return [
             'success' => true,
@@ -441,6 +456,292 @@ class ZimraSalesService
             'fiscalised' => true,
             'zimra_receipt_id' => $zimraData['receiptID'] ?? null,
         ];
+    }
+
+    /**
+     * A till sale as a submission: its items and payments, and where its
+     * outcome is recorded (the transaction's fiscal fields, then pushed to
+     * every device).
+     */
+    private function transactionSubject(Transaction $transaction): FiscalSubject
+    {
+        return new FiscalSubject(
+            label: 'transaction '.$transaction->id,
+            shape: $transaction,
+            items: TransactionItem::where('transaction_id', $transaction->id)->get(),
+            payments: Payment::where('transaction_id', $transaction->id)->get(),
+            customer: $transaction->customer_id ? Customer::find($transaction->customer_id) : null,
+            receiptType: 'FiscalInvoice',
+            currency: null,
+            creditDebitNote: null,
+            receiptNotes: null,
+            setStatus: function (string $status, ?string $receiptId = null, ?string $qr = null, ?string $error = null) use ($transaction): void {
+                if ($status !== 'fiscalised') {
+                    $transaction->update(['fiscal_status' => $status]);
+
+                    return;
+                }
+                $transaction->update([
+                    'fiscal_status' => 'fiscalised',
+                    'fiscal_receipt_number' => $receiptId,
+                    'fiscal_qr_code' => $qr,
+                ]);
+                $this->emitFiscalSyncRecord($transaction);
+            },
+        );
+    }
+
+    // ── Fiscal documents (Phase 11.2) ─────────────────────────────────────
+
+    /**
+     * Records a pending submission for a fiscal document and queues it on
+     * its device, like a till sale.
+     */
+    public function queueDocument(FiscalDocument $document): array
+    {
+        return $this->processDocument($document, allowSubmit: false);
+    }
+
+    public function processQueuedDocument(FiscalDocument $document): array
+    {
+        return $this->processDocument($document, allowSubmit: true);
+    }
+
+    private function processDocument(FiscalDocument $document, bool $allowSubmit): array
+    {
+        if ($document->status === 'fiscalised') {
+            return ['success' => true, 'message' => 'Already fiscalised', 'fiscalised' => true];
+        }
+        $finish = function (string $status, ?string $error = null) use ($document): array {
+            $document->update(['status' => $status, 'error_message' => $error]);
+            $this->emitDocumentSyncRecord($document);
+
+            return ['success' => true, 'message' => $error ?? $status, 'fiscalised' => false, 'skipped' => true];
+        };
+
+        $business = Business::find($document->business_id);
+        if (! $business || ! $business->fiscalisation_enabled) {
+            return $finish('not_required', 'Fiscalisation is disabled for this business');
+        }
+        if ($guardReason = $this->fiscalisationGuard->blockReason()) {
+            return ['success' => true, 'message' => $guardReason, 'fiscalised' => false, 'skipped' => true, 'guard_blocked' => true];
+        }
+
+        $device = ZimraDevice::where('business_id', $document->business_id)
+            ->where('is_active', true)
+            ->where(function ($query) use ($document) {
+                if ($document->location_id) {
+                    $query->where('location_id', $document->location_id)->orWhereNull('location_id');
+                } else {
+                    $query->whereNull('location_id');
+                }
+            })
+            ->orderByRaw('location_id IS NULL')
+            ->first();
+        if (! $device) {
+            $document->update(['status' => 'failed', 'error_message' => 'No active ZIMRA device configured for this business']);
+
+            return ['success' => false, 'message' => 'No active ZIMRA device configured for this business', 'fiscalised' => false];
+        }
+
+        // A note credits or debits a receipt ZIMRA already holds (RCPT015 /
+        // RCPT032). Until the original is fiscalised the note waits; if the
+        // original never will be, neither will the note.
+        $creditDebitNote = null;
+        if ($document->document_type !== 'FiscalInvoice') {
+            $original = $this->originalReceipt($document);
+            if ($original === 'never') {
+                return $finish('not_required', 'The original was never fiscalised.');
+            }
+            if ($original === null) {
+                // Stays queued on its device; the next run tries again.
+                ZimraSale::firstOrNew(['fiscal_document_id' => $document->id])->fill([
+                    'business_id' => $document->business_id,
+                    'tin' => $device->tin,
+                    'device_id' => $device->device_id,
+                    'status' => 'pending',
+                ])->save();
+
+                return ['success' => true, 'message' => 'Waiting for the original to be fiscalised', 'fiscalised' => false, 'skipped' => true];
+            }
+            $creditDebitNote = $original;
+        }
+
+        try {
+            $zimraSale = ZimraSale::firstOrNew(['fiscal_document_id' => $document->id]);
+            if ($zimraSale->exists && $zimraSale->hasZimraReceiptEvidence()) {
+                $document->update([
+                    'status' => 'fiscalised',
+                    'fiscal_receipt_id' => (string) (data_get($zimraSale->zimra_response, 'receiptID') ?? $zimraSale->zimra_receipt_id),
+                    'fiscal_qr_code' => $zimraSale->zimra_qr_code,
+                ]);
+                $this->emitDocumentSyncRecord($document);
+
+                return ['success' => true, 'message' => 'Already accepted by ZIMRA', 'fiscalised' => true];
+            }
+            $zimraSale->fill([
+                'business_id' => $document->business_id,
+                'tin' => $device->tin,
+                'device_id' => $device->device_id,
+                'status' => 'pending',
+                'error_message' => null,
+            ])->save();
+            $zimraSale->refresh();
+
+            $retryIndex = $zimraSale->retry_count;
+            $invoiceNo = $retryIndex > 0 ? $document->document_number.'-R'.$retryIndex : $document->document_number;
+
+            if (! $allowSubmit) {
+                $zimraSale->appendRetryHistory(['invoice_no_used' => $invoiceNo, 'result' => 'queued', 'device_id' => $device->device_id]);
+                $document->update(['status' => 'pending']);
+                ProcessZimraFiscalisationJob::dispatch((string) $device->device_id);
+
+                return ['success' => true, 'message' => 'Fiscalisation queued', 'fiscalised' => false, 'queued' => true];
+            }
+
+            $taxCodeMap = $device->tax_codes ?? [];
+            if (empty($taxCodeMap)) {
+                $configResponse = $this->client->getDeviceConfig($device->device_id, $device);
+                if ($configResponse['success']) {
+                    $device->refresh();
+                    $taxCodeMap = $device->tax_codes ?? [];
+                }
+            }
+
+            return $this->submitUnderDeviceLock(
+                $this->documentSubject($document, $creditDebitNote),
+                $zimraSale,
+                $device,
+                $taxCodeMap,
+                $invoiceNo,
+            );
+        } catch (Exception $e) {
+            Log::error('ZIMRA fiscal document exception', ['fiscal_document_id' => $document->id, 'exception' => $e->getMessage()]);
+            if (isset($zimraSale) && $zimraSale->exists) {
+                $zimraSale->markAsRetry();
+            }
+            $document->update(['status' => 'pending', 'error_message' => $e->getMessage()]);
+
+            return ['success' => false, 'message' => $e->getMessage(), 'fiscalised' => false];
+        }
+    }
+
+    /**
+     * The creditDebitNote reference for a note, null while the original
+     * isn't fiscalised yet, or 'never' when it won't be.
+     *
+     * @return array<string, int>|string|null
+     */
+    private function originalReceipt(FiscalDocument $document): array|string|null
+    {
+        if ($document->original_transaction_id) {
+            $sale = ZimraSale::where('transaction_id', $document->original_transaction_id)->first();
+            $transaction = Transaction::find($document->original_transaction_id);
+            if ($sale === null || ! $sale->hasZimraReceiptEvidence()) {
+                $neverWill = $transaction === null
+                    || ! $transaction->fiscalisation_requested
+                    || $transaction->status === 'voided'
+                    || in_array($transaction->fiscal_status, ['excluded', 'not_configured'], true);
+
+                return $neverWill ? 'never' : null;
+            }
+        } elseif ($document->original_document_id) {
+            $originalDoc = FiscalDocument::find($document->original_document_id);
+            if ($originalDoc === null || $originalDoc->status === 'not_required') {
+                return 'never';
+            }
+            $sale = ZimraSale::where('fiscal_document_id', $originalDoc->id)->first();
+            if ($sale === null || ! $sale->hasZimraReceiptEvidence()) {
+                return null;
+            }
+        } else {
+            return 'never';
+        }
+
+        $receiptId = data_get($sale->zimra_response, 'receiptID');
+        if ($receiptId !== null && is_numeric($receiptId)) {
+            return ['receiptID' => (int) $receiptId];
+        }
+
+        // No receipt id (recovered after a timeout): device + global number.
+        return array_filter([
+            'deviceID' => (int) $sale->device_id,
+            'receiptGlobalNo' => (int) $sale->receipt_global_no,
+            'fiscalDayNo' => data_get($sale->submitted_receipt, 'fiscalDayNo') !== null
+                ? (int) data_get($sale->submitted_receipt, 'fiscalDayNo')
+                : null,
+        ], fn ($v) => $v !== null);
+    }
+
+    /**
+     * A fiscal document as a submission. Lines and payments come from the
+     * device as magnitudes; a credit note's are made negative here (RCPT022
+     * / RCPT028 / RCPT040), quantities stay positive.
+     *
+     * @param  array<string, mixed>|null  $creditDebitNote
+     */
+    private function documentSubject(FiscalDocument $document, ?array $creditDebitNote): FiscalSubject
+    {
+        $sign = $document->document_type === 'CreditNote' ? -1 : 1;
+        $items = collect($document->lines ?? [])->map(fn ($l) => (object) [
+            'product_name' => (string) ($l['description'] ?? 'Item'),
+            'quantity' => abs((float) ($l['quantity'] ?? 1)),
+            'line_total' => $sign * abs((float) ($l['line_total'] ?? 0)),
+            'tax_amount' => $sign * abs((float) ($l['tax_amount'] ?? 0)),
+        ]);
+        $payments = collect($document->payments ?: [['method' => 'credit', 'amount' => abs((float) $document->total)]])
+            ->map(fn ($p) => (object) [
+                'method' => (string) ($p['method'] ?? 'credit'),
+                'amount' => abs((float) ($p['amount'] ?? 0)),
+                'base_equivalent' => null,
+            ]);
+        $shape = new Transaction([
+            'business_id' => $document->business_id,
+            'location_id' => $document->location_id,
+            'base_currency' => $document->currency_code,
+        ]);
+
+        return new FiscalSubject(
+            label: 'fiscal document '.$document->id,
+            shape: $shape,
+            items: $items,
+            payments: $payments,
+            customer: $document->customer_id ? Customer::find($document->customer_id) : null,
+            receiptType: $document->document_type,
+            currency: $document->currency_code,
+            creditDebitNote: $creditDebitNote,
+            receiptNotes: $document->document_type === 'FiscalInvoice' ? null : ($document->reason ?: 'Credit / debit note'),
+            setStatus: function (string $status, ?string $receiptId = null, ?string $qr = null, ?string $error = null) use ($document): void {
+                $document->update(array_filter([
+                    'status' => $status,
+                    'fiscal_receipt_id' => $receiptId,
+                    'fiscal_qr_code' => $qr,
+                    'error_message' => $error,
+                ], fn ($v) => $v !== null));
+                $this->emitDocumentSyncRecord($document);
+            },
+        );
+    }
+
+    /** Every device learns a document's fiscal outcome. */
+    private function emitDocumentSyncRecord(FiscalDocument $document): void
+    {
+        $document->refresh();
+        SyncRecord::create([
+            'business_id' => $document->business_id,
+            'table_name' => 'fiscal_documents',
+            'record_uuid' => $document->id,
+            'operation' => 'upsert',
+            'payload' => [
+                'business_id' => $document->business_id,
+                'status' => $document->status,
+                'fiscal_receipt_id' => $document->fiscal_receipt_id,
+                'fiscal_qr_code' => $document->fiscal_qr_code,
+                'error_message' => $document->error_message,
+            ],
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+        ]);
     }
 
     /**

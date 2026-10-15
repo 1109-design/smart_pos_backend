@@ -150,6 +150,8 @@ use App\Models\TransactionTax;
 use App\Models\UnitOfMeasure;
 use App\Models\User;
 use App\Models\WarehouseBin;
+use App\Models\Zimra\FiscalDocument;
+use App\Models\Zimra\ZimraSale;
 use App\Services\Accounting\JournalBundleIngestor;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use App\Services\Payroll\PayrollSync;
@@ -213,6 +215,9 @@ class SyncProcessor
         // Append-only, same reasoning as invoice_payments — a correction is
         // a new offsetting entry, never a delete.
         'supplier_payments',
+        // A fiscal document ZIMRA holds is corrected by another note,
+        // never deleted (Phase 11.2).
+        'fiscal_documents',
         // An asset is disposed (status: disposed), never deleted — see
         // AssetPostingService::recordDisposal().
         'assets',
@@ -256,6 +261,7 @@ class SyncProcessor
         'z_reports' => ZReport::class,
         'payment_vouchers' => PaymentVoucher::class,
         'cost_centres' => CostCentre::class,
+        'fiscal_documents' => FiscalDocument::class,
         'pending_collections' => PendingCollection::class,
         'locations' => Location::class,
         'categories' => Category::class,
@@ -3656,6 +3662,10 @@ class SyncProcessor
                 $this->applyPaymentVoucher($uuid, $payload);
                 break;
 
+            case 'fiscal_documents':
+                $this->applyFiscalDocument($uuid, $payload);
+                break;
+
             case 'cost_centres':
             case 'cost_centre_defaults':
                 // Where revenue and costs are reported — owner / manager
@@ -5058,6 +5068,56 @@ class SyncProcessor
                 ]);
             }
         });
+    }
+
+    /**
+     * A fiscal document a device raised (Phase 11.2) — a customer invoice,
+     * or a credit / debit note against a fiscalised sale or invoice. Its
+     * content is fixed once ZIMRA has it; its status and fiscal fields are
+     * only ever the server's. Queued for ZIMRA like a till sale.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function applyFiscalDocument(string $uuid, array $payload): void
+    {
+        $type = $payload['document_type'] ?? '';
+        if (! in_array($type, FiscalDocument::TYPES, true)) {
+            throw new \RuntimeException('fiscal_documents: unknown document type.');
+        }
+        if ($type !== 'FiscalInvoice' && empty($payload['original_transaction_id']) && empty($payload['original_document_id'])) {
+            throw new \RuntimeException('fiscal_documents: a credit or debit note must name what it credits or debits.');
+        }
+        if ($type !== 'FiscalInvoice' && trim((string) ($payload['reason'] ?? '')) === '') {
+            throw new \RuntimeException('fiscal_documents: a credit or debit note needs a reason.');
+        }
+        $existing = FiscalDocument::find($uuid);
+        if ($existing !== null) {
+            if ((string) $existing->business_id !== (string) ($payload['business_id'] ?? '')) {
+                throw new \RuntimeException('fiscal_documents: document belongs to another business.');
+            }
+            if ($existing->status !== 'pending' || ZimraSale::where('fiscal_document_id', $uuid)->whereNotNull('zimra_response')->exists()) {
+                return; // already with ZIMRA — never changed
+            }
+        }
+        $json = fn ($v) => is_string($v) ? (json_decode($v, true) ?? []) : ($v ?? []);
+        $document = FiscalDocument::updateOrCreate(['id' => $uuid], [
+            'business_id' => $payload['business_id'],
+            'location_id' => $payload['location_id'] ?? null,
+            'document_type' => $type,
+            'source_type' => $payload['source_type'] ?? '',
+            'source_id' => (string) ($payload['source_id'] ?? $uuid),
+            'document_number' => $payload['document_number'] ?? $uuid,
+            'original_transaction_id' => $payload['original_transaction_id'] ?? null,
+            'original_document_id' => $payload['original_document_id'] ?? null,
+            'customer_id' => $payload['customer_id'] ?? null,
+            'currency_code' => $payload['currency_code'] ?? 'USD',
+            'total' => abs((float) ($payload['total'] ?? 0)),
+            'lines' => $json($payload['lines'] ?? []),
+            'payments' => $json($payload['payments'] ?? []),
+            'reason' => $payload['reason'] ?? null,
+            'status' => 'pending',
+        ]);
+        app(ZimraSalesService::class)->queueDocument($document);
     }
 
     /**

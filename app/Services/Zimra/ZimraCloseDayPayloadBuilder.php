@@ -39,12 +39,22 @@ class ZimraCloseDayPayloadBuilder
             }
 
             $currency = strtoupper((string) ($snapshot['receiptCurrency'] ?? 'USD'));
+            // Each receipt type has its own counters (spec §6): a credit
+            // note's (negative) amounts go to CreditNoteByTax /
+            // CreditNoteTaxByTax, a debit note's to DebitNote…; all of them
+            // move BalanceByMoneyType.
+            $kind = match ($snapshot['receiptType'] ?? 'FiscalInvoice') {
+                'CreditNote' => 'CreditNote',
+                'DebitNote' => 'DebitNote',
+                default => 'Sale',
+            };
 
             foreach ($snapshot['receiptTaxes'] as $tax) {
                 $taxPercent = array_key_exists('taxPercent', $tax) ? (float) $tax['taxPercent'] : null;
-                $key = ($taxPercent === null ? 'null' : (string) round($taxPercent, 2)).'_'.$currency;
+                $key = $kind.'_'.($taxPercent === null ? 'null' : (string) round($taxPercent, 2)).'_'.$currency;
 
                 $saleByTax[$key] ??= [
+                    'kind' => $kind,
                     'taxPercent' => $taxPercent,
                     'currency' => $currency,
                     'value' => 0.0,
@@ -100,10 +110,12 @@ class ZimraCloseDayPayloadBuilder
         foreach ($saleByTax as $entry) {
             $taxPercent = $entry['taxPercent'] === null ? null : (float) $entry['taxPercent'];
             $taxId = $entry['taxID'] ?? ($taxPercent === null ? 3 : 2);
+            $kind = $entry['kind'] ?? 'Sale';
 
-            if (round((float) $entry['value'], 2) > 0) {
+            // Zero counters are left out; a credit note's are negative.
+            if (round((float) $entry['value'], 2) != 0) {
                 $counter = [
-                    'fiscalCounterType' => 'SaleByTax',
+                    'fiscalCounterType' => $kind.'ByTax',
                     'fiscalCounterCurrency' => $entry['currency'],
                     'fiscalCounterTaxID' => $taxId,
                     'fiscalCounterValue' => round((float) $entry['value'], 2),
@@ -114,9 +126,9 @@ class ZimraCloseDayPayloadBuilder
                 $counters[] = $counter;
             }
 
-            if (round((float) $entry['taxAmount'], 2) > 0) {
+            if (round((float) $entry['taxAmount'], 2) != 0) {
                 $counters[] = [
-                    'fiscalCounterType' => 'SaleTaxByTax',
+                    'fiscalCounterType' => $kind.'TaxByTax',
                     'fiscalCounterCurrency' => $entry['currency'],
                     'fiscalCounterTaxID' => $taxId,
                     'fiscalCounterTaxPercent' => $taxPercent,
@@ -126,7 +138,7 @@ class ZimraCloseDayPayloadBuilder
         }
 
         foreach ($balanceByType as $entry) {
-            if (round((float) $entry['value'], 2) <= 0) {
+            if (round((float) $entry['value'], 2) == 0) {
                 continue;
             }
 
@@ -152,6 +164,10 @@ class ZimraCloseDayPayloadBuilder
         $typeOrder = [
             'SaleByTax' => 0,
             'SaleTaxByTax' => 1,
+            'CreditNoteByTax' => 2,
+            'CreditNoteTaxByTax' => 3,
+            'DebitNoteByTax' => 4,
+            'DebitNoteTaxByTax' => 5,
             'BalanceByMoneyType' => 6,
         ];
 

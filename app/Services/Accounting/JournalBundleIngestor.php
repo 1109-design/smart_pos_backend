@@ -38,7 +38,7 @@ use Illuminate\Support\Facades\DB;
 class JournalBundleIngestor
 {
     /** Source types only an owner or manager may post — see SyncProcessor. */
-    private const OWNER_OR_MANAGER_SOURCES = ['salary_payment', 'supplier_payment', 'cash_vault_drop', 'cash_vault_deposit', 'cash_vault_count', 'fx_revaluation'];
+    private const OWNER_OR_MANAGER_SOURCES = ['salary_payment', 'supplier_payment', 'cash_vault_drop', 'cash_vault_deposit', 'cash_vault_count', 'fx_revaluation', 'vat_return'];
 
     private const OWNER_ONLY_SOURCES = ['asset_acquisition', 'asset_disposal'];
 

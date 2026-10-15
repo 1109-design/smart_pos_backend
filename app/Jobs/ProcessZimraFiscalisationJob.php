@@ -57,16 +57,16 @@ class ProcessZimraFiscalisationJob implements ShouldBeUnique, ShouldQueue
             ->get();
 
         foreach ($pending as $zimraSale) {
-            $transaction = $zimraSale->transaction;
-            if (! $transaction) {
+            // A till sale's or a fiscal document's (Phase 11.2).
+            $result = $service->processPending($zimraSale);
+            if ($result === null) {
                 continue;
             }
 
-            $result = $service->processQueued($transaction);
-
             Log::info('ZIMRA sequential fiscalisation processed', [
                 'device_id' => $this->deviceId,
-                'transaction_id' => $transaction->id,
+                'transaction_id' => $zimraSale->transaction_id,
+                'fiscal_document_id' => $zimraSale->fiscal_document_id,
                 'fiscalised' => $result['fiscalised'] ?? false,
                 'message' => $result['message'] ?? null,
             ]);
