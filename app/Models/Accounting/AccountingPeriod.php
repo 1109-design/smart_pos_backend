@@ -52,6 +52,17 @@ class AccountingPeriod extends Model
         return 'finance';
     }
 
+    /** Whether the finance period covering [transDate] is locked (year end). */
+    public static function isLockedFor(string $businessId, string $transDate): bool
+    {
+        return static::where('business_id', $businessId)
+            ->where('module', 'finance')
+            ->whereRaw('DATE(period_start) <= ?', [$transDate])
+            ->whereRaw('DATE(period_end) >= ?', [$transDate])
+            ->where('status', 'locked')
+            ->exists();
+    }
+
     /**
      * Whether a journal dated [transDate] is blocked: the finance period,
      * or the given module's period, covering that date is closed or locked.

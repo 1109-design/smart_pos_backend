@@ -59,7 +59,7 @@ class JournalBundleIngestor
             $this->assertSourceAllowed($header['source_type'] ?? null, $trusted, $actingUser);
             $this->assertDevice($header, $device);
             $this->assertLines($businessId, $lines);
-            $this->assertPeriodOpen($businessId, (string) ($header['trans_date'] ?? ''), $this->moduleOf($header));
+            $this->assertPeriodOpen($businessId, (string) ($header['trans_date'] ?? ''), $this->moduleOf($header), ($header['journal_type'] ?? null) === 'year_end');
             $this->assertUnique($businessId, $journalId, $header);
             $original = $this->reversedJournal($businessId, $header);
 
@@ -242,10 +242,21 @@ class JournalBundleIngestor
         return AccountingPeriod::moduleFor($sourceType);
     }
 
-    private function assertPeriodOpen(string $businessId, string $transDate, string $module): void
+    /**
+     * The year-end closing journal is the one posting allowed into a closed
+     * — but not locked — period (it's posted just before the year locks).
+     */
+    private function assertPeriodOpen(string $businessId, string $transDate, string $module, bool $yearEnd = false): void
     {
         if ($transDate === '') {
             throw new JournalRejectedException('invalid_line', 'The journal has no date.');
+        }
+        if ($yearEnd) {
+            if (AccountingPeriod::isLockedFor($businessId, $transDate)) {
+                throw new JournalRejectedException('closed_period', "The year covering {$transDate} is already locked.");
+            }
+
+            return;
         }
         if (AccountingPeriod::isClosedFor($businessId, $transDate, $module)) {
             throw new JournalRejectedException('closed_period', "The {$module} period covering {$transDate} is closed.");

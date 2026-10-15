@@ -170,6 +170,20 @@ class AccountingPeriodSyncTest extends TestCase
         $this->assertEmpty($this->push($owner, 'journal_postings', $id, $bundle)->json('errors'));
     }
 
+    public function test_the_year_end_journal_may_post_into_a_closed_but_not_a_locked_period(): void
+    {
+        $owner = $this->tokenFor('business_owner');
+        $periodId = (string) Str::uuid();
+        $this->push($owner, 'accounting_periods', $periodId, $this->june('finance'));
+
+        [$id, $bundle] = $this->journal('year_end', '2026-06-30', ['journal_type' => 'year_end']);
+        $this->assertEmpty($this->push($owner, 'journal_postings', $id, $bundle)->json('errors'));
+
+        $this->push($owner, 'accounting_periods', $periodId, $this->june('finance', 'locked'));
+        [$id2, $bundle2] = $this->journal('year_end', '2026-06-30', ['journal_type' => 'year_end', 'posting_key' => 'year_end:x:2']);
+        $this->assertSame('closed_period', $this->push($owner, 'journal_postings', $id2, $bundle2)->json('errors.0.code'));
+    }
+
     public function test_module_rules(): void
     {
         $this->assertSame('sales', AccountingPeriod::moduleFor('sale'));
