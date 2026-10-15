@@ -55,7 +55,7 @@ class BackOfficeAccountRoleMappingsTest extends TestCase
         // NEC, employer costs, staff loans) + 4 Phase 1 roles (sales_returns,
         // sales_discount, bad_debts, change_owed_liability) — see
         // AccountRoleMappingService::ROLE_DEFAULTS.
-        $response->assertInertia(fn ($page) => $page->has('roles', 39));
+        $response->assertInertia(fn ($page) => $page->has('roles', 41));
     }
 
     public function test_manager_cannot_access_account_mappings(): void

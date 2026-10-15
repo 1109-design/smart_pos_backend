@@ -212,6 +212,12 @@ class ChartOfAccountsSeeder
         ['Expenses', 'Other Expenses', ['code' => '6045', 'name' => 'Bad Debts']],
     ];
 
+    /** Month-end revaluation (Phase 9), apart from realised gains / losses. */
+    public const PHASE9_ACCOUNTS = [
+        ['Revenue', 'Other Income', ['code' => '4025', 'name' => 'Unrealised FX Gain']],
+        ['Expenses', 'Other Expenses', ['code' => '6085', 'name' => 'Unrealised FX Loss']],
+    ];
+
     /** Payment vouchers (Phase 8): approved expense vouchers not yet paid. */
     public const PHASE8_ACCOUNTS = [
         ['Liabilities', 'Current Liabilities', ['code' => '2070', 'name' => 'Payment Vouchers Payable']],
@@ -321,6 +327,7 @@ class ChartOfAccountsSeeder
                     // supplier grants that reduce the invoice's cost.
                     ['code' => '4015', 'name' => 'Discount Received'],
                     ['code' => '4020', 'name' => 'FX Gain'],
+                    ['code' => '4025', 'name' => 'Unrealised FX Gain'],
                 ]],
             ],
         ],
@@ -357,6 +364,7 @@ class ChartOfAccountsSeeder
                     ['code' => '6070', 'name' => 'Depreciation Expense'],
                     ['code' => '6075', 'name' => 'Gain/Loss on Disposal of Assets'],
                     ['code' => '6080', 'name' => 'FX Loss'],
+                    ['code' => '6085', 'name' => 'Unrealised FX Loss'],
                 ]],
             ],
         ],

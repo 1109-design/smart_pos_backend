@@ -62,6 +62,9 @@ class AccountRoleMappingService
         // handling.
         'fx_gain' => ['category' => 'Revenue', 'subCategory' => 'Other Income', 'code' => '4020', 'name' => 'FX Gain'],
         'fx_loss' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6080', 'name' => 'FX Loss'],
+        // Month-end revaluation (Phase 9.2), reversed on day 1.
+        'fx_unrealised_gain' => ['category' => 'Revenue', 'subCategory' => 'Other Income', 'code' => '4025', 'name' => 'Unrealised FX Gain'],
+        'fx_unrealised_loss' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6085', 'name' => 'Unrealised FX Loss'],
         // A forfeited returnable-container deposit is money the business
         // keeps for good — see the Flutter side's identical note. Shares
         // '4010' Other Income rather than a new code.

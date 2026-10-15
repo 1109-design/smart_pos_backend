@@ -3504,6 +3504,10 @@ class SyncProcessor
                         'recurring_schedule_id' => $preserveInvoice('recurring_schedule_id'),
                         'notes' => $preserveInvoice('notes'),
                         'created_by_user_id' => $preserveInvoice('created_by_user_id'),
+                        // What it's owed in (Phase 9.1) — settled at its own
+                        // rate when paid in that currency.
+                        'currency_code' => $preserveInvoice('currency_code'),
+                        'exchange_rate' => $preserveInvoice('exchange_rate', 1),
                     ]
                 );
                 $this->recomputeInvoiceAmountPaid($uuid);
@@ -5373,13 +5377,23 @@ class SyncProcessor
             ->where('is_gl_posted', true)
             ->get(['total', 'unallocated_amount'])
             ->sum(fn ($n) => max(0, (float) $n->total - (float) $n->unallocated_amount));
-        $amountPaid = max(0, InvoicePayment::where('invoice_id', $invoiceId)->sum('base_equivalent')
-            + CustomerReceiptAllocation::where('invoice_id', $invoiceId)->sum('allocated_amount')
-            + $credited);
         $invoice = Invoice::find($invoiceId);
         if (! $invoice) {
             return;
         }
+        // A foreign invoice paid in its own currency is settled at the
+        // invoice's rate (Phase 9.1) — the gap to what came in is a
+        // realised gain or loss on the device's journal, not a shortfall.
+        $baseCurrency = Business::whereKey($invoice->business_id)->value('currency_code') ?? 'USD';
+        $invoiceCurrency = $invoice->currency_code ?: $baseCurrency;
+        $invoiceRate = (float) ($invoice->exchange_rate ?? 1);
+        $paid = InvoicePayment::where('invoice_id', $invoiceId)->get(['amount', 'currency_code', 'base_equivalent'])
+            ->sum(fn ($p) => $invoiceCurrency !== $baseCurrency && $p->currency_code === $invoiceCurrency && $invoiceRate > 0
+                ? round((float) $p->amount / $invoiceRate, 4)
+                : (float) $p->base_equivalent);
+        $amountPaid = max(0, $paid
+            + CustomerReceiptAllocation::where('invoice_id', $invoiceId)->sum('allocated_amount')
+            + $credited);
 
         $update = ['amount_paid' => $amountPaid];
 
