@@ -101,7 +101,7 @@ class DeviceAuthController extends Controller
 
         $token = $owner->createToken($data['device_name'], ['*'], now()->addDays(90));
 
-        Device::create([
+        $device = Device::create([
             'tenant_id' => $tenant->id,
             'name' => $data['device_name'],
             'device_identifier' => $data['device_identifier'],
@@ -112,6 +112,8 @@ class DeviceAuthController extends Controller
 
         return response()->json([
             'token' => $token->plainTextToken,
+            // Prefix of every document number this device issues offline.
+            'device_code' => $device->device_code,
             'user' => [
                 'id' => $owner->id,
                 'name' => $owner->name,
@@ -200,6 +202,8 @@ class DeviceAuthController extends Controller
 
         return response()->json([
             'token' => $token->plainTextToken,
+            // Prefix of every document number this device issues offline.
+            'device_code' => $device->device_code,
             'user' => [
                 'id' => $user->id,
                 'name' => $user->name,
@@ -291,6 +295,8 @@ class DeviceAuthController extends Controller
 
         return response()->json([
             'token' => $token->plainTextToken,
+            // Prefix of every document number this device issues offline.
+            'device_code' => $device->device_code,
             'user' => [
                 'id' => $user->id,
                 'name' => $user->name,
@@ -418,6 +424,8 @@ class DeviceAuthController extends Controller
 
         return response()->json([
             'token' => $token->plainTextToken,
+            // Prefix of every document number this device issues offline.
+            'device_code' => $device->device_code,
             'user' => [
                 'id' => $user->id,
                 'name' => $user->name,

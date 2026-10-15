@@ -635,6 +635,9 @@ class SyncController extends Controller
             'records' => $this->sanitizeApprovalPayloadJson($records),
             'has_more' => $records->count() === $limit,
             'server_time' => $serverTime->toIso8601String(),
+            // Every pull carries this device's code, so devices registered
+            // before codes existed pick theirs up without re-activating.
+            'device_code' => $device?->device_code,
             // See detectReconciliationRequired() — non-empty means the
             // client's own claimed cursor for one of the requested tables
             // doesn't match anything this server ever actually delivered to

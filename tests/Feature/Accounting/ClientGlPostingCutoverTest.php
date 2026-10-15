@@ -19,6 +19,7 @@ use App\Models\User;
 use App\Services\Accounting\ChartOfAccountsSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
+use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
 
 /**
@@ -208,6 +209,55 @@ class ClientGlPostingCutoverTest extends TestCase
 
         $this->assertNotEmpty($response->json('errors'), 'pushing a line against another business\'s gl_account must be rejected');
         $this->assertCount(0, JournalLine::where('journal_header_id', $headerId)->get());
+    }
+
+    private function pushHeader(string $token, string $tenantId, string $id, array $extra): TestResponse
+    {
+        return $this->withHeader('Authorization', 'Bearer '.$token)->postJson('/api/v1/sync/push', ['records' => [[
+            'table' => 'journal_headers', 'uuid' => $id, 'operation' => 'upsert', 'payload' => [
+                'business_id' => $tenantId, 'trans_date' => '2026-06-10', 'status' => 'posted',
+                'source_type' => 'expense', 'source_id' => 'exp-1',
+                ...$extra,
+            ],
+            'updated_at' => now()->toIso8601String(),
+        ]]])->assertOk();
+    }
+
+    public function test_a_pushed_journal_keeps_its_posting_key_device_and_type(): void
+    {
+        $tenantId = 'tenant-posting-fields';
+        $token = $this->actingDeviceToken($tenantId, '2026-06-01 00:00:00');
+        $id = (string) Str::uuid();
+
+        $this->pushHeader($token, $tenantId, $id, [
+            'journal_number' => 'JNL-001-202606-0001',
+            'posting_key' => 'expense:exp-1:post',
+            'journal_type' => 'general',
+            'posted_device_id' => 'device-uuid',
+            'currency_code' => 'USD',
+            'exchange_rate' => 1,
+        ]);
+
+        $header = JournalHeader::find($id);
+        $this->assertSame('expense:exp-1:post', $header->posting_key);
+        $this->assertSame('general', $header->journal_type);
+        $this->assertSame('device-uuid', $header->posted_device_id);
+    }
+
+    public function test_a_second_journal_with_the_same_posting_key_is_rejected_as_a_duplicate(): void
+    {
+        $tenantId = 'tenant-posting-dup';
+        $token = $this->actingDeviceToken($tenantId, '2026-06-01 00:00:00');
+
+        $this->pushHeader($token, $tenantId, (string) Str::uuid(), [
+            'journal_number' => 'JNL-001-202606-0001', 'posting_key' => 'expense:exp-1:post',
+        ]);
+        $response = $this->pushHeader($token, $tenantId, (string) Str::uuid(), [
+            'journal_number' => 'JNL-002-202606-0001', 'posting_key' => 'expense:exp-1:post',
+        ]);
+
+        $this->assertStringContainsString('posting key expense:exp-1:post', (string) $response->json('errors.0.reason'));
+        $this->assertSame(1, JournalHeader::where('business_id', $tenantId)->count());
     }
 
     public function test_set_client_gl_posting_enabled_command_publishes_a_pullable_sync_record(): void

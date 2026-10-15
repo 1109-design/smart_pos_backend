@@ -111,6 +111,9 @@ class SubscriptionActivationTest extends TestCase
         $response->assertJsonStructure(['token', 'user', 'business', 'server_time']);
         $this->assertNotEmpty($response->json('token'));
         $this->assertSame('pro', $response->json('business.tier'));
+        // The device learns its document-number prefix on activation.
+        $this->assertSame($device->fresh()->device_code, $response->json('device_code'));
+        $this->assertNotNull($response->json('device_code'));
         $this->assertNotNull($response->json('business.subscription_valid_until'));
 
         // The device is un-revoked and the subscription revived.

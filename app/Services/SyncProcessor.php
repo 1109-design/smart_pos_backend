@@ -3694,12 +3694,26 @@ class SyncProcessor
                             'reversed_by_user_id' => $payload['reversed_by_user_id'] ?? null,
                             'reversal_of_journal_id' => $payload['reversal_of_journal_id'] ?? null,
                             'location_id' => $payload['location_id'] ?? null,
+                            'posting_key' => $payload['posting_key'] ?? null,
+                            'journal_type' => $payload['journal_type'] ?? 'system',
+                            'batch_id' => $payload['batch_id'] ?? null,
+                            'corrects_journal_id' => $payload['corrects_journal_id'] ?? null,
+                            'auto_reverse_date' => $payload['auto_reverse_date'] ?? null,
+                            'posted_device_id' => $payload['posted_device_id'] ?? null,
+                            'cost_centre_id' => $payload['cost_centre_id'] ?? null,
+                            'currency_code' => $payload['currency_code'] ?? null,
+                            'exchange_rate' => $payload['exchange_rate'] ?? 1,
                         ]
                     );
                 } catch (QueryException $e) {
                     if ($idempotencyKey !== null && $this->isUniqueConstraintViolation($e)
                         && JournalHeader::where('idempotency_key', $idempotencyKey)->where('id', '!=', $uuid)->exists()) {
                         throw new \RuntimeException("journal_headers: a journal already exists for {$sourceType}:{$sourceId} — refusing to post a duplicate.");
+                    }
+                    $postingKey = $payload['posting_key'] ?? null;
+                    if ($postingKey !== null && $this->isUniqueConstraintViolation($e)
+                        && JournalHeader::where('business_id', $businessId)->where('posting_key', $postingKey)->where('id', '!=', $uuid)->exists()) {
+                        throw new \RuntimeException("journal_headers: a journal already exists for posting key {$postingKey} — refusing to post a duplicate.");
                     }
                     throw $e;
                 }
@@ -3729,6 +3743,8 @@ class SyncProcessor
                         'party_type' => $payload['party_type'] ?? null,
                         'party_id' => $payload['party_id'] ?? null,
                         'description' => $payload['description'] ?? null,
+                        'cost_centre_id' => $payload['cost_centre_id'] ?? null,
+                        'line_no' => $payload['line_no'] ?? 0,
                     ]
                 );
                 break;
@@ -3766,6 +3782,7 @@ class SyncProcessor
                         'reconciled_at' => $payload['reconciled_at'] ?? null,
                         'bank_reconciliation_id' => $payload['bank_reconciliation_id'] ?? null,
                         'location_id' => $payload['location_id'] ?? null,
+                        'cost_centre_id' => $payload['cost_centre_id'] ?? null,
                     ]
                 );
 

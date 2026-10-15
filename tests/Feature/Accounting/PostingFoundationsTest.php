@@ -6,6 +6,7 @@ use App\Models\Accounting\JournalHeader;
 use App\Models\Business;
 use App\Models\Device;
 use App\Models\Tenant;
+use App\Models\User;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
@@ -69,6 +70,21 @@ class PostingFoundationsTest extends TestCase
         $moving->update(['tenant_id' => 'biz-a']);
 
         $this->assertSame('002', $moving->fresh()->device_code);
+    }
+
+    public function test_every_pull_tells_the_device_its_code(): void
+    {
+        $this->tenant('biz-a');
+        $this->device('biz-a');
+        $user = User::factory()->create(['business_id' => 'biz-a']);
+        $plain = $user->createToken('sync-test')->plainTextToken;
+        $device = $this->device('biz-a');
+        $device->update(['token_id' => (int) explode('|', $plain)[0]]);
+
+        $this->withHeader('Authorization', 'Bearer '.$plain)
+            ->getJson('/api/v1/sync/pull?'.http_build_query(['tables' => ['tills']]))
+            ->assertOk()
+            ->assertJsonPath('device_code', '002');
     }
 
     public function test_codes_continue_in_base_36_past_nine(): void
