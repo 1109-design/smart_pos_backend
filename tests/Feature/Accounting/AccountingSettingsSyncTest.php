@@ -97,6 +97,40 @@ class AccountingSettingsSyncTest extends TestCase
         $this->assertGreaterThanOrEqual(1, $fanOut);
     }
 
+    public function test_the_offline_posting_rule_is_stored_and_fanned_out(): void
+    {
+        $tenantId = 'tenant-acct-offline-rule';
+        [$owner] = $this->seedBusiness($tenantId);
+        $this->assertSame(24, Business::find($tenantId)->accounting_offline_window_hours);
+
+        $this->push($this->token($tenantId, $owner), $tenantId, [
+            'accounting_go_live_date' => '2026-09-01',
+            'offline_window_hours' => 12,
+            'period_end_guard_days' => 5,
+        ]);
+
+        $business = Business::find($tenantId);
+        $this->assertSame(12, $business->accounting_offline_window_hours);
+        $this->assertSame(5, $business->accounting_period_end_guard_days);
+        $fanOut = SyncRecord::where('table_name', 'accounting_settings')
+            ->where('record_uuid', $tenantId)
+            ->where('payload->offline_window_hours', 12)
+            ->where('payload->period_end_guard_days', 5)
+            ->count();
+        $this->assertGreaterThanOrEqual(1, $fanOut);
+    }
+
+    public function test_an_older_device_that_omits_the_offline_rule_keeps_it(): void
+    {
+        $tenantId = 'tenant-acct-offline-keep';
+        [$owner] = $this->seedBusiness($tenantId);
+        Business::find($tenantId)->update(['accounting_offline_window_hours' => 6]);
+
+        $this->push($this->token($tenantId, $owner), $tenantId, ['accounting_go_live_date' => '2026-09-01']);
+
+        $this->assertSame(6, Business::find($tenantId)->accounting_offline_window_hours);
+    }
+
     public function test_cashier_activation_is_rejected(): void
     {
         $tenantId = 'tenant-acct-cashier';

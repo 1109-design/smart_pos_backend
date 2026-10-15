@@ -36,6 +36,8 @@ class Business extends Model
         'workflow_settings',
         'accounting_go_live_date',
         'client_gl_posting_enabled_at',
+        'accounting_offline_window_hours',
+        'accounting_period_end_guard_days',
     ];
 
     protected function casts(): array
@@ -94,6 +96,8 @@ class Business extends Model
                 'business_id' => $this->id,
                 'accounting_go_live_date' => $this->accounting_go_live_date?->toDateString(),
                 'client_gl_posting_enabled_at' => $this->client_gl_posting_enabled_at?->toIso8601String(),
+                'offline_window_hours' => $this->accounting_offline_window_hours,
+                'period_end_guard_days' => $this->accounting_period_end_guard_days,
             ],
             'source_updated_at' => now(),
             'synced_at' => now(),

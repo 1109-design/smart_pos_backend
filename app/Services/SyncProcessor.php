@@ -1467,6 +1467,12 @@ class SyncProcessor
                     'client_gl_posting_enabled_at' => array_key_exists('client_gl_posting_enabled_at', $payload)
                         ? $payload['client_gl_posting_enabled_at']
                         : $business->client_gl_posting_enabled_at,
+                    'accounting_offline_window_hours' => isset($payload['offline_window_hours'])
+                        ? max(0, (int) $payload['offline_window_hours'])
+                        : $business->accounting_offline_window_hours,
+                    'accounting_period_end_guard_days' => isset($payload['period_end_guard_days'])
+                        ? max(0, (int) $payload['period_end_guard_days'])
+                        : $business->accounting_period_end_guard_days,
                 ]);
 
                 // Fan out to every other till so the whole fleet converges
