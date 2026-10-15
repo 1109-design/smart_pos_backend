@@ -59,7 +59,7 @@ class JournalBundleIngestor
             $this->assertSourceAllowed($header['source_type'] ?? null, $trusted, $actingUser);
             $this->assertDevice($header, $device);
             $this->assertLines($businessId, $lines);
-            $this->assertPeriodOpen($businessId, (string) ($header['trans_date'] ?? ''));
+            $this->assertPeriodOpen($businessId, (string) ($header['trans_date'] ?? ''), $this->moduleOf($header));
             $this->assertUnique($businessId, $journalId, $header);
             $original = $this->reversedJournal($businessId, $header);
 
@@ -227,13 +227,28 @@ class JournalBundleIngestor
         }
     }
 
-    private function assertPeriodOpen(string $businessId, string $transDate): void
+    /**
+     * The module a journal belongs to — a reversal takes its original's.
+     *
+     * @param  array<string, mixed>  $header
+     */
+    private function moduleOf(array $header): string
+    {
+        $sourceType = $header['source_type'] ?? null;
+        if (! empty($header['reversal_of_journal_id'])) {
+            $sourceType = JournalHeader::where('id', $header['reversal_of_journal_id'])->value('source_type') ?? $sourceType;
+        }
+
+        return AccountingPeriod::moduleFor($sourceType);
+    }
+
+    private function assertPeriodOpen(string $businessId, string $transDate, string $module): void
     {
         if ($transDate === '') {
             throw new JournalRejectedException('invalid_line', 'The journal has no date.');
         }
-        if (AccountingPeriod::isClosedFor($businessId, $transDate)) {
-            throw new JournalRejectedException('closed_period', "The accounting period covering {$transDate} is closed.");
+        if (AccountingPeriod::isClosedFor($businessId, $transDate, $module)) {
+            throw new JournalRejectedException('closed_period', "The {$module} period covering {$transDate} is closed.");
         }
     }
 

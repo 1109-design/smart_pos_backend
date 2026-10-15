@@ -3584,6 +3584,10 @@ class SyncProcessor
                 );
                 break;
 
+            case 'accounting_periods':
+                $this->applyAccountingPeriod($uuid, $payload, $trusted, $actingUser);
+                break;
+
                 // Client-posted journals — a plain mirror. The client (Flutter,
                 // once cut over via client_gl_posting_enabled_at) has already
                 // computed and "posted" this journal locally; Laravel never
@@ -4693,6 +4697,68 @@ class SyncProcessor
      * bank-account creation and must keep working for a manager, not just
      * an owner.
      */
+    /**
+     * An accounting period closed, reopened or locked on a device (Phase 2).
+     * The device that approved it pushes it; this checks the change is
+     * allowed and stores it, and the generic relay sends it to every other
+     * device. Allowed when the pushing user holds the close/reopen
+     * permission, or the change carries an approved period_close /
+     * period_reopen request for this business (the approver signed in on a
+     * till logged in as someone else). A locked period (year end) never
+     * changes again; a stale change (older updated_at) is ignored.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function applyAccountingPeriod(string $uuid, array $payload, bool $trusted, ?User $actingUser): void
+    {
+        $businessId = (string) ($payload['business_id'] ?? '');
+        $module = $payload['module'] ?? 'finance';
+        $status = $payload['status'] ?? 'open';
+        if (! in_array($module, AccountingPeriod::MODULES, true) || ! in_array($status, ['open', 'closed', 'locked'], true)) {
+            throw new \RuntimeException('accounting_periods: unknown module or status.');
+        }
+
+        $existing = AccountingPeriod::find($uuid);
+        if ($existing !== null && (string) $existing->business_id !== $businessId) {
+            throw new \RuntimeException('accounting_periods: period belongs to another business.');
+        }
+        if ($existing?->status === 'locked' && $status !== 'locked') {
+            throw new \RuntimeException('accounting_periods: a period locked by year end cannot be reopened.');
+        }
+        $incomingAt = isset($payload['updated_at']) ? Carbon::parse($payload['updated_at']) : null;
+        if ($existing && $incomingAt && $existing->updated_at && $incomingAt->lt($existing->updated_at)) {
+            return;
+        }
+
+        $changesStatus = ($existing?->status ?? 'open') !== $status;
+        if (! $trusted && $changesStatus) {
+            $reopening = $status === 'open';
+            $permission = $reopening ? BackOfficePermission::FINANCE_PERIOD_REOPEN : BackOfficePermission::FINANCE_PERIOD_CLOSE;
+            $approved = ! empty($payload['approval_request_id']) && ApprovalRequest::where('id', $payload['approval_request_id'])
+                ->where('business_id', $businessId)
+                ->where('status', 'approved')
+                ->whereIn('action', $reopening ? ['period_reopen'] : ['period_close', 'year_end_close'])
+                ->exists();
+            $actingRole = $actingUser?->getRoleNames()->first();
+            if (! $approved && ! app(BackOfficeAuthorizer::class)->can($businessId, $actingRole, $permission)) {
+                throw new \RuntimeException('accounting_periods: '.($reopening ? 'reopening' : 'closing').' a period needs approval or the '.$permission.' permission.');
+            }
+        }
+
+        AccountingPeriod::updateOrCreate(['id' => $uuid], [
+            'business_id' => $businessId,
+            'module' => $module,
+            'period_start' => $payload['period_start'],
+            'period_end' => $payload['period_end'],
+            'status' => $status,
+            'closed_at' => $payload['closed_at'] ?? null,
+            'closed_by_user_id' => $payload['closed_by_user_id'] ?? null,
+            'closed_by_device_id' => $payload['closed_by_device_id'] ?? null,
+            'reopened_at' => $payload['reopened_at'] ?? null,
+            'reopened_by_user_id' => $payload['reopened_by_user_id'] ?? null,
+        ]);
+    }
+
     private function requireOwnerOrManager(?User $actingUser, string $context): void
     {
         $actingRole = $actingUser?->getRoleNames()->first();
