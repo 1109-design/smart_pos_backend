@@ -4,6 +4,7 @@ namespace Tests\Feature\Accounting;
 
 use App\Models\Accounting\GeneralLedgerEntry;
 use App\Models\Accounting\IntegrityCheckRun;
+use App\Models\Accounting\JournalTemplate;
 use App\Models\AuditLog;
 use App\Models\Business;
 use App\Models\Device;
@@ -113,5 +114,25 @@ class IntegrityAndAuditTest extends TestCase
         $this->assertFalse($run->ok);
         $failed = collect($run->findings)->where('ok', false)->pluck('check')->all();
         $this->assertContains('trial_balance', $failed);
+    }
+
+    public function test_a_template_schedule_syncs_without_losing_the_template(): void
+    {
+        $id = (string) Str::uuid();
+        $this->push('journal_templates', $id, [
+            'business_id' => self::BIZ, 'name' => 'Rent', 'journal_type' => 'general',
+            'lines' => [['line_type' => 'gl', 'debit' => 500]],
+        ]);
+        $this->push('journal_templates', $id, [
+            'business_id' => self::BIZ, 'recur_frequency' => 'monthly',
+            'recur_next_date' => '2026-11-01', 'recur_active' => true,
+        ]);
+
+        $template = JournalTemplate::findOrFail($id);
+        $this->assertSame('Rent', $template->name);
+        $this->assertCount(1, $template->lines);
+        $this->assertSame('monthly', $template->recur_frequency);
+        $this->assertTrue($template->recur_active);
+        $this->assertSame('2026-11-01', $template->recur_next_date->toDateString());
     }
 }

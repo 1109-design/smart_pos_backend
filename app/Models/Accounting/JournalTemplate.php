@@ -12,11 +12,11 @@ class JournalTemplate extends Model
 
     protected $fillable = [
         'id', 'business_id', 'name', 'journal_type', 'narration', 'lines',
-        'created_by_user_id',
+        'created_by_user_id', 'recur_frequency', 'recur_next_date', 'recur_end_date', 'recur_active',
     ];
 
     protected function casts(): array
     {
-        return ['lines' => 'array'];
+        return ['lines' => 'array', 'recur_next_date' => 'date', 'recur_end_date' => 'date', 'recur_active' => 'boolean'];
     }
 }

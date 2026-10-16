@@ -3737,13 +3737,29 @@ class SyncProcessor
                 break;
 
             case 'journal_templates':
+                $existingTemplate = JournalTemplate::find($uuid);
+                // A schedule change may arrive without the rest of the
+                // template, and vice versa — keep what the payload leaves out.
+                $keep = fn (string $key, $default = null) => array_key_exists($key, $payload)
+                    ? $payload[$key]
+                    : ($existingTemplate?->{$key} ?? $default);
+                $frequency = $keep('recur_frequency');
+                if ($frequency !== null && ! in_array($frequency, ['weekly', 'monthly', 'quarterly'], true)) {
+                    throw new \RuntimeException('journal_templates: unknown repeat frequency.');
+                }
                 JournalTemplate::updateOrCreate(['id' => $uuid], [
                     'business_id' => $payload['business_id'],
-                    'name' => $payload['name'] ?? '',
-                    'journal_type' => $payload['journal_type'] ?? 'general',
-                    'narration' => $payload['narration'] ?? null,
-                    'lines' => is_string($payload['lines'] ?? null) ? json_decode($payload['lines'], true) : ($payload['lines'] ?? []),
-                    'created_by_user_id' => $payload['created_by_user_id'] ?? null,
+                    'name' => $keep('name', ''),
+                    'journal_type' => $keep('journal_type', 'general'),
+                    'narration' => $keep('narration'),
+                    'lines' => array_key_exists('lines', $payload)
+                        ? (is_string($payload['lines']) ? json_decode($payload['lines'], true) : ($payload['lines'] ?? []))
+                        : ($existingTemplate?->lines ?? []),
+                    'created_by_user_id' => $keep('created_by_user_id'),
+                    'recur_frequency' => $frequency,
+                    'recur_next_date' => $keep('recur_next_date'),
+                    'recur_end_date' => $keep('recur_end_date'),
+                    'recur_active' => (bool) $keep('recur_active', false),
                 ]);
                 break;
 
