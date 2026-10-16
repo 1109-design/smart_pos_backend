@@ -2,6 +2,8 @@
 
 namespace App\Providers;
 
+use App\Observers\AuditObserver;
+use App\Services\Audit\ServerAudit;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
@@ -23,6 +25,13 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        // Server-side changes to master data and financial documents go
+        // into the audit trail (Phase 12.2); device pushes are audited on
+        // the device.
+        foreach (ServerAudit::auditedModels() as $model) {
+            $model::observe(AuditObserver::class);
+        }
+
         Vite::prefetch(concurrency: 3);
 
         // PIN/activation-code brute force protection for POS device auth

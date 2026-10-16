@@ -77,6 +77,9 @@ class IntegrityCheckService
                 ->sum('a.amount'),
             debitNormal: false);
 
+        $out[] = $this->inventoryVsStock($businessId);
+        $out[] = $this->cashVsPayments($businessId);
+
         $business = Business::find($businessId);
         $clearing = DB::table('gl_accounts')->where('business_id', $businessId)->where('code', '3025')->value('id');
         if ($business?->take_on_finalised_at && $clearing) {
@@ -105,6 +108,93 @@ class IntegrityCheckService
             'findings' => $findings,
             'ran_at' => now(),
         ]);
+    }
+
+    /** A role's account: the business's mapping, else the default code. */
+    private function roleAccount(string $businessId, string $role, string $code): ?string
+    {
+        return DB::table('account_role_mappings')->where('business_id', $businessId)->where('role', $role)->value('gl_account_id')
+            ?? DB::table('gl_accounts')->where('business_id', $businessId)->where('code', $code)->value('id');
+    }
+
+    /**
+     * Inventory accounts against stock on hand at cost — the same
+     * comparison the device makes (StockReportService.stockVsLedger).
+     *
+     * @return array{check: string, ok: bool, detail: string, difference: float}
+     */
+    private function inventoryVsStock(string $businessId): array
+    {
+        $accounts = DB::table('gl_accounts')->where('business_id', $businessId)->where('control_type', 'inventory')->pluck('id');
+        if ($role = $this->roleAccount($businessId, 'inventory', '1200')) {
+            $accounts->push($role);
+        }
+        $ledger = (float) DB::table('general_ledger')->whereIn('gl_account_id', $accounts->unique())
+            ->selectRaw('COALESCE(SUM(debit - credit), 0) AS b')->value('b');
+        $stock = (float) DB::table('products')->where('business_id', $businessId)->where('track_stock', true)
+            ->selectRaw('COALESCE(SUM(stock_quantity * cost_price), 0) AS v')->value('v');
+        $variance = round($stock - $ledger, 2);
+
+        return $this->finding('inventory', abs($variance) < self::TOLERANCE, $variance,
+            abs($variance) < self::TOLERANCE ? 'Stock on hand at cost agrees with the inventory accounts.' : "Stock on hand at cost differs from the inventory accounts by {$variance}.");
+    }
+
+    /**
+     * What sales put into cash, bank and mobile money accounts against the
+     * payments behind them — the same comparison the device makes
+     * (CashPaymentsReconciliationService).
+     *
+     * @return array{check: string, ok: bool, detail: string, difference: float}
+     */
+    private function cashVsPayments(string $businessId): array
+    {
+        $cash = $this->roleAccount($businessId, 'default_cash', '1000');
+        $bank = $this->roleAccount($businessId, 'default_bank', '1010');
+        $mobile = $this->roleAccount($businessId, 'default_mobile_money', '1020');
+        $named = DB::table('bank_accounts')->where('business_id', $businessId)->pluck('gl_account_id', 'id');
+        $accounts = collect([$cash, $bank, $mobile])->merge($named->values())
+            ->merge(DB::table('payment_method_configs')->where('business_id', $businessId)->whereNotNull('gl_account_id')->pluck('gl_account_id'))
+            ->filter()->unique()->values();
+        if ($accounts->isEmpty()) {
+            return $this->finding('cash', true, 0, 'No cash or bank accounts to check.');
+        }
+
+        $voided = DB::table('transactions')->where('business_id', $businessId)->where('status', 'voided')->pluck('id');
+        $journals = DB::table('journal_headers')->where('business_id', $businessId)
+            ->where('source_type', 'sale')->where('status', 'posted')
+            ->whereNotIn('source_id', $voided)->pluck('id');
+        $ledger = (float) DB::table('general_ledger')->whereIn('journal_header_id', $journals)
+            ->whereIn('gl_account_id', $accounts)->selectRaw('COALESCE(SUM(debit - credit), 0) AS b')->value('b');
+
+        $payments = DB::table('payments as p')->join('transactions as t', 't.id', '=', 'p.transaction_id')
+            ->where('t.business_id', $businessId)->where('t.status', '!=', 'voided')
+            ->get(['p.method', 'p.base_equivalent', 'p.gl_account_id', 'p.bank_account_id', 't.total']);
+        $subledger = 0.0;
+        foreach ($payments as $p) {
+            $method = strtolower(trim((string) $p->method));
+            if (in_array($method, ['exchange_credit', 'legacy_deposit'], true) || $method === 'credit' || str_starts_with($method, 'credit ')) {
+                continue;
+            }
+            $isBank = in_array($method, ['bank_transfer', 'bank transfer', 'bank', 'transfer'], true) || str_starts_with($method, 'bank transfer');
+            $isCard = ! $isBank && ! str_starts_with($method, 'cash') && (str_contains($method, 'card') || str_contains($method, 'swipe'));
+            $isMobile = ! $isBank && ! $isCard && ! str_starts_with($method, 'cash') && (str_contains($method, 'ecocash') || str_contains($method, 'mobile'));
+            $target = $p->gl_account_id && $accounts->contains($p->gl_account_id) ? $p->gl_account_id : null;
+            if ($target === null) {
+                $target = match (true) {
+                    $isBank || $isCard => ($p->bank_account_id && $accounts->contains($named[$p->bank_account_id] ?? null)) ? $named[$p->bank_account_id] : $bank,
+                    $isMobile => $mobile,
+                    default => $cash,
+                };
+            }
+            if ($target === null || ! $accounts->contains($target)) {
+                continue;
+            }
+            $subledger += ((float) $p->total < 0 ? -1 : 1) * (float) $p->base_equivalent;
+        }
+        $variance = round($ledger - $subledger, 2);
+
+        return $this->finding('cash', abs($variance) < self::TOLERANCE, $variance,
+            abs($variance) < self::TOLERANCE ? 'Sales takings agree with the cash and bank accounts.' : "Sales takings differ from the cash and bank accounts by {$variance}.");
     }
 
     /**

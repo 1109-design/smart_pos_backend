@@ -155,6 +155,7 @@ use App\Models\Zimra\FiscalDocument;
 use App\Models\Zimra\ZimraSale;
 use App\Services\Accounting\JournalBundleIngestor;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
+use App\Services\Audit\ServerAudit;
 use App\Services\Payroll\PayrollSync;
 use App\Services\Zimra\ZimraSalesService;
 use App\Support\BackOfficePermission;
@@ -445,7 +446,23 @@ class SyncProcessor
      *                         server-authored (BackOffice controllers, artisan
      *                         commands), so the default is true.
      */
+    /**
+     * The model class a synced table is stored in, if any.
+     *
+     * @return class-string|null
+     */
+    public static function modelFor(string $table): ?string
+    {
+        return self::TENANT_SCOPED_MODELS[$table] ?? null;
+    }
+
     public function process(string $table, string $uuid, string $operation, array $payload, bool $trusted = true, ?User $actingUser = null, ?Device $device = null): void
+    {
+        // The device audited this change itself (Phase 12.2).
+        ServerAudit::asDeviceSync(fn () => $this->processPush($table, $uuid, $operation, $payload, $trusted, $actingUser, $device));
+    }
+
+    private function processPush(string $table, string $uuid, string $operation, array $payload, bool $trusted, ?User $actingUser, ?Device $device): void
     {
         // A device-posted journal, header and lines together — validated
         // and stored whole, or rejected whole. See JournalBundleIngestor.
