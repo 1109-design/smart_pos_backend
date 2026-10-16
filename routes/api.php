@@ -1,11 +1,12 @@
 <?php
 
 use App\Http\Controllers\Api\AppReleaseController;
+use App\Http\Controllers\Api\AuditController;
 use App\Http\Controllers\Api\BackOfficeAccessController;
 use App\Http\Controllers\Api\BusinessBrandingController;
 use App\Http\Controllers\Api\DeviceAuthController;
-use App\Http\Controllers\Api\DeviceOverviewController;
 use App\Http\Controllers\Api\DeviceDbSnapshotController;
+use App\Http\Controllers\Api\DeviceOverviewController;
 use App\Http\Controllers\Api\LocalSyncConflictController;
 use App\Http\Controllers\Api\LocationController;
 use App\Http\Controllers\Api\PayrollPeriodLockController;
@@ -64,6 +65,11 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::get('sync/diagnostics/db-snapshots/{id}/download', [DeviceDbSnapshotController::class, 'download'])->whereNumber('id');
     Route::post('sync/diagnostics/db-snapshots/{id}/chunks', [DeviceDbSnapshotController::class, 'chunk'])->whereNumber('id');
     Route::post('sync/diagnostics/db-snapshots/{id}/complete', [DeviceDbSnapshotController::class, 'complete'])->whereNumber('id');
+
+    // The owner's audit trail — every device uploads, the app reads it back
+    // (who may open it is the app's reportsAudit permission). Append-only.
+    Route::post('audit/push', [AuditController::class, 'push']);
+    Route::get('audit', [AuditController::class, 'index']);
 
     // Back Office access — portal details + owner/manager password set/reset
     Route::get('backoffice/info', [BackOfficeAccessController::class, 'info']);
