@@ -179,13 +179,26 @@ class ManualJournalSyncTest extends TestCase
         $id = (string) Str::uuid();
         $this->push($owner, 'manual_journals', $id, $this->journal('submitted'));
 
+        // Arriving before the journal's approval: held, not rejected.
+        [$ledgerId, $bundle] = $this->ledgerBundle($id);
+        $early = $this->push($owner, 'journal_postings', $ledgerId, $bundle);
+        $this->assertEmpty($early->json('errors'));
+        $this->assertCount(1, $early->json('deferred'));
+        $this->assertNull(JournalHeader::find($ledgerId));
+
+        // The approval lands and the held ledger journal posts by itself.
+        $this->push($owner, 'manual_journals', $id, $this->journal('posted', extra: ['updated_at' => now()->addMinute()->toIso8601String()]));
+        $this->assertSame('posted', JournalHeader::findOrFail($ledgerId)->status);
+    }
+
+    public function test_a_rejected_journal_never_posts_its_ledger_journal(): void
+    {
+        $owner = $this->tokenFor('business_owner');
+        $id = (string) Str::uuid();
+        $this->push($owner, 'manual_journals', $id, $this->journal('rejected'));
+
         [$ledgerId, $bundle] = $this->ledgerBundle($id);
         $this->assertSame('forbidden', $this->push($owner, 'journal_postings', $ledgerId, $bundle)->json('errors.0.code'));
-
-        $this->push($owner, 'manual_journals', $id, $this->journal('posted', extra: ['updated_at' => now()->addMinute()->toIso8601String()]));
-        [$ledgerId, $bundle] = $this->ledgerBundle($id);
-        $this->assertEmpty($this->push($owner, 'journal_postings', $ledgerId, $bundle)->json('errors'));
-        $this->assertSame('posted', JournalHeader::findOrFail($ledgerId)->status);
     }
 
     public function test_only_a_draft_can_be_deleted(): void

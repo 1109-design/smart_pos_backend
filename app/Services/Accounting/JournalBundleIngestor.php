@@ -337,8 +337,14 @@ class JournalBundleIngestor
         if ($journal === null) {
             throw new MissingParentRecordException('journal_postings: the manual journal has not arrived yet.');
         }
-        if ((string) $journal->business_id !== $businessId || ! in_array($journal->status, ManualJournal::APPROVED, true)) {
+        if ((string) $journal->business_id !== $businessId || $journal->status === 'rejected') {
             throw new JournalRejectedException('forbidden', "Journal {$journal->document_number} has not been approved.");
+        }
+        // Approved on the device in the same sync window: the ledger journal
+        // can arrive before the journal's own 'posted' status. Defer rather
+        // than reject — it replays once the status lands.
+        if (! in_array($journal->status, ManualJournal::APPROVED, true)) {
+            throw new MissingParentRecordException("journal_postings: journal {$journal->document_number} isn't approved here yet.");
         }
     }
 
