@@ -104,6 +104,23 @@ class ReportsController extends BackOfficeController
             ->groupBy('payments.method')
             ->orderByDesc('total')
             ->get();
+// ── Additional payment aggregations for X/Z reports �n// Credit sales, lay‑by sales, and change‑owed are needed for the X/Z report specifications.
+// These values are derived from the payment methods query above (or a separate simple aggregation for change given).
+$creditSales = $paymentMethods->firstWhere('method', 'credit')->total ?? 0;
+$laybySales = $paymentMethods->firstWhere('method', 'layby')->total ?? 0;
+// "change_given" stores the amount of cash returned to the customer.
+// Summing this over the period yields the total change owed.
+$changeOwed = (float) Payment::join('transactions', 'payments.transaction_id', '=', 'transactions.id')
+    ->where('transactions.business_id', $tenantId)
+    ->where('transactions.status', 'completed')
+    ->whereBetween('transactions.created_at', [$fromStart, $toEnd])
+    ->when($locationIds, fn ($q) => $q->whereIn('transactions.location_id', $locationIds))
+    ->whereNotNull('payments.change_given')
+    ->sum('payments.change_given');
+
+$summary->credit_sales = round((float) $creditSales, 2);
+$summary->layby_sales = round((float) $laybySales, 2);
+$summary->change_owed = round($changeOwed, 2);
 
         // ── Top products ──────────────────────────────────────────────
         $topProducts = TransactionItem::join('transactions', 'transaction_items.transaction_id', '=', 'transactions.id')
