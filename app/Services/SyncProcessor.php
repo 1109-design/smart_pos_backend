@@ -2008,8 +2008,17 @@ class SyncProcessor
                 // writes are left alone — e.g. BackOffice's stock reset
                 // deliberately posts an untagged line to cancel legacy
                 // untagged stock. Transfers carry their own from/to.
+                // A line that takes an untagged line back out (the books
+                // repair's duplicate-count correction) stays untagged too:
+                // attributed, it would come off the location's stock, which
+                // never had the line it cancels.
+                $correctsUntagged = ! empty($payload['reference_id'])
+                    && StockMovement::where('id', $payload['reference_id'])
+                        ->where('product_id', $payload['product_id'] ?? null)
+                        ->whereNull('location_id')
+                        ->exists();
                 $attributedToSoleLocation = false;
-                if (! $trusted && empty($payload['location_id'])
+                if (! $trusted && empty($payload['location_id']) && ! $correctsUntagged
                     && ! in_array($payload['type'] ?? null, ['transfer_out', 'transfer_in', 'transfer'], true)) {
                     $payload['location_id'] = $this->soleLocationId($payload['business_id'] ?? null);
                     $attributedToSoleLocation = $payload['location_id'] !== null;

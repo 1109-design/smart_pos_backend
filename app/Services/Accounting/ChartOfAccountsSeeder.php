@@ -235,6 +235,15 @@ class ChartOfAccountsSeeder
         ['Liabilities', 'Current Liabilities', ['code' => '2060', 'name' => 'Layby Deposits']],
     ];
 
+    /**
+     * Stock counted, adjusted or revalued up. Gains used to be credited to
+     * 6050 Stock Loss / Write-offs alongside the losses, so a month with
+     * more stock found than lost showed a negative expense.
+     */
+    public const STOCK_GAIN_ACCOUNTS = [
+        ['Revenue', 'Other Income', ['code' => '4030', 'name' => 'Stock Gains']],
+    ];
+
     /** Stock between locations (Phase 6): a transfer's dispatched value. */
     public const PHASE6_ACCOUNTS = [
         ['Assets', 'Current Assets', ['code' => '1210', 'name' => 'Stock in Transit']],
@@ -336,6 +345,8 @@ class ChartOfAccountsSeeder
                     ['code' => '4015', 'name' => 'Discount Received'],
                     ['code' => '4020', 'name' => 'FX Gain'],
                     ['code' => '4025', 'name' => 'Unrealised FX Gain'],
+                    // Stock counted up — see STOCK_GAIN_ACCOUNTS.
+                    ['code' => '4030', 'name' => 'Stock Gains'],
                 ]],
             ],
         ],

@@ -53,9 +53,9 @@ class BackOfficeAccountRoleMappingsTest extends TestCase
         // (inventory_adjustment, deposit_forfeiture_income) + 9 payroll
         // roles (wages payable, PAYE ×2, NSSA, ZIMDEF, other deductions,
         // NEC, employer costs, staff loans) + 4 Phase 1 roles (sales_returns,
-        // sales_discount, bad_debts, change_owed_liability) — see
-        // AccountRoleMappingService::ROLE_DEFAULTS.
-        $response->assertInertia(fn ($page) => $page->has('roles', 43));
+        // sales_discount, bad_debts, change_owed_liability) + stock_gain —
+        // see AccountRoleMappingService::ROLE_DEFAULTS.
+        $response->assertInertia(fn ($page) => $page->has('roles', 44));
     }
 
     public function test_manager_cannot_access_account_mappings(): void

@@ -439,6 +439,47 @@ class SyncStockMovementTest extends TestCase
         $this->assertSame($main->id, $republished->payload['location_id']);
     }
 
+    public function test_a_correction_of_an_untagged_line_stays_untagged(): void
+    {
+        $tenantId = 'tenant-sync-stock-11';
+        $token = $this->actingDeviceToken($tenantId);
+        [$main, $productId] = $this->productAtMain($tenantId, 30, 62);
+        $untaggedId = (string) Str::uuid();
+        StockMovement::create([
+            'id' => $untaggedId, 'business_id' => $tenantId, 'product_id' => $productId,
+            'type' => 'adjustment', 'quantity_change' => 32, 'reason' => 'Physical Stock Count',
+        ]);
+        StockMovement::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'product_id' => $productId,
+            'location_id' => $main->id, 'type' => 'adjustment', 'quantity_change' => 30,
+        ]);
+        $correctionId = (string) Str::uuid();
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'stock_movements',
+                    'uuid' => $correctionId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'product_id' => $productId,
+                        'type' => 'adjustment',
+                        'quantity_change' => -32,
+                        'reference_id' => $untaggedId,
+                        'reason' => 'Correction: duplicate count with no location',
+                        'updated_at' => now()->toIso8601String(),
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ])
+            ->assertOk();
+
+        $this->assertDatabaseHas('stock_movements', ['id' => $correctionId, 'location_id' => null]);
+        $this->assertDatabaseHas('product_stock', ['product_id' => $productId, 'location_id' => $main->id, 'quantity' => 30]);
+        $this->assertDatabaseHas('products', ['id' => $productId, 'stock_quantity' => 30]);
+    }
+
     /**
      * @return array{0: Location, 1: string}
      */

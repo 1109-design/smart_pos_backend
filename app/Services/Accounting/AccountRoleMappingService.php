@@ -43,6 +43,9 @@ class AccountRoleMappingService
         // dimensional-material scrap) — see the Flutter side's identical
         // note. Shares '6050' with material_scrap_loss.
         'inventory_adjustment' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6050', 'name' => 'Stock Loss / Write-offs'],
+        // Stock counted, adjusted or revalued up — kept off 6050 so gains
+        // don't show as a negative expense.
+        'stock_gain' => ['category' => 'Revenue', 'subCategory' => 'Other Income', 'code' => '4030', 'name' => 'Stock Gains'],
         // Accounts Payable module (spec §7/§12) — 'inventory'/'grn_suspense'
         // point at the SAME '1200'/'2010' codes GrvPostingService/
         // GrvPostingService.php already hardcoded; role-mapping them here
