@@ -113,6 +113,13 @@ class ZimraReceiptFormatter
             $amount = (float) ($payment->base_equivalent ?? $payment->amount);
             $paymentTotalsByMoneyType[$moneyType] = ($paymentTotalsByMoneyType[$moneyType] ?? 0.0) + $amount;
         }
+        // A till's payment correction adds signed legs ("Split correction":
+        // -40 cash, +40 EcoCash), so a money type can net to nothing — leave
+        // it off the receipt rather than send ZIMRA a zero payment.
+        $paymentTotalsByMoneyType = array_filter(
+            $paymentTotalsByMoneyType,
+            fn (float $amt) => abs($amt) >= 0.005,
+        );
 
         $receiptPayments = [];
         if (empty($paymentTotalsByMoneyType)) {
