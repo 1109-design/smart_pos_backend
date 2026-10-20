@@ -24,10 +24,12 @@ Route::prefix('v1')->group(function () {
     Route::get('health', fn () => response()->json(['ok' => true]));
 });
 
-// CI reports each newly published app installer (shared-secret auth, see
-// AppReleaseController::store) — relayed to devices on /sync/pull.
+// CI reports each newly published app installer, or the release build
+// machine uploads it (shared-secret auth, see AppReleaseController) —
+// relayed to devices on /sync/pull.
 Route::prefix('v1')->middleware(['throttle:30,1'])->group(function () {
     Route::post('app-releases', [AppReleaseController::class, 'store']);
+    Route::post('app-releases/upload', [AppReleaseController::class, 'upload']);
 });
 
 // POS device authentication (no tenant context needed yet — tenant resolved by business_code)
