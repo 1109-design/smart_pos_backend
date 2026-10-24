@@ -118,6 +118,23 @@ class SyncController extends Controller
                 }
 
                 $existingVersion = $existing?->source_updated_at ?? $existing?->synced_at;
+                // A product_stock push only races other devices' pushes, never
+                // the server's own ledger recomputes: processing it recomputes
+                // quantity from the ledger anyway, and the rest of the row
+                // (reserved_quantity, in_transit_quantity, threshold, price
+                // override) is only ever set by devices. Measured against a
+                // recompute, a device's release of reserved stock was lost
+                // whenever its own movements in the same push (e.g. Pending
+                // Book allocations) had just bumped the row.
+                if ($record['table'] === 'product_stock' && $existing !== null && $existing->device_id === null) {
+                    $lastDevicePush = SyncRecord::where('business_id', $device?->tenant_id)
+                        ->where('table_name', 'product_stock')
+                        ->where('record_uuid', $record['uuid'])
+                        ->whereNotNull('device_id')
+                        ->latest('synced_at')
+                        ->first();
+                    $existingVersion = $lastDevicePush?->source_updated_at ?? $lastDevicePush?->synced_at;
+                }
                 if ($existingVersion && $existingVersion->gt($incomingUpdatedAt)) {
                     $merged = $this->attemptFieldLevelMerge($record, $existing);
 
