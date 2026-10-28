@@ -77,6 +77,12 @@ class AccountRoleMappingService
         'other_deductions_payable' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2055', 'name' => 'Payroll Deductions Payable'],
         'nec_payable' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2056', 'name' => 'NEC Levy Payable'],
         'staff_loans_receivable' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1160', 'name' => 'Staff Loans & Advances'],
+        // Donations — see ChartOfAccountsSeeder::DONATION_ACCOUNTS and the
+        // Flutter side's identical roles.
+        'donations_received' => ['category' => 'Revenue', 'subCategory' => 'Other Income', 'code' => '4030', 'name' => 'Donations Received'],
+        'deferred_donations' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2060', 'name' => 'Deferred Donations'],
+        'deferred_capital_grants' => ['category' => 'Liabilities', 'subCategory' => 'Long-Term Liabilities', 'code' => '2065', 'name' => 'Deferred Capital Grants'],
+        'donations_given' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6085', 'name' => 'Donations Given'],
         // Deliberately NOT mapped: 'accumulated depreciation' would need to
         // match whatever GL account the still-hardcoded, still-server-only
         // monthly depreciation sweep (postMonthlyDepreciation()) posts
