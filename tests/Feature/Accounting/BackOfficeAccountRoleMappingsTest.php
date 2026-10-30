@@ -52,9 +52,11 @@ class BackOfficeAccountRoleMappingsTest extends TestCase
         // opening_balance_equity) + 2 added for the GL-posting-coverage fixes
         // (inventory_adjustment, deposit_forfeiture_income) + 9 payroll
         // roles (wages payable, PAYE ×2, NSSA, ZIMDEF, other deductions,
-        // NEC, employer costs, staff loans) — see
+        // NEC, employer costs, staff loans) + 4 donation roles (received,
+        // deferred, deferred capital grants, given) + 2 for non-cash asset
+        // disposals (supplier refunds due, insurance claims receivable) — see
         // AccountRoleMappingService::ROLE_DEFAULTS.
-        $response->assertInertia(fn ($page) => $page->has('roles', 29));
+        $response->assertInertia(fn ($page) => $page->has('roles', 35));
     }
 
     public function test_manager_cannot_access_account_mappings(): void

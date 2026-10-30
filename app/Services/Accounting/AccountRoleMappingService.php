@@ -77,6 +77,10 @@ class AccountRoleMappingService
         'other_deductions_payable' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2055', 'name' => 'Payroll Deductions Payable'],
         'nec_payable' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2056', 'name' => 'NEC Levy Payable'],
         'staff_loans_receivable' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1160', 'name' => 'Staff Loans & Advances'],
+        // Asset disposals that aren't paid in cash — see
+        // ChartOfAccountsSeeder::ASSET_DISPOSAL_ACCOUNTS.
+        'supplier_refunds_due' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1165', 'name' => 'Supplier Refunds Due'],
+        'insurance_claims_receivable' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1170', 'name' => 'Insurance Claims Receivable'],
         // Donations — see ChartOfAccountsSeeder::DONATION_ACCOUNTS and the
         // Flutter side's identical roles.
         'donations_received' => ['category' => 'Revenue', 'subCategory' => 'Other Income', 'code' => '4030', 'name' => 'Donations Received'],

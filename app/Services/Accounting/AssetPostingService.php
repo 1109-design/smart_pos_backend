@@ -164,6 +164,20 @@ class AssetPostingService
             $accumulated = $asset->accumulatedDepreciation($asset->business_id);
             $originalCost = (float) $asset->acquisition_cost;
             $netBookValue = round($originalCost - $accumulated, 4);
+            // What the business gets back, and where it lands: cash/bank for
+            // a sale, a refund due from the supplier for a return, an
+            // insurance claim for a theft/loss, nothing for a scrapping.
+            $method = $asset->disposal_method ?? 'sold';
+            $recoveryRole = match ($method) {
+                'returned' => 'supplier_refunds_due',
+                'stolen' => 'insurance_claims_receivable',
+                default => null,
+            };
+            $proceeds = match ($method) {
+                'scrapped' => 0.0,
+                'stolen' => (float) ($asset->insurance_claim_amount ?? 0),
+                default => $proceeds,
+            };
             // Gain (proceeds exceed book value) credits the variance account
             // (reduces net expense); a loss debits it — same "one variance
             // account absorbs both directions" pattern as Purchase Price
@@ -188,9 +202,11 @@ class AssetPostingService
             }
 
             if ($proceeds > 0.005) {
-                $funding = $this->resolveFundingAccount($asset->business_id, $asset->funding_method, $asset->disposal_bank_account_id);
+                $recoveryAccount = $recoveryRole
+                    ? $this->mappings->resolve($asset->business_id, $recoveryRole)
+                    : $this->resolveFundingAccount($asset->business_id, $asset->funding_method, $asset->disposal_bank_account_id);
                 $this->journals->addLine($header, [
-                    'gl_account_id' => $funding->id,
+                    'gl_account_id' => $recoveryAccount->id,
                     'debit' => $proceeds,
                 ]);
             }

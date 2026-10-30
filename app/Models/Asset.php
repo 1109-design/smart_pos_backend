@@ -17,8 +17,13 @@ class Asset extends Model
         'id', 'business_id', 'asset_number', 'name', 'category', 'notes',
         'acquisition_date', 'acquisition_cost', 'salvage_value', 'useful_life_months',
         'funding_method', 'status', 'disposed_at', 'disposal_proceeds', 'created_by_user_id',
-        'bank_account_id', 'disposal_bank_account_id',
+        'bank_account_id', 'disposal_bank_account_id', 'depreciation_method',
+        'disposal_method', 'disposal_supplier_id', 'insurance_claim_amount', 'disposal_notes',
     ];
+
+    public const STRAIGHT_LINE = 'straight_line';
+
+    public const DECLINING_BALANCE = 'declining_balance';
 
     protected static function booted(): void
     {
@@ -42,6 +47,7 @@ class Asset extends Model
             'salvage_value' => 'decimal:4',
             'disposed_at' => 'date',
             'disposal_proceeds' => 'decimal:4',
+            'insurance_claim_amount' => 'decimal:4',
         ];
     }
 
@@ -95,6 +101,12 @@ class Asset extends Model
         }
 
         $remaining = max(0, $this->bookValue($businessId) - (float) $this->salvage_value);
+
+        // Straight line: the same share of the depreciable base every
+        // month, never more than what's left.
+        if ($this->depreciation_method === self::STRAIGHT_LINE) {
+            return round(min($remaining, $this->depreciableBase() / $this->useful_life_months), 4);
+        }
 
         return round($remaining * $this->monthlyDepreciationRate(), 4);
     }

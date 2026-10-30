@@ -198,6 +198,19 @@ class ChartOfAccountsSeeder
     ];
 
     /**
+     * Where a disposed asset's value goes when it isn't cash — see
+     * AssetPostingService::recordDisposal(). A return to the supplier waits
+     * in Supplier Refunds Due until the supplier's credit note clears it
+     * against Accounts Payable; a theft or loss claimed on insurance waits
+     * in Insurance Claims Receivable until the insurer pays.
+     * [category, sub-category, account].
+     */
+    public const ASSET_DISPOSAL_ACCOUNTS = [
+        ['Assets', 'Current Assets', ['code' => '1165', 'name' => 'Supplier Refunds Due']],
+        ['Assets', 'Current Assets', ['code' => '1170', 'name' => 'Insurance Claims Receivable']],
+    ];
+
+    /**
      * Donation accounts — see the till's donation_posting_service.dart.
      * Treated like grants (IFRS for SMEs s24 / IAS 20): an unconditional
      * donation is income; one with conditions waits in Deferred Donations
@@ -225,6 +238,8 @@ class ChartOfAccountsSeeder
                     // AP module — recoverable input tax on supplier invoices.
                     ['code' => '1150', 'name' => 'Input VAT'],
                     ['code' => '1160', 'name' => 'Staff Loans & Advances'],
+                    ['code' => '1165', 'name' => 'Supplier Refunds Due'],
+                    ['code' => '1170', 'name' => 'Insurance Claims Receivable'],
                     ['code' => '1200', 'name' => 'Inventory', 'control_type' => 'inventory'],
                 ]],
                 ['name' => 'Fixed Assets', 'accounts' => [
