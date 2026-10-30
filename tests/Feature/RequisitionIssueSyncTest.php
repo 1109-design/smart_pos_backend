@@ -16,19 +16,15 @@ use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
 
 /**
- * Master spec STK·03 / section 38: "A requisition alone must NEVER remove
- * stock" and "security must be enforced beyond the UI." Unlike void/refund/
- * exchange-rate changes (gated by SyncProcessor::hasApprovedRequest() against
- * the generic approval_requests table), a requisition's approval lives on
- * its own Requisition::status column — nothing previously stopped a device
- * that talks to /api/v1/sync/push directly (bypassing the Flutter app's own
- * "Issue" button, which is only shown once status=='approved') from pushing
- * a stock_movements row of type 'requisition_issue' against a requisition
- * that was never approved, silently deducting real stock. Found via a live
- * exercise of the running dev server, not code reading — reproduced, then
- * fixed with a gate in SyncProcessor::process()'s 'stock_movements' case.
+ * Requisition approval is decided in the app; the server only relays the
+ * resulting rows. It used to reject a 'requisition_issue' stock movement
+ * unless the server's copy of the requisition said 'approved' — but a
+ * device that approves then issues before its next push only ever sends
+ * the final 'issued' row, so on 2026-10-10 REQ-20261010-002's status and
+ * its three stock deductions were all rejected and never reached any other
+ * device. These tests pin the relay behaviour.
  */
-class RequisitionIssueApprovalGateTest extends TestCase
+class RequisitionIssueSyncTest extends TestCase
 {
     use RefreshDatabase;
 
@@ -71,7 +67,7 @@ class RequisitionIssueApprovalGateTest extends TestCase
         ]);
     }
 
-    public function test_issuing_against_a_pending_requisition_is_rejected_and_stock_is_unchanged(): void
+    public function test_issuing_against_a_requisition_the_server_still_sees_as_pending_deducts_stock(): void
     {
         $tenantId = 'tenant-req-gate-pending';
         [$token, $userId] = $this->actingDeviceToken($tenantId);
@@ -106,15 +102,89 @@ class RequisitionIssueApprovalGateTest extends TestCase
         ]);
 
         $response->assertOk();
-        $this->assertCount(0, $response->json('accepted'));
-        $this->assertSame(
-            'stock_movements: requisition_issue requires an approved requisition.',
-            $response->json('errors.0.reason'),
-        );
-        $this->assertEquals(100, Product::find($productId)->stock_quantity);
+        $this->assertCount(1, $response->json('accepted'));
+        $this->assertEquals(85, Product::find($productId)->stock_quantity);
     }
 
-    public function test_issuing_against_a_nonexistent_requisition_is_rejected(): void
+    public function test_a_requisition_can_go_straight_from_pending_to_issued(): void
+    {
+        $tenantId = 'tenant-req-pending-issued';
+        [$token, $userId] = $this->actingDeviceToken($tenantId);
+        $locationId = (string) Str::uuid();
+        Location::create(['id' => $locationId, 'business_id' => $tenantId, 'name' => 'Main']);
+        $requisitionId = (string) Str::uuid();
+        Requisition::create([
+            'id' => $requisitionId,
+            'business_id' => $tenantId,
+            'requisition_number' => 'REQ-1',
+            'location_id' => $locationId,
+            'purpose' => 'general',
+            'status' => 'pending',
+            'requested_by_user_id' => $userId,
+        ]);
+
+        $response = $this->push($token, [
+            'table' => 'requisitions',
+            'uuid' => $requisitionId,
+            'operation' => 'upsert',
+            'payload' => [
+                'business_id' => $tenantId,
+                'requisition_number' => 'REQ-1',
+                'location_id' => $locationId,
+                'purpose' => 'general',
+                'status' => 'issued',
+                'requested_by_user_id' => $userId,
+                'approved_by_user_id' => $userId,
+                'approved_at' => now()->toIso8601String(),
+                'issued_by_user_id' => $userId,
+                'issued_at' => now()->toIso8601String(),
+            ],
+            'updated_at' => now()->toIso8601String(),
+        ]);
+
+        $response->assertOk();
+        $this->assertCount(1, $response->json('accepted'));
+        $this->assertSame('issued', Requisition::find($requisitionId)->status);
+    }
+
+    public function test_an_issued_requisition_cannot_go_back_to_pending(): void
+    {
+        $tenantId = 'tenant-req-issued-terminal';
+        [$token, $userId] = $this->actingDeviceToken($tenantId);
+        $locationId = (string) Str::uuid();
+        Location::create(['id' => $locationId, 'business_id' => $tenantId, 'name' => 'Main']);
+        $requisitionId = (string) Str::uuid();
+        Requisition::create([
+            'id' => $requisitionId,
+            'business_id' => $tenantId,
+            'requisition_number' => 'REQ-1',
+            'location_id' => $locationId,
+            'purpose' => 'general',
+            'status' => 'issued',
+            'requested_by_user_id' => $userId,
+        ]);
+
+        $response = $this->push($token, [
+            'table' => 'requisitions',
+            'uuid' => $requisitionId,
+            'operation' => 'upsert',
+            'payload' => [
+                'business_id' => $tenantId,
+                'requisition_number' => 'REQ-1',
+                'location_id' => $locationId,
+                'purpose' => 'general',
+                'status' => 'pending',
+                'requested_by_user_id' => $userId,
+            ],
+            'updated_at' => now()->toIso8601String(),
+        ]);
+
+        $response->assertOk();
+        $this->assertCount(0, $response->json('accepted'));
+        $this->assertSame('issued', Requisition::find($requisitionId)->status);
+    }
+
+    public function test_issuing_against_a_requisition_not_yet_on_the_server_deducts_stock(): void
     {
         $tenantId = 'tenant-req-gate-missing';
         [$token] = $this->actingDeviceToken($tenantId);
@@ -136,8 +206,8 @@ class RequisitionIssueApprovalGateTest extends TestCase
             'updated_at' => now()->toIso8601String(),
         ]);
 
-        $this->assertCount(0, $response->json('accepted'));
-        $this->assertEquals(100, Product::find($productId)->stock_quantity);
+        $this->assertCount(1, $response->json('accepted'));
+        $this->assertEquals(85, Product::find($productId)->stock_quantity);
     }
 
     public function test_issuing_against_an_approved_requisition_succeeds(): void
@@ -181,7 +251,7 @@ class RequisitionIssueApprovalGateTest extends TestCase
         $this->assertEquals(85, Product::find($productId)->stock_quantity);
     }
 
-    public function test_a_trusted_server_side_write_is_not_gated(): void
+    public function test_a_trusted_server_side_write_deducts_stock(): void
     {
         $tenantId = 'tenant-req-gate-trusted';
         Tenant::create(['id' => $tenantId, 'business_name' => $tenantId, 'owner_email' => $tenantId.'@example.com']);

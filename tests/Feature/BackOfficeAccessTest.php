@@ -137,8 +137,7 @@ class BackOfficeAccessTest extends TestCase
             'business_name' => 'Register Test Shop',
             'owner_name' => 'Owner Reg',
             'owner_email' => 'reg-owner@example.com',
-            'pin' => '1234',
-            'password' => 'portal-pass-1',
+            'password' => 'Portal-Pass-1',
             'currency_code' => 'USD',
         ]);
 
@@ -146,7 +145,7 @@ class BackOfficeAccessTest extends TestCase
 
         $owner = User::where('email', 'reg-owner@example.com')->first();
         $this->assertNotNull($owner);
-        $this->assertTrue(Hash::check('portal-pass-1', $owner->password));
+        $this->assertTrue(Hash::check('Portal-Pass-1', $owner->password));
 
         // Missing password must be rejected.
         $this->postJson('/api/v1/auth/register', [
@@ -155,7 +154,6 @@ class BackOfficeAccessTest extends TestCase
             'business_name' => 'Register Test Shop 2',
             'owner_name' => 'Owner Reg 2',
             'owner_email' => 'reg-owner-2@example.com',
-            'pin' => '1234',
             'currency_code' => 'USD',
         ])->assertUnprocessable();
     }

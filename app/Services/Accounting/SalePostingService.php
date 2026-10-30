@@ -172,11 +172,42 @@ class SalePostingService
             $this->addSignedLine($header, $accounts['tax'], $tax);
             $this->addSignedLine($header, $accounts['deposits'], $deposits);
 
+            // A return is its own compensating transaction with every money
+            // field negated (see the till's sales_return_service.dart) —
+            // every payment leg on it is money going OUT. The till records
+            // those legs as positive amounts; older rows may carry them
+            // negative. Either way they credit the account. Mirrors
+            // sale_posting_service.dart's isReversal.
+            $isReversal = (float) $transaction->total < 0;
+
+            // Exchange legs ('exchange_credit') post to Exchange Clearing:
+            // Cr on the return, Dr on the replacement sale, netting to zero.
+            if ($payments->contains(fn ($p) => strtolower((string) $p->method) === 'exchange_credit')) {
+                $accounts['exchange_clearing'] = app(ChartOfAccountsSeeder::class)->ensureAccount(
+                    $transaction->business_id,
+                    'Liabilities',
+                    'Current Liabilities',
+                    ChartOfAccountsSeeder::EXCHANGE_CLEARING,
+                );
+            }
+
+            // Old-System Deposit legs ('legacy_deposit') — money paid in the
+            // previous POS, applied to goods collected now — use up
+            // Old-System Customer Deposits.
+            if ($payments->contains(fn ($p) => strtolower((string) $p->method) === 'legacy_deposit')) {
+                $accounts['legacy_deposits'] = app(ChartOfAccountsSeeder::class)->ensureAccount(
+                    $transaction->business_id,
+                    'Liabilities',
+                    'Current Liabilities',
+                    ChartOfAccountsSeeder::OLD_SYSTEM_DEPOSITS,
+                );
+            }
+
             $roundingTotal = 0.0;
             $paymentLines = [];
 
             foreach ($payments as $payment) {
-                $account = $this->resolvePaymentAccount($payment, $accounts);
+                $account = $this->resolvePaymentAccount($payment, $accounts, $transaction->business_id);
                 $isReceivable = $account->control_type === 'receivable' && $transaction->customer_id;
                 $key = $account->id.'|'.($isReceivable ? $transaction->customer_id : '');
 
@@ -191,13 +222,12 @@ class SalePostingService
             }
 
             foreach ($paymentLines as $line) {
-                // Debtor/bank/cash lines are debited by what was collected —
-                // negative only for a refund transaction's own negative
-                // base_equivalent, which correctly credits the account instead.
+                // Debtor/bank/cash lines are debited by what was collected,
+                // credited by what a return paid out.
                 $this->journals->addLine($header, [
                     'gl_account_id' => $line['account']->id,
-                    'debit' => max(0, $line['amount']),
-                    'credit' => max(0, -$line['amount']),
+                    'debit' => $isReversal ? 0 : max(0, $line['amount']),
+                    'credit' => $isReversal ? abs($line['amount']) : max(0, -$line['amount']),
                     'party_type' => $line['party_type'],
                     'party_id' => $line['party_id'],
                 ]);
@@ -210,14 +240,20 @@ class SalePostingService
             // shortfall the till collected less than the exact price.
             $this->addSignedLine($header, $accounts['rounding'], $roundingTotal);
 
-            $cogs = (float) StockMovement::where('reference_id', $transaction->id)
-                ->where('type', 'sale')
+            // Signed: a sale's 'sale' movements are negative (stock out →
+            // Dr COGS / Cr Inventory); a return's 'return' movements are
+            // positive (stock back → Dr Inventory / Cr COGS).
+            $signedCogs = (float) StockMovement::where('reference_id', $transaction->id)
+                ->whereIn('type', ['sale', 'return'])
                 ->get()
-                ->sum(fn ($m) => abs((float) $m->quantity_change) * (float) ($m->running_avg_cost ?? 0));
+                ->sum(fn ($m) => (float) $m->quantity_change * (float) ($m->running_avg_cost ?? 0));
 
-            if ($cogs > 0.005) {
-                $this->journals->addLine($header, ['gl_account_id' => $accounts['cogs']->id, 'debit' => $cogs]);
-                $this->journals->addLine($header, ['gl_account_id' => $accounts['inventory']->id, 'credit' => $cogs]);
+            if ($signedCogs < -0.005) {
+                $this->journals->addLine($header, ['gl_account_id' => $accounts['cogs']->id, 'debit' => -$signedCogs]);
+                $this->journals->addLine($header, ['gl_account_id' => $accounts['inventory']->id, 'credit' => -$signedCogs]);
+            } elseif ($signedCogs > 0.005) {
+                $this->journals->addLine($header, ['gl_account_id' => $accounts['inventory']->id, 'debit' => $signedCogs]);
+                $this->journals->addLine($header, ['gl_account_id' => $accounts['cogs']->id, 'credit' => $signedCogs]);
             }
 
             if (! $this->journals->isBalanced($header)) {
@@ -254,16 +290,45 @@ class SalePostingService
         ]);
     }
 
-    private function resolvePaymentAccount(Payment $payment, array $accounts): GlAccount
+    private function resolvePaymentAccount(Payment $payment, array $accounts, string $businessId): GlAccount
     {
-        $method = strtolower($payment->method ?? '');
+        // 1. Direct explicit GL account
+        if ($payment->gl_account_id) {
+            $gl = GlAccount::where('business_id', $businessId)->find($payment->gl_account_id);
+            if ($gl) {
+                return $gl;
+            }
+        }
 
-        return match (true) {
-            str_contains($method, 'credit') => $accounts['receivable'],
-            str_contains($method, 'mobile'), str_contains($method, 'ecocash') => $accounts['mobile'],
-            str_contains($method, 'card'), str_contains($method, 'bank'), str_contains($method, 'swipe') => $this->resolveBankAccount($payment->bank_account_id, $accounts['bank']),
-            default => $accounts['cash'],
-        };
+        // 2. Delegate to PaymentAccountResolver
+        $resolver = app(PaymentAccountResolver::class);
+
+        try {
+            return $resolver->resolve(
+                businessId: $businessId,
+                method: $payment->method ?? 'cash',
+                currencyCode: $payment->currency_code,
+                paymentAccountId: $payment->bank_account_id,
+                provider: $payment->provider,
+                glAccountId: $payment->gl_account_id,
+            );
+        } catch (Throwable $e) {
+            $method = strtolower($payment->method ?? '');
+            if ($method === 'exchange_credit') {
+                return $accounts['exchange_clearing'];
+            }
+            if ($method === 'legacy_deposit') {
+                return $accounts['legacy_deposits'];
+            }
+            if ($method === 'credit') {
+                return $accounts['receivable'];
+            }
+            if ($payment->bank_account_id) {
+                return $this->resolveBankAccount($payment->bank_account_id, $accounts['bank']);
+            }
+
+            return $accounts['cash'];
+        }
     }
 
     /**

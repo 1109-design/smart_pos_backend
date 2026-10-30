@@ -9,6 +9,7 @@ use App\Models\SubscriptionHistory;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Services\BusinessProvisioner;
+use App\Services\TillCredentials;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -34,11 +35,21 @@ class DeviceAuthController extends Controller
             'business_name' => 'required|string|max:255',
             'owner_name' => 'required|string|max:255',
             'owner_email' => 'required|email|max:255',
-            'pin' => 'required|digits:4',
+            // One password for the owner: Back Office and the till. It must
+            // meet the default till password policy (a new business has no
+            // policy of its own yet).
             'password' => 'required|string|min:8|max:255',
             'country' => 'nullable|string|size:2',
             'currency_code' => 'nullable|string|max:10',
         ]);
+
+        $problems = app(TillCredentials::class)->violations('', $data['password'], $data['owner_name']);
+        if ($problems !== []) {
+            return response()->json([
+                'message' => 'Password is too weak. It needs: '.implode(', ', $problems).'.',
+                'errors' => ['password' => $problems],
+            ], 422);
+        }
 
         // One free trial per owner email and per physical device — without this
         // the trial can be farmed indefinitely by re-registering.
@@ -68,8 +79,8 @@ class DeviceAuthController extends Controller
                 'country' => $data['country'] ?? null,
                 'currency_code' => $data['currency_code'] ?? 'USD',
                 'admin_name' => $data['owner_name'],
-                'admin_pin' => $data['pin'],
                 'admin_password' => $data['password'],
+                'till_password' => $data['password'],
             ]);
         } catch (UniqueConstraintViolationException $e) {
             return response()->json([
@@ -124,7 +135,8 @@ class DeviceAuthController extends Controller
         $data = $request->validate([
             'device_identifier' => 'required|uuid',
             'device_name' => 'required|string|max:255',
-            'pin' => 'required|digits:4',
+            'email' => 'required|email',
+            'password' => 'required|string|max:255',
             'business_code' => 'required|string',
         ]);
 
@@ -141,8 +153,8 @@ class DeviceAuthController extends Controller
             return response()->json(['message' => 'Subscription expired.'], 402);
         }
 
-        // A revoked device must not be able to re-authenticate with just the
-        // PIN — revocation (e.g. lost/stolen device) is only meaningful if a
+        // A revoked device must not be able to re-authenticate with just a
+        // password — revocation (e.g. lost/stolen device) is only meaningful if a
         // fresh activation code is required to bring it back. See activate().
         $existingDevice = Device::where('tenant_id', $tenant->id)
             ->where('device_identifier', $data['device_identifier'])
@@ -154,17 +166,14 @@ class DeviceAuthController extends Controller
             ], 403);
         }
 
-        // Find user by PIN in tenant context
         tenancy()->initialize($tenant);
 
-        $user = User::where('is_active', true)->get()->first(
-            fn ($u) => $u->pin_hash && Hash::check($data['pin'], $u->pin_hash)
-        );
+        $user = User::where('email', $data['email'])->where('is_active', true)->first();
 
-        if (! $user) {
+        if (! $user || ! $this->passwordMatches($user, $data['password'])) {
             tenancy()->end();
 
-            return response()->json(['message' => 'Invalid PIN.'], 401);
+            return response()->json(['message' => 'Invalid email or password.'], 401);
         }
 
         tenancy()->end();
@@ -207,7 +216,7 @@ class DeviceAuthController extends Controller
     }
 
     /**
-     * Initial device setup — authenticates with email + PIN.
+     * Initial device setup — authenticates with email + password.
      * Used by the mobile app on first launch.
      */
     public function setup(Request $request): JsonResponse
@@ -216,7 +225,7 @@ class DeviceAuthController extends Controller
             'device_identifier' => 'required|uuid',
             'device_name' => 'required|string|max:255',
             'email' => 'required|email',
-            'pin' => 'required|digits:4',
+            'password' => 'required|string|max:255',
             'business_code' => 'required|string',
         ]);
 
@@ -246,21 +255,19 @@ class DeviceAuthController extends Controller
 
         $user = User::where('email', $data['email'])->where('is_active', true)->first();
 
-        if (! $user || ! $user->pin_hash || ! Hash::check($data['pin'], $user->pin_hash)) {
-            Log::warning('Device setup rejected: invalid email or PIN.', [
+        if (! $user || ! $this->passwordMatches($user, $data['password'])) {
+            Log::warning('Device setup rejected: invalid email or password.', [
                 'tenant_id' => $tenant->id,
                 'email' => $data['email'],
-                'reason' => match (true) {
-                    ! $user => 'no active user with that email in this tenant',
-                    ! $user->pin_hash => 'user has no pin_hash set',
-                    default => 'pin did not match stored hash',
-                },
+                'reason' => $user ? 'password did not match' : 'no active user with that email in this tenant',
             ]);
 
             tenancy()->end();
 
-            return response()->json(['message' => 'Invalid email or PIN.'], 401);
+            return response()->json(['message' => 'Invalid email or password.'], 401);
         }
+
+        $tillPasswordSet = app(TillCredentials::class)->hasPassword($user);
 
         tenancy()->end();
 
@@ -298,7 +305,25 @@ class DeviceAuthController extends Controller
                 'currency_code' => $tenant->currency_code,
                 'pairing_code' => $tenant->pairing_code,
             ],
+            // False when this person has only a Back Office password so far —
+            // the till then makes them choose a till password at first sign-in.
+            'till_password_set' => $tillPasswordSet,
         ]);
+    }
+
+    /**
+     * The person's till password, or — until they've set one — their Back
+     * Office password, so an owner can still pair a new till right after
+     * the switch from PINs.
+     */
+    private function passwordMatches(User $user, string $password): bool
+    {
+        $credentials = app(TillCredentials::class);
+        if ($credentials->hasPassword($user)) {
+            return $credentials->check($user, $password);
+        }
+
+        return $user->password !== null && Hash::check($password, $user->password);
     }
 
     public function activate(Request $request): JsonResponse

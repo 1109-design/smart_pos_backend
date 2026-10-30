@@ -34,7 +34,8 @@ class BusinessProvisionerTest extends TestCase
             'subscription_valid_until' => now()->addMonth(),
             'currency_code' => 'USD',
             'admin_name' => 'Ada Owner',
-            'admin_pin' => '4321',
+            'till_password' => 'Owner-Pass-4321',
+            'till_password_must_change' => true,
         ], $overrides));
     }
 
@@ -60,7 +61,16 @@ class BusinessProvisionerTest extends TestCase
             $this->assertSame($tenant->id, $owner->business_id);
             $this->assertSame('owner@acme.com', $owner->email);
             $this->assertTrue($owner->hasRole('business_owner'));
-            $this->assertTrue(Hash::check('4321', $owner->pin_hash));
+            $this->assertNull($owner->pin_hash);
+
+            // The owner's till password is set, temporary, and goes out to the tills.
+            $credential = DB::table('user_credentials')->where('user_id', $owner->id)->first();
+            $this->assertTrue(Hash::check('Owner-Pass-4321', $credential->password_hash));
+            $this->assertTrue((bool) $credential->must_change);
+            $this->assertDatabaseHas('sync_records', [
+                'table_name' => 'user_credentials',
+                'record_uuid' => $owner->id,
+            ]);
         });
     }
 

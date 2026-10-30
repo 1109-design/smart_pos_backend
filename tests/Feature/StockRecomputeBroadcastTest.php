@@ -190,4 +190,116 @@ class StockRecomputeBroadcastTest extends TestCase
         $this->assertNotNull($productRecord);
         $this->assertEquals(9.0, $productRecord['payload']['stock_quantity']);
     }
+
+    /**
+     * Regression: productSyncPayload() omitted every sheet_* column, so the
+     * recompute broadcast nulled a sheet's dimensions on every device that
+     * pulled it — which then pushed the nulls back on its next product save.
+     */
+    public function test_recompute_broadcast_carries_sheet_dimensions(): void
+    {
+        $tillA = $this->makeDevice('Till A');
+        $tillB = $this->makeDevice('Till B');
+
+        $productId = (string) Str::uuid();
+        Product::create([
+            'id' => $productId,
+            'business_id' => $this->tenantId,
+            'name' => 'Glass 4mm Clear 2440x1830',
+            'item_type' => 'sheet',
+            'unit' => 'm²',
+            'price' => 85,
+            'track_stock' => true,
+            'stock_quantity' => 10,
+            'sheet_width' => 2.44,
+            'sheet_height' => 1.83,
+            'sheet_kerf_width' => 0.003,
+            'sheet_allow_rotate' => false,
+            'is_taxable' => false,
+        ]);
+        StockMovement::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $this->tenantId,
+            'product_id' => $productId,
+            'type' => 'opening_stock',
+            'quantity_change' => 10,
+            'user_id' => (string) Str::uuid(),
+        ]);
+
+        $this->withHeader('Authorization', 'Bearer '.$tillA)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'stock_movements',
+                    'uuid' => (string) Str::uuid(),
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $this->tenantId,
+                        'product_id' => $productId,
+                        'type' => 'sale',
+                        'quantity_change' => -1,
+                        'user_id' => (string) Str::uuid(),
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ])->assertOk();
+
+        $payload = collect($this->withHeader('Authorization', 'Bearer '.$tillB)
+            ->getJson('/api/v1/sync/pull')->json('records'))
+            ->first(fn ($r) => $r['table_name'] === 'products' && $r['record_uuid'] === $productId)['payload'];
+
+        $this->assertEquals(2.44, $payload['sheet_width']);
+        $this->assertEquals(1.83, $payload['sheet_height']);
+        $this->assertEquals(0.003, $payload['sheet_kerf_width']);
+        $this->assertFalse($payload['sheet_allow_rotate']);
+        $this->assertFalse($payload['is_taxable']);
+    }
+
+    /**
+     * Older app builds push product snapshots without sheet_* keys at all
+     * (stock recompute, archive). An absent key must keep the stored value;
+     * an explicit null still clears it.
+     */
+    public function test_product_push_without_sheet_keys_keeps_stored_dimensions(): void
+    {
+        $tillA = $this->makeDevice('Till A');
+
+        $productId = (string) Str::uuid();
+        Product::create([
+            'id' => $productId,
+            'business_id' => $this->tenantId,
+            'name' => 'Glass 3mm Clear 1830x1220',
+            'item_type' => 'sheet',
+            'price' => 24,
+            'sheet_width' => 1.83,
+            'sheet_height' => 1.22,
+        ]);
+
+        $push = fn (array $extra) => $this->withHeader('Authorization', 'Bearer '.$tillA)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'products',
+                    'uuid' => $productId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $this->tenantId,
+                        'name' => 'Glass 3mm Clear 1830x1220',
+                        'item_type' => 'sheet',
+                        'price' => 25,
+                        'is_active' => true,
+                    ] + $extra,
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ])->assertOk();
+
+        $push([]);
+        $product = Product::find($productId);
+        $this->assertEquals(25.0, (float) $product->price);
+        $this->assertEquals(1.83, (float) $product->sheet_width);
+        $this->assertEquals(1.22, (float) $product->sheet_height);
+
+        $push(['sheet_width' => null, 'sheet_height' => null]);
+        $product->refresh();
+        $this->assertNull($product->sheet_width);
+        $this->assertNull($product->sheet_height);
+    }
 }

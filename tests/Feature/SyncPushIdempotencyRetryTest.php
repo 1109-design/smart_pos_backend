@@ -2,7 +2,6 @@
 
 namespace Tests\Feature;
 
-use App\Models\Accounting\GlAccount;
 use App\Models\Accounting\JournalHeader;
 use App\Models\Business;
 use App\Models\Device;
@@ -174,9 +173,8 @@ class SyncPushIdempotencyRetryTest extends TestCase
         $this->assertSame(1, StockMovement::where('id', $movementId)->count());
         $this->assertEquals(9, Product::find($productId)->stock_quantity);
 
-        $journal = JournalHeader::where('source_type', 'sale')->where('source_id', $txId)->first();
-        $this->assertNotNull($journal);
-        $this->assertSame('posted', $journal->status);
+        // The app posts the sale's journal; sync never does.
+        $this->assertSame(0, JournalHeader::where('source_type', 'sale')->where('source_id', $txId)->count());
 
         // The till, having never received a response, retries the identical
         // batch verbatim (same uuids, same payload, same updated_at).
@@ -190,15 +188,9 @@ class SyncPushIdempotencyRetryTest extends TestCase
         $this->assertSame(1, TransactionItem::where('id', $itemId)->count());
         $this->assertSame(1, Payment::where('id', $paymentId)->count());
         $this->assertSame(1, StockMovement::where('id', $movementId)->count());
-        $this->assertSame(1, JournalHeader::where('source_type', 'sale')->where('source_id', $txId)->count());
+        $this->assertSame(0, JournalHeader::where('source_type', 'sale')->where('source_id', $txId)->count());
 
         // Stock must still reflect exactly ONE unit sold, not two.
         $this->assertEquals(9, Product::find($productId)->fresh()->stock_quantity);
-
-        // The journal must still balance to the single sale, not double it.
-        $cash = GlAccount::where('business_id', $tenantId)->where('code', '1000')->first();
-        $revenue = GlAccount::where('business_id', $tenantId)->where('code', '4000')->first();
-        $this->assertSame(40.0, $cash->balance());
-        $this->assertSame(40.0, $revenue->balance());
     }
 }

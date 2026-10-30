@@ -85,7 +85,8 @@ class TransactionsController extends BackOfficeController
                 COUNT(*) as total,
                 SUM(CASE WHEN fiscal_status = 'fiscalised' THEN 1 ELSE 0 END) as fiscalised,
                 SUM(CASE WHEN fiscal_status = 'pending' THEN 1 ELSE 0 END) as pending,
-                SUM(CASE WHEN fiscal_status IN ('failed', 'not_configured') THEN 1 ELSE 0 END) as failed
+                SUM(CASE WHEN fiscal_status IN ('failed', 'not_configured') THEN 1 ELSE 0 END) as failed,
+                SUM(CASE WHEN fiscal_status = 'excluded' THEN 1 ELSE 0 END) as excluded
             ")
             ->first();
 

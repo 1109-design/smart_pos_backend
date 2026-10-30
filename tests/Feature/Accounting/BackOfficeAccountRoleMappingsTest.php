@@ -50,9 +50,11 @@ class BackOfficeAccountRoleMappingsTest extends TestCase
         // grn_suspense, input_vat, withholding_tax, freight,
         // discount_received, purchase_price_variance, fx_gain, fx_loss,
         // opening_balance_equity) + 2 added for the GL-posting-coverage fixes
-        // (inventory_adjustment, deposit_forfeiture_income) — see
+        // (inventory_adjustment, deposit_forfeiture_income) + 9 payroll
+        // roles (wages payable, PAYE ×2, NSSA, ZIMDEF, other deductions,
+        // NEC, employer costs, staff loans) — see
         // AccountRoleMappingService::ROLE_DEFAULTS.
-        $response->assertInertia(fn ($page) => $page->has('roles', 20));
+        $response->assertInertia(fn ($page) => $page->has('roles', 29));
     }
 
     public function test_manager_cannot_access_account_mappings(): void

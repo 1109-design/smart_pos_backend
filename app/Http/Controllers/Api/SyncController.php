@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Events\SyncTablesChanged;
 use App\Exceptions\MissingParentRecordException;
 use App\Http\Controllers\Controller;
+use App\Models\AppRelease;
 use App\Models\Device;
 use App\Models\PendingSyncRecord;
 use App\Models\StockOversell;
@@ -117,6 +118,23 @@ class SyncController extends Controller
                 }
 
                 $existingVersion = $existing?->source_updated_at ?? $existing?->synced_at;
+                // A product_stock push only races other devices' pushes, never
+                // the server's own ledger recomputes: processing it recomputes
+                // quantity from the ledger anyway, and the rest of the row
+                // (reserved_quantity, in_transit_quantity, threshold, price
+                // override) is only ever set by devices. Measured against a
+                // recompute, a device's release of reserved stock was lost
+                // whenever its own movements in the same push (e.g. Pending
+                // Book allocations) had just bumped the row.
+                if ($record['table'] === 'product_stock' && $existing !== null && $existing->device_id === null) {
+                    $lastDevicePush = SyncRecord::where('business_id', $device?->tenant_id)
+                        ->where('table_name', 'product_stock')
+                        ->where('record_uuid', $record['uuid'])
+                        ->whereNotNull('device_id')
+                        ->latest('synced_at')
+                        ->first();
+                    $existingVersion = $lastDevicePush?->source_updated_at ?? $lastDevicePush?->synced_at;
+                }
                 if ($existingVersion && $existingVersion->gt($incomingUpdatedAt)) {
                     $merged = $this->attemptFieldLevelMerge($record, $existing);
 
@@ -538,6 +556,13 @@ class SyncController extends Controller
         $tables = $request->input('tables', []);
         $serverTime = now();
 
+        // Pulls run every few seconds whether or not the device has anything
+        // to push, so they're what makes last_seen_at mean "online now" on
+        // the Devices screen. Throttled to keep it to a write per 30s.
+        if ($device && (! $device->last_seen_at || $device->last_seen_at->lt($serverTime->copy()->subSeconds(30)))) {
+            $device->forceFill(['last_seen_at' => $serverTime])->saveQuietly();
+        }
+
         $reconciliationRequired = $device
             ? $this->detectReconciliationRequired($request, $device, $tables)
             : [];
@@ -643,6 +668,9 @@ class SyncController extends Controller
             // history next cycle — never a wipe of the whole local database,
             // and the outbox (pending pushes) is untouched either way.
             'reconciliation_required' => $reconciliationRequired,
+            // Newest app installer per platform — how devices learn of an
+            // update without polling GitHub (see AppRelease).
+            'app_releases' => (object) AppRelease::latestByPlatform(),
         ]);
     }
 
@@ -675,6 +703,17 @@ class SyncController extends Controller
         $recordsArray = $records->toArray();
 
         foreach ($recordsArray as &$record) {
+            // A record with nothing in it — notably a server-side delete,
+            // stored with an empty payload — would otherwise go out as `[]`,
+            // which every app version fails to read as a record and skips
+            // for good (2026-10: deleted approval rules and quotation lines
+            // stayed on every till). Always send an object.
+            if (($record['payload'] ?? null) === [] || ! array_key_exists('payload', $record) || $record['payload'] === null) {
+                $record['payload'] = (object) [];
+
+                continue;
+            }
+
             if (($record['table_name'] ?? null) !== 'approval_requests') {
                 continue;
             }
@@ -827,9 +866,17 @@ class SyncController extends Controller
         $status = $request->query('status', 'pending');
         $limit = max(1, min(200, (int) $request->query('limit', 100)));
 
+        // `before_id` pages back through older conflicts — the list is
+        // capped, so without it a device could never see past the newest
+        // $limit rows.
+        $beforeId = $request->query('before_id');
+
         $query = SyncConflict::query()
             ->when($device?->tenant_id, fn ($q, $tenantId) => $q->where('business_id', $tenantId))
-            ->orderByDesc('created_at')
+            ->when(is_numeric($beforeId), fn ($q) => $q->where('id', '<', (int) $beforeId))
+            // Newest first by id (insertion order), so `before_id` pages
+            // never skip a row.
+            ->orderByDesc('id')
             ->limit($limit);
 
         if ($status !== 'all') {

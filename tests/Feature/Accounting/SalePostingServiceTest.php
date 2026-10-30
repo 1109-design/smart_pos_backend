@@ -363,4 +363,65 @@ class SalePostingServiceTest extends TestCase
         $this->assertSame(0.0, $this->account($businessId, '1000')->balance());
         $this->assertSame(0.0, $this->account($businessId, '4000')->balance());
     }
+
+    public function test_a_return_with_positive_payout_legs_reverses_revenue_cash_and_cogs(): void
+    {
+        $businessId = $this->makeLiveBusiness();
+
+        $original = $this->makeSale($businessId, 100, 0, 100);
+        $this->addItem($original, 100);
+        $this->addPayment($original, 100);
+        $this->addSaleStockMovement($original, qty: 1, runningAvgCost: 60);
+        $this->posting->postIfReady($original);
+
+        // The till records a return's payout legs as positive amounts, and
+        // the goods coming back as a 'return' movement.
+        $return = $this->makeSale($businessId, -100, 0, -100, status: 'refunded');
+        $this->addItem($return, 100);
+        $this->addPayment($return, 100);
+        StockMovement::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => $businessId,
+            'product_id' => (string) Str::uuid(),
+            'type' => 'return',
+            'quantity_change' => 1,
+            'running_avg_cost' => 60,
+            'reference_id' => $return->id,
+            'user_id' => $return->user_id,
+        ]);
+        $this->posting->postIfReady($return);
+
+        $journal = JournalHeader::where('source_type', 'sale')->where('source_id', $return->id)->first();
+        $this->assertSame('posted', $journal->status);
+        $this->assertSame(0.0, $this->account($businessId, '1000')->balance());
+        $this->assertSame(0.0, $this->account($businessId, '4000')->balance());
+        $this->assertSame(0.0, $this->account($businessId, '5000')->balance());
+        $this->assertSame(0.0, $this->account($businessId, '1200')->balance());
+    }
+
+    public function test_an_exchange_nets_exchange_clearing_to_zero(): void
+    {
+        $businessId = $this->makeLiveBusiness();
+
+        // $10 of goods back, $15 of goods out: $10 carried as Return Credit,
+        // customer tops up $5 cash.
+        $return = $this->makeSale($businessId, -10, 0, -10, status: 'refunded');
+        $this->addItem($return, 10);
+        $this->addPayment($return, 10, 'exchange_credit');
+        $this->posting->postIfReady($return);
+
+        $exchange = $this->makeSale($businessId, 15, 0, 15);
+        $this->addItem($exchange, 15);
+        $this->addPayment($exchange, 10, 'exchange_credit');
+        $this->addPayment($exchange, 5, 'Cash');
+        $this->posting->postIfReady($exchange);
+
+        foreach ([$return, $exchange] as $tx) {
+            $journal = JournalHeader::where('source_type', 'sale')->where('source_id', $tx->id)->first();
+            $this->assertSame('posted', $journal->status);
+        }
+        $this->assertSame(0.0, $this->account($businessId, '2045')->balance());
+        $this->assertSame(5.0, $this->account($businessId, '1000')->balance());
+        $this->assertSame(5.0, $this->account($businessId, '4000')->balance());
+    }
 }

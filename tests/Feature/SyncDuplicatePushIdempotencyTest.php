@@ -2,7 +2,6 @@
 
 namespace Tests\Feature;
 
-use App\Models\Accounting\GlAccount;
 use App\Models\Accounting\JournalHeader;
 use App\Models\Business;
 use App\Models\Device;
@@ -188,19 +187,13 @@ class SyncDuplicatePushIdempotencyTest extends TestCase
                 $this->assertSame(1, Payment::where('id', $paymentId)->count(), "submission #{$i}: exactly one payment");
                 $this->assertSame(1, StockMovement::where('id', $movementId)->count(), "submission #{$i}: exactly one stock movement");
                 $this->assertEquals(9, Product::find($productId)->fresh()->stock_quantity, "submission #{$i}: stock reflects exactly one unit sold");
+                // The app posts the sale's journal; sync never does.
                 $this->assertSame(
-                    1,
+                    0,
                     JournalHeader::where('source_type', 'sale')->where('source_id', $txId)->count(),
-                    "submission #{$i}: exactly one journal posting"
+                    "submission #{$i}: sync posts no journal of its own"
                 );
             }
         }
-
-        // The journal itself must still balance to a single $40 sale after
-        // ten repeated submissions, not ten times that.
-        $cash = GlAccount::where('business_id', $tenantId)->where('code', '1000')->first();
-        $revenue = GlAccount::where('business_id', $tenantId)->where('code', '4000')->first();
-        $this->assertSame(40.0, $cash->balance());
-        $this->assertSame(40.0, $revenue->balance());
     }
 }

@@ -254,7 +254,7 @@ class SyncApprovalRequestAndVoidReasonTest extends TestCase
         $this->assertSame('Customer changed their mind', $transaction->void_reason);
     }
 
-    public function test_void_is_rejected_without_a_matching_approved_approval_request(): void
+    public function test_void_is_accepted_even_before_its_approval_reaches_the_server(): void
     {
         $tenantId = 'tenant-sync-void-2';
         $token = $this->actingDeviceToken($tenantId);
@@ -273,9 +273,9 @@ class SyncApprovalRequestAndVoidReasonTest extends TestCase
             'status' => 'completed',
         ]);
 
-        // No ApprovalRequest seeded — a modified/malicious client pushing a
-        // void with no supervisor approval behind it must be rejected, not
-        // silently accepted.
+        // No ApprovalRequest seeded: the app decides voids, and its approval
+        // row can reach the server after the void itself. The server relays
+        // the void rather than re-checking it.
         $response = $this->withHeader('Authorization', 'Bearer '.$token)
             ->postJson('/api/v1/sync/push', [
                 'records' => [[
@@ -298,14 +298,11 @@ class SyncApprovalRequestAndVoidReasonTest extends TestCase
             ]);
 
         $response->assertOk();
-        $this->assertNotEmpty($response->json('errors'));
-        $this->assertEmpty($response->json('accepted'));
-
-        $transaction = Transaction::findOrFail($txId);
-        $this->assertSame('completed', $transaction->status);
+        $this->assertEmpty($response->json('errors'));
+        $this->assertSame('voided', Transaction::findOrFail($txId)->status);
     }
 
-    public function test_refund_compensating_transaction_is_rejected_without_a_matching_approved_approval_request(): void
+    public function test_refund_compensating_transaction_is_accepted_even_before_its_approval_reaches_the_server(): void
     {
         $tenantId = 'tenant-sync-refund-1';
         $token = $this->actingDeviceToken($tenantId);
@@ -325,10 +322,10 @@ class SyncApprovalRequestAndVoidReasonTest extends TestCase
             'status' => 'completed',
         ]);
 
-        // The refund's compensating transaction is a brand-new uuid, so it
-        // can't be matched to an approval by subject_id — it must carry a
-        // valid approval_request_id in its own payload (see
-        // transaction_receipt_sheet.dart's refund flow).
+        // Regression: on 2026-10-09 refunds pushed in the same second as
+        // their approval were rejected by a server-side approval check and
+        // left behind as pending conflicts. The app decides refunds; the
+        // server relays the compensating row.
         $response = $this->withHeader('Authorization', 'Bearer '.$token)
             ->postJson('/api/v1/sync/push', [
                 'records' => [[
@@ -350,49 +347,11 @@ class SyncApprovalRequestAndVoidReasonTest extends TestCase
             ]);
 
         $response->assertOk();
-        $this->assertNotEmpty($response->json('errors'));
-        $this->assertDatabaseMissing('transactions', ['id' => $refundTxId]);
-
-        // Now with a real approved refund_transaction request behind it, keyed
-        // to the ORIGINAL sale (the approval's actual subject) and referenced
-        // from the compensating row via approval_request_id.
-        $approval = ApprovalRequest::create([
-            'business_id' => $tenantId,
-            'subject_type' => 'Transaction',
-            'subject_id' => $originalTxId,
-            'action' => 'refund_transaction',
-            'requested_by_user_id' => $userId,
-            'status' => 'approved',
-            'approver_user_id' => $userId,
-            'approved_at' => now(),
-        ]);
-
-        $response = $this->withHeader('Authorization', 'Bearer '.$token)
-            ->postJson('/api/v1/sync/push', [
-                'records' => [[
-                    'table' => 'transactions',
-                    'uuid' => $refundTxId,
-                    'operation' => 'upsert',
-                    'payload' => [
-                        'business_id' => $tenantId,
-                        'user_id' => $userId,
-                        'subtotal' => -10,
-                        'tax_total' => 0,
-                        'discount_total' => 0,
-                        'total' => -10,
-                        'base_currency' => 'USD',
-                        'status' => 'refunded',
-                        'approval_request_id' => $approval->id,
-                    ],
-                    'updated_at' => now()->toIso8601String(),
-                ]],
-            ]);
-
-        $response->assertOk();
+        $this->assertEmpty($response->json('errors'));
         $this->assertDatabaseHas('transactions', ['id' => $refundTxId, 'status' => 'refunded']);
     }
 
-    public function test_exchange_rate_change_is_rejected_without_a_matching_approved_approval_request(): void
+    public function test_exchange_rate_change_is_accepted_even_before_its_approval_reaches_the_server(): void
     {
         $tenantId = 'tenant-sync-fx-1';
         $token = $this->actingDeviceToken($tenantId);
@@ -415,8 +374,8 @@ class SyncApprovalRequestAndVoidReasonTest extends TestCase
             ]);
 
         $response->assertOk();
-        $this->assertNotEmpty($response->json('errors'));
-        $this->assertDatabaseMissing('exchange_rates', ['id' => $rateId]);
+        $this->assertEmpty($response->json('errors'));
+        $this->assertDatabaseHas('exchange_rates', ['id' => $rateId]);
     }
 
     public function test_exchange_rate_change_is_accepted_with_a_matching_approved_approval_request(): void

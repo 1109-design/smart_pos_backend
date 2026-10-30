@@ -73,7 +73,12 @@ class Requisition extends Model
      * @var array<string, array<int, string>>
      */
     public const ALLOWED_TRANSITIONS = [
-        'pending' => ['approved', 'rejected', 'cancelled'],
+        // pending -> issued: a device that approves and then issues before
+        // its next push only sends the final 'issued' row (its outbox keeps
+        // the latest state per record), so the server never sees
+        // 'approved'. Rejecting that left the requisition stuck at pending
+        // and its stock never deducted anywhere else.
+        'pending' => ['approved', 'rejected', 'cancelled', 'issued'],
         'approved' => ['issued', 'cancelled'],
     ];
 

@@ -3,8 +3,11 @@
 namespace Tests\Feature;
 
 use App\Models\Device;
+use App\Models\Location;
 use App\Models\Product;
+use App\Models\ProductStock;
 use App\Models\StockMovement;
+use App\Models\SyncRecord;
 use App\Models\Tenant;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -194,6 +197,48 @@ class SyncStockMovementTest extends TestCase
         ]);
     }
 
+    public function test_server_created_opening_stock_movement_is_broadcast_to_devices(): void
+    {
+        $tenantId = 'tenant-sync-stock-4';
+        $token = $this->actingDeviceToken($tenantId);
+
+        $productId = (string) Str::uuid();
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'products',
+                    'uuid' => $productId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'name' => 'Take-On Product',
+                        'price' => 25,
+                        'cost_price' => 12,
+                        'stock_quantity' => 40,
+                        'updated_at' => now()->toIso8601String(),
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ])
+            ->assertOk();
+
+        $movement = StockMovement::where('product_id', $productId)->where('type', 'opening_stock')->firstOrFail();
+
+        $record = SyncRecord::where('table_name', 'stock_movements')
+            ->where('record_uuid', $movement->id)
+            ->first();
+
+        $this->assertNotNull($record, 'The opening_stock movement must be published so tills can pull it.');
+        $this->assertNull($record->device_id);
+        $this->assertSame($tenantId, $record->business_id);
+        $this->assertSame('opening_stock', $record->payload['type']);
+        $this->assertEquals(40, $record->payload['quantity_change']);
+        $this->assertEquals(12, $record->payload['unit_cost']);
+        $this->assertSame($productId, $record->payload['product_id']);
+        $this->assertNotNull($record->payload['created_at']);
+    }
+
     public function test_updating_an_existing_product_does_not_duplicate_opening_stock(): void
     {
         $tenantId = 'tenant-sync-stock-3';
@@ -229,5 +274,251 @@ class SyncStockMovementTest extends TestCase
         $response->assertOk();
 
         $this->assertDatabaseCount('stock_movements', 0);
+    }
+
+    private function pushNewProduct(string $token, string $tenantId, string $productId, array $extra = []): void
+    {
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'products',
+                    'uuid' => $productId,
+                    'operation' => 'upsert',
+                    'payload' => $extra + [
+                        'business_id' => $tenantId,
+                        'name' => 'Take-On Product',
+                        'price' => 25,
+                        'cost_price' => 12,
+                        'stock_quantity' => 40,
+                        'updated_at' => now()->toIso8601String(),
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ])
+            ->assertOk();
+    }
+
+    private function makeLocation(string $tenantId, string $name): Location
+    {
+        return Location::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => $name, 'type' => 'shop', 'is_active' => true]);
+    }
+
+    public function test_opening_stock_uses_the_location_the_till_sends(): void
+    {
+        $tenantId = 'tenant-sync-stock-5';
+        $token = $this->actingDeviceToken($tenantId);
+        $this->makeLocation($tenantId, 'Branch A');
+        $branchB = $this->makeLocation($tenantId, 'Branch B');
+        $productId = (string) Str::uuid();
+
+        $this->pushNewProduct($token, $tenantId, $productId, ['location_id' => $branchB->id]);
+
+        $this->assertDatabaseHas('stock_movements', ['product_id' => $productId, 'type' => 'opening_stock', 'location_id' => $branchB->id]);
+        $this->assertDatabaseHas('product_stock', ['product_id' => $productId, 'location_id' => $branchB->id, 'quantity' => 40]);
+    }
+
+    public function test_opening_stock_without_a_location_falls_back_to_the_sole_location(): void
+    {
+        $tenantId = 'tenant-sync-stock-6';
+        $token = $this->actingDeviceToken($tenantId);
+        $main = $this->makeLocation($tenantId, 'Main');
+        $productId = (string) Str::uuid();
+
+        $this->pushNewProduct($token, $tenantId, $productId);
+
+        $this->assertDatabaseHas('stock_movements', ['product_id' => $productId, 'type' => 'opening_stock', 'location_id' => $main->id]);
+        $this->assertDatabaseHas('product_stock', ['product_id' => $productId, 'location_id' => $main->id, 'quantity' => 40]);
+    }
+
+    public function test_opening_stock_without_a_location_stays_untagged_when_there_are_several(): void
+    {
+        $tenantId = 'tenant-sync-stock-7';
+        $token = $this->actingDeviceToken($tenantId);
+        $this->makeLocation($tenantId, 'Branch A');
+        $this->makeLocation($tenantId, 'Branch B');
+        $productId = (string) Str::uuid();
+
+        $this->pushNewProduct($token, $tenantId, $productId);
+
+        $this->assertDatabaseHas('stock_movements', ['product_id' => $productId, 'type' => 'opening_stock', 'location_id' => null]);
+    }
+
+    public function test_backfill_publishes_unpublished_opening_stock_and_fills_in_an_unambiguous_location(): void
+    {
+        $tenantId = 'tenant-sync-stock-8';
+        $branchA = $this->makeLocation($tenantId, 'Branch A');
+        $branchB = $this->makeLocation($tenantId, 'Branch B');
+
+        $located = StockMovement::create(['business_id' => $tenantId, 'location_id' => $branchA->id, 'product_id' => (string) Str::uuid(), 'type' => 'opening_stock', 'quantity_change' => 10, 'unit_cost' => 2]);
+
+        // No location, but the product only has stock at Branch B.
+        $productId = (string) Str::uuid();
+        ProductStock::create(['id' => $productId.'|'.$branchB->id, 'product_id' => $productId, 'location_id' => $branchB->id, 'quantity' => 5]);
+        $untagged = StockMovement::create(['business_id' => $tenantId, 'location_id' => null, 'product_id' => $productId, 'type' => 'opening_stock', 'quantity_change' => 5, 'unit_cost' => 1]);
+
+        // No location and no way to tell which branch — published as-is.
+        $ambiguous = StockMovement::create(['business_id' => $tenantId, 'location_id' => null, 'product_id' => (string) Str::uuid(), 'type' => 'opening_stock', 'quantity_change' => 3, 'unit_cost' => 1]);
+
+        // Not opening stock — left alone.
+        $sale = StockMovement::create(['business_id' => $tenantId, 'location_id' => $branchA->id, 'product_id' => (string) Str::uuid(), 'type' => 'sale', 'quantity_change' => -1]);
+
+        $this->artisan('stock:publish-opening-movements', ['--dry-run' => true])->assertSuccessful();
+        $this->assertSame(0, SyncRecord::where('table_name', 'stock_movements')->count());
+        $this->assertNull($untagged->fresh()->location_id);
+
+        $this->artisan('stock:publish-opening-movements')->assertSuccessful();
+
+        $this->assertSame($branchB->id, $untagged->fresh()->location_id);
+        $this->assertNull($ambiguous->fresh()->location_id);
+
+        foreach ([$located, $untagged, $ambiguous] as $movement) {
+            $this->assertSame(1, SyncRecord::where('table_name', 'stock_movements')->where('record_uuid', $movement->id)->count());
+        }
+        $this->assertSame($branchB->id, SyncRecord::where('record_uuid', $untagged->id)->first()->payload['location_id']);
+        $this->assertSame(0, SyncRecord::where('record_uuid', $sale->id)->count());
+
+        // Re-running publishes nothing twice.
+        $this->artisan('stock:publish-opening-movements')->assertSuccessful();
+        $this->assertSame(3, SyncRecord::where('table_name', 'stock_movements')->count());
+    }
+
+    public function test_backfill_does_not_tag_a_location_whose_ledger_already_covers_the_stock(): void
+    {
+        $tenantId = 'tenant-sync-stock-9';
+        $main = $this->makeLocation($tenantId, 'Main');
+        $productId = (string) Str::uuid();
+
+        // Real case: an untagged 48 opening line, plus the same 48 keyed in
+        // again at the location as a manual count, then a sale of 2 — the
+        // location's own ledger (48 - 2) already matches its stock of 46.
+        ProductStock::create(['id' => $productId.'|'.$main->id, 'product_id' => $productId, 'location_id' => $main->id, 'quantity' => 46]);
+        $opening = StockMovement::create(['business_id' => $tenantId, 'location_id' => null, 'product_id' => $productId, 'type' => 'opening_stock', 'quantity_change' => 48, 'unit_cost' => 1]);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => $main->id, 'product_id' => $productId, 'type' => 'adjustment', 'quantity_change' => 48]);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => $main->id, 'product_id' => $productId, 'type' => 'sale', 'quantity_change' => -2]);
+
+        $this->artisan('stock:publish-opening-movements')->assertSuccessful();
+
+        $this->assertNull($opening->fresh()->location_id);
+        $this->assertSame(1, SyncRecord::where('record_uuid', $opening->id)->count());
+    }
+
+    public function test_untagged_adjustment_is_attributed_to_the_sole_location(): void
+    {
+        $tenantId = 'tenant-sync-stock-10';
+        $token = $this->actingDeviceToken($tenantId);
+        $main = $this->makeLocation($tenantId, 'Main');
+        $productId = (string) Str::uuid();
+        Product::create(['id' => $productId, 'business_id' => $tenantId, 'name' => 'Barbed Wire', 'price' => 10, 'stock_quantity' => 0]);
+        $movementId = (string) Str::uuid();
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->postJson('/api/v1/sync/push', [
+                'records' => [[
+                    'table' => 'stock_movements',
+                    'uuid' => $movementId,
+                    'operation' => 'upsert',
+                    'payload' => [
+                        'business_id' => $tenantId,
+                        'product_id' => $productId,
+                        'type' => 'adjustment',
+                        'quantity_change' => 32,
+                        'reason' => 'Physical Stock Count',
+                        'updated_at' => now()->toIso8601String(),
+                    ],
+                    'updated_at' => now()->toIso8601String(),
+                ]],
+            ])
+            ->assertOk();
+
+        $this->assertDatabaseHas('stock_movements', ['id' => $movementId, 'location_id' => $main->id]);
+        $this->assertDatabaseHas('product_stock', ['product_id' => $productId, 'location_id' => $main->id, 'quantity' => 32]);
+        $this->assertDatabaseHas('products', ['id' => $productId, 'stock_quantity' => 32]);
+
+        $republished = SyncRecord::where('table_name', 'stock_movements')->where('record_uuid', $movementId)->whereNull('device_id')->first();
+        $this->assertNotNull($republished);
+        $this->assertSame($main->id, $republished->payload['location_id']);
+    }
+
+    /**
+     * @return array{0: Location, 1: string}
+     */
+    private function productAtMain(string $tenantId, float $recorded, float $total): array
+    {
+        $main = $this->makeLocation($tenantId, 'Main');
+        $productId = (string) Str::uuid();
+        Product::create(['id' => $productId, 'business_id' => $tenantId, 'name' => 'Hinge', 'price' => 5, 'cost_price' => 0.91, 'stock_quantity' => $total]);
+        ProductStock::create(['id' => $productId.'|'.$main->id, 'product_id' => $productId, 'location_id' => $main->id, 'quantity' => $recorded]);
+
+        return [$main, $productId];
+    }
+
+    public function test_resolver_corrects_an_untagged_duplicate_like_hin007(): void
+    {
+        $tenantId = 'tenant-resolve-1';
+        [$main, $productId] = $this->productAtMain($tenantId, 46, 94);
+        $opening = StockMovement::create(['business_id' => $tenantId, 'location_id' => null, 'product_id' => $productId, 'type' => 'opening_stock', 'quantity_change' => 48, 'unit_cost' => 0.91]);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => $main->id, 'product_id' => $productId, 'type' => 'adjustment', 'quantity_change' => 48]);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => $main->id, 'product_id' => $productId, 'type' => 'sale', 'quantity_change' => -2]);
+
+        $this->artisan('stock:resolve-untagged-lines', ['product' => $productId, '--dry-run' => true])->assertSuccessful();
+        $this->assertNull($opening->fresh()->location_id);
+        $this->assertSame(3, StockMovement::where('product_id', $productId)->count());
+
+        $this->artisan('stock:resolve-untagged-lines', ['product' => $productId])->assertSuccessful();
+
+        $this->assertSame($main->id, $opening->fresh()->location_id);
+        $correction = StockMovement::where('product_id', $productId)->where('quantity_change', -48)->first();
+        $this->assertNotNull($correction);
+        $this->assertSame($main->id, $correction->location_id);
+        $this->assertSame($opening->id, $correction->reference_id);
+        $this->assertEquals(46, Product::find($productId)->stock_quantity);
+        $this->assertEquals(46, ProductStock::where('product_id', $productId)->value('quantity'));
+        $this->assertSame(1, SyncRecord::where('record_uuid', $correction->id)->count());
+        $this->assertSame($main->id, SyncRecord::where('record_uuid', $opening->id)->latest('id')->first()->payload['location_id']);
+
+        // Re-running finds nothing left to do.
+        $this->artisan('stock:resolve-untagged-lines', ['product' => $productId])->assertSuccessful();
+        $this->assertSame(4, StockMovement::where('product_id', $productId)->count());
+    }
+
+    public function test_resolver_finds_flagged_products_by_business_and_handles_an_untagged_adjustment(): void
+    {
+        $tenantId = 'tenant-resolve-2';
+        [$main, $productId] = $this->productAtMain($tenantId, 30, 62);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => null, 'product_id' => $productId, 'type' => 'adjustment', 'quantity_change' => 32]);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => $main->id, 'product_id' => $productId, 'type' => 'adjustment', 'quantity_change' => 32]);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => $main->id, 'product_id' => $productId, 'type' => 'sale', 'quantity_change' => -2]);
+
+        $this->artisan('stock:resolve-untagged-lines', ['--business' => $tenantId])->assertSuccessful();
+
+        $this->assertEquals(30, Product::find($productId)->stock_quantity);
+        $this->assertSame(0, StockMovement::where('product_id', $productId)->whereNull('location_id')->count());
+    }
+
+    public function test_resolver_only_tags_an_untagged_line_that_is_the_missing_piece(): void
+    {
+        $tenantId = 'tenant-resolve-3';
+        [$main, $productId] = $this->productAtMain($tenantId, 46, 46);
+        $opening = StockMovement::create(['business_id' => $tenantId, 'location_id' => null, 'product_id' => $productId, 'type' => 'opening_stock', 'quantity_change' => 48]);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => $main->id, 'product_id' => $productId, 'type' => 'sale', 'quantity_change' => -2]);
+
+        $this->artisan('stock:resolve-untagged-lines', ['product' => $productId])->assertSuccessful();
+
+        $this->assertSame($main->id, $opening->fresh()->location_id);
+        $this->assertSame(2, StockMovement::where('product_id', $productId)->count());
+        $this->assertEquals(46, ProductStock::where('product_id', $productId)->value('quantity'));
+    }
+
+    public function test_resolver_leaves_a_product_that_does_not_reconcile(): void
+    {
+        $tenantId = 'tenant-resolve-4';
+        [$main, $productId] = $this->productAtMain($tenantId, 40, 60);
+        $untagged = StockMovement::create(['business_id' => $tenantId, 'location_id' => null, 'product_id' => $productId, 'type' => 'adjustment', 'quantity_change' => 15]);
+        StockMovement::create(['business_id' => $tenantId, 'location_id' => $main->id, 'product_id' => $productId, 'type' => 'adjustment', 'quantity_change' => 45]);
+
+        $this->artisan('stock:resolve-untagged-lines', ['product' => $productId])->assertSuccessful();
+
+        $this->assertNull($untagged->fresh()->location_id);
+        $this->assertSame(2, StockMovement::where('product_id', $productId)->count());
     }
 }

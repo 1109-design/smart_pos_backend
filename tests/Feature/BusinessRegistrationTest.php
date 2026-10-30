@@ -29,8 +29,7 @@ class BusinessRegistrationTest extends TestCase
                 'business_name' => 'Nyasha Groceries',
                 'owner_name' => 'Nyasha M',
                 'owner_email' => 'nyasha@shop.co.zw',
-                'pin' => '1234',
-                'password' => 'trial-password-123',
+                'password' => 'Trial-Password-123',
                 'country' => 'ZW',
                 'currency_code' => 'USD',
             ], $overrides));
@@ -75,22 +74,23 @@ class BusinessRegistrationTest extends TestCase
 
     public function test_owner_becomes_business_owner_and_is_isolated_from_other_businesses(): void
     {
-        $this->register(['owner_email' => 'a@shop.co.zw', 'pin' => '1111']);
+        $this->register(['owner_email' => 'a@shop.co.zw', 'password' => 'First-Shop-111']);
         $this->register([
             'owner_email' => 'b@shop.co.zw',
             'business_name' => 'Other Shop',
-            'pin' => '2222',
+            'password' => 'Second-Shop-222',
         ]);
 
         // Owner of the second business cannot log a device into the first
-        // business using their own PIN.
+        // business using their own email and password.
         $first = Tenant::where('owner_email', 'a@shop.co.zw')->first();
 
         $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.200'])
             ->postJson('/api/v1/auth/device', [
                 'device_identifier' => (string) str()->uuid(),
                 'device_name' => 'Rogue',
-                'pin' => '2222',
+                'email' => 'b@shop.co.zw',
+                'password' => 'Second-Shop-222',
                 'business_code' => $first->pairing_code,
             ])->assertStatus(401);
     }

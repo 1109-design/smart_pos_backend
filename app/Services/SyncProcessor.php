@@ -47,6 +47,7 @@ use App\Models\CustomerWriteOff;
 use App\Models\DeliveryNote;
 use App\Models\DeliveryNoteItem;
 use App\Models\DocumentBrandingSetting;
+use App\Models\DocumentSignature;
 use App\Models\Employee;
 use App\Models\ExchangeRate;
 use App\Models\Expense;
@@ -59,18 +60,36 @@ use App\Models\Location;
 use App\Models\LoyaltyTransaction;
 use App\Models\MilestoneTask;
 use App\Models\Payment;
+use App\Models\PaymentMethodConfig;
+use App\Models\Payroll\EmployeeLeaveEntry;
+use App\Models\Payroll\EmployeeLoan;
+use App\Models\Payroll\EmployeePayProfile;
+use App\Models\Payroll\EmployeePaySplit;
+use App\Models\Payroll\EmployeeRecurringComponent;
+use App\Models\Payroll\PayComponent;
+use App\Models\Payroll\PayrollAuditEntry;
+use App\Models\Payroll\PayrollSetting;
+use App\Models\Payroll\PayRun;
+use App\Models\Payroll\PayRunEmployee;
+use App\Models\Payroll\PayRunLine;
+use App\Models\Payroll\StatutoryRemittance;
+use App\Models\Payroll\StatutorySetting;
+use App\Models\Payroll\TaxTable;
+use App\Models\Payroll\TaxTableBand;
+use App\Models\PendingCollection;
+use App\Models\PendingCollectionEvent;
+use App\Models\PendingCollectionUsedOtp;
 use App\Models\PoAuditLog;
 use App\Models\PoReceiptVariance;
-use App\Models\ReceiptInspection;
 use App\Models\ProcurementBudget;
 use App\Models\Product;
+use App\Models\ProductBarcode;
 use App\Models\ProductContainerLink;
-use App\Models\ProductRequest;
 use App\Models\ProductPriceTier;
+use App\Models\ProductRequest;
 use App\Models\ProductSellableLocation;
 use App\Models\ProductStock;
 use App\Models\ProductTaxRate;
-use App\Models\ProductBarcode;
 use App\Models\ProductUnit;
 use App\Models\ProductVariant;
 use App\Models\ProductVariantStock;
@@ -80,6 +99,7 @@ use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
 use App\Models\Quotation;
 use App\Models\QuotationItem;
+use App\Models\ReceiptInspection;
 use App\Models\RecurringInvoiceSchedule;
 use App\Models\Requisition;
 use App\Models\RequisitionItem;
@@ -87,6 +107,8 @@ use App\Models\RolePermission;
 use App\Models\SalaryPayment;
 use App\Models\SalesOrder;
 use App\Models\SalesOrderItem;
+use App\Models\SalesReturn;
+use App\Models\SalesReturnItem;
 use App\Models\SheetCut;
 use App\Models\SheetLossRecord;
 use App\Models\SheetLot;
@@ -118,18 +140,11 @@ use App\Models\TransactionTax;
 use App\Models\UnitOfMeasure;
 use App\Models\User;
 use App\Models\WarehouseBin;
-use App\Services\Accounting\AssetPostingService;
-use App\Services\Accounting\CreditPaymentPostingService;
-use App\Services\Accounting\ExpensePostingService;
-use App\Services\Accounting\GrvPostingService;
-use App\Services\Accounting\InvoicePaymentPostingService;
+use App\Services\Accounting\JournalEntryApprovalService;
 use App\Services\Accounting\OpeningBalanceService;
 use App\Services\Accounting\ProductOpeningStockPostingService;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
-use App\Services\Accounting\SalaryPostingService;
-use App\Services\Accounting\SalePostingService;
-use App\Services\Accounting\StockTakePostingService;
-use App\Services\Accounting\SupplierPaymentService;
+use App\Services\Payroll\PayrollSync;
 use App\Services\Zimra\ZimraSalesService;
 use App\Support\BackOfficePermission;
 use Illuminate\Database\Eloquent\Model;
@@ -142,6 +157,18 @@ use Illuminate\Support\Str;
 
 class SyncProcessor
 {
+    /**
+     * Product columns an upsert leaves untouched when the payload omits the
+     * key entirely (see the 'products' case) — added after the original
+     * payload shape, so older device builds don't know to send them.
+     *
+     * @var list<string>
+     */
+    private const PRODUCT_KEEP_WHEN_ABSENT = [
+        'sheet_width', 'sheet_height', 'sheet_min_usable_width', 'sheet_min_usable_height',
+        'sheet_kerf_width', 'sheet_cutting_charge', 'sheet_allow_rotate', 'is_taxable',
+    ];
+
     // Tables whose records are immutable — delete operations are ignored
     private const IMMUTABLE = [
         'stock_movements', 'loyalty_transactions', 'credit_transactions',
@@ -154,6 +181,17 @@ class SyncProcessor
         'sheet_loss_records',
         // Goods inspection at receiving — a permanent record of each check.
         'receipt_inspections',
+        // Pending Book: the tills never delete an entry (it's cancelled
+        // instead), its history is append-only, and a used OTP must stay
+        // used forever.
+        'pending_collections',
+        'pending_collection_events',
+        'pending_collection_used_otps',
+        // On-screen document signatures are voided, never deleted.
+        'document_signatures',
+        // Till passwords and the password policy are replaced, never deleted.
+        'user_credentials',
+        'password_policies',
         // GLS·03 — no delete UI exists for a bin; safer to leave an
         // orphaned one than strand a sheet_lots.warehouse_bin_id reference.
         'warehouse_bins',
@@ -186,6 +224,9 @@ class SyncProcessor
         // an edit or delete — same reasoning as 'supplier_payments' itself.
         'supplier_payment_allocations',
         'supplier_credit_note_lines',
+        // A customer return, once approved on the till, is a financial fact
+        // — its money/stock already moved in transactions/stock_movements.
+        'sales_returns', 'sales_return_items',
         // AP module — a reconciliation session's own line items are a
         // frozen snapshot of what was found at that point in time, never
         // edited after the fact (matches 'credit_note_items' above).
@@ -199,6 +240,7 @@ class SyncProcessor
     // inert for push()/pull() and this explicit check is the real protection
     // there.
     private const TENANT_SCOPED_MODELS = [
+        'pending_collections' => PendingCollection::class,
         'locations' => Location::class,
         'categories' => Category::class,
         'tax_rates' => TaxRate::class,
@@ -238,6 +280,7 @@ class SyncProcessor
         'journal_headers' => JournalHeader::class,
         'general_ledger' => GeneralLedgerEntry::class,
         'bank_accounts' => BankAccount::class,
+        'payment_method_configs' => PaymentMethodConfig::class,
         'bank_reconciliations' => BankReconciliation::class,
         'account_role_mappings' => AccountRoleMapping::class,
         'supplier_payments' => SupplierPayment::class,
@@ -276,6 +319,24 @@ class SyncProcessor
         'ar_promises_to_pay' => ArPromiseToPay::class,
         'ar_disputes' => ArDispute::class,
         'customer_reconciliations' => CustomerReconciliation::class,
+        'sales_returns' => SalesReturn::class,
+        'document_signatures' => DocumentSignature::class,
+        // Payroll — see App\Services\Payroll\PayrollSync.
+        'payroll_settings' => PayrollSetting::class,
+        'pay_components' => PayComponent::class,
+        'employee_pay_profiles' => EmployeePayProfile::class,
+        'employee_pay_splits' => EmployeePaySplit::class,
+        'employee_recurring_components' => EmployeeRecurringComponent::class,
+        'employee_loans' => EmployeeLoan::class,
+        'tax_tables' => TaxTable::class,
+        'tax_table_bands' => TaxTableBand::class,
+        'statutory_settings' => StatutorySetting::class,
+        'pay_runs' => PayRun::class,
+        'pay_run_employees' => PayRunEmployee::class,
+        'pay_run_lines' => PayRunLine::class,
+        'statutory_remittances' => StatutoryRemittance::class,
+        'employee_leave_entries' => EmployeeLeaveEntry::class,
+        'payroll_audit_log' => PayrollAuditEntry::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -300,6 +361,7 @@ class SyncProcessor
         'po_audit_logs' => [PoAuditLog::class, 'po_id'],
         'po_receipt_variances' => [PoReceiptVariance::class, 'purchase_order_id'],
         'receipt_inspections' => [ReceiptInspection::class, 'purchase_order_id'],
+        'pending_collection_events' => [PendingCollectionEvent::class, 'collection_id'],
         'quotation_items' => [QuotationItem::class, 'quotation_id'],
         'invoice_items' => [InvoiceItem::class, 'invoice_id'],
         'invoice_payments' => [InvoicePayment::class, 'invoice_id'],
@@ -320,6 +382,7 @@ class SyncProcessor
         'delivery_note_items' => [DeliveryNoteItem::class, 'delivery_note_id'],
         'customer_debit_note_items' => [CustomerDebitNoteItem::class, 'customer_debit_note_id'],
         'customer_reconciliation_items' => [CustomerReconciliationItem::class, 'customer_reconciliation_id'],
+        'sales_return_items' => [SalesReturnItem::class, 'sales_return_id'],
     ];
 
     // Tables in TENANT_SCOPED_MODELS above (they carry their own business_id,
@@ -557,6 +620,122 @@ class SyncProcessor
         }
     }
 
+    /**
+     * Pending Book entry from a till. The device bumps `version` on every
+     * change and sends the version its change was built on (`base_version`).
+     * A change is only accepted on top of the version the server holds —
+     * otherwise another till changed the entry first (e.g. both confirmed
+     * the same OTP while offline from each other), and this push is refused
+     * as a conflict for a manager to review; the losing till re-pulls the
+     * server's copy.
+     */
+    protected function upsertPendingCollection(string $uuid, array $payload): void
+    {
+        $existing = PendingCollection::lockForUpdate()->find($uuid);
+        $incomingVersion = (int) ($payload['version'] ?? 0);
+        $baseVersion = (int) ($payload['base_version'] ?? 0);
+        $status = $payload['status'] ?? 'pending';
+
+        if ($existing) {
+            if ($incomingVersion === (int) $existing->version) {
+                // Re-sent push of what the server already holds — fine.
+                // Same version number with different content is two tills
+                // each making "the next" change: the later one loses.
+                if ($existing->status === $status
+                    && (string) $existing->items_json === (string) ($payload['items_json'] ?? '')
+                    && (string) $existing->otp_code === (string) ($payload['otp_code'] ?? '')) {
+                    return;
+                }
+                throw new \RuntimeException(
+                    "pending_collections: entry {$uuid} was changed on another device at the same time (v{$incomingVersion})."
+                );
+            }
+            if ($baseVersion !== (int) $existing->version) {
+                throw new \RuntimeException(
+                    "pending_collections: entry {$uuid} changed on another device first (server v{$existing->version}, "
+                    ."this change was based on v{$baseVersion})."
+                );
+            }
+        }
+
+        if (! PendingCollection::isValidTransition($existing?->status, $status)) {
+            throw new \RuntimeException(
+                "pending_collections: invalid status change '".($existing?->status ?? 'new')."' -> '{$status}'."
+            );
+        }
+
+        PendingCollection::updateOrCreate(
+            ['id' => $uuid],
+            [
+                'business_id' => $payload['business_id'] ?? $existing?->business_id,
+                'transaction_id' => $payload['transaction_id'] ?? $existing?->transaction_id ?? '',
+                'location_id' => ($payload['location_id'] ?? null) ?: null,
+                'collector_name' => $payload['collector_name'] ?? '',
+                'collector_phone' => $payload['collector_phone'] ?? '',
+                'collector_id_number' => ($payload['collector_id_number'] ?? null) ?: null,
+                'vehicle_registration' => ($payload['vehicle_registration'] ?? null) ?: null,
+                'status' => $status,
+                'notes' => $payload['notes'] ?? null,
+                'items_json' => $payload['items_json'] ?? null,
+                'expected_collection_date' => $payload['expected_collection_date'] ?? null,
+                'reminder_days_before' => (int) ($payload['reminder_days_before'] ?? 1),
+                'reminder_sent' => (bool) ($payload['reminder_sent'] ?? false),
+                'otp_code' => ($payload['otp_code'] ?? null) ?: null,
+                'otp_sent_at' => $payload['otp_sent_at'] ?? null,
+                'otp_expires_at' => $payload['otp_expires_at'] ?? null,
+                'confirmed_by_user_id' => ($payload['confirmed_by_user_id'] ?? null) ?: null,
+                'collected_at' => $payload['collected_at'] ?? null,
+                'cancelled_by_user_id' => ($payload['cancelled_by_user_id'] ?? null) ?: null,
+                'cancellation_reason' => ($payload['cancellation_reason'] ?? null) ?: null,
+                'cancelled_at' => $payload['cancelled_at'] ?? null,
+                'sms_message_id' => ($payload['sms_message_id'] ?? null) ?: null,
+                'reversal_count' => (int) ($payload['reversal_count'] ?? 0),
+                'last_reversed_at' => $payload['last_reversed_at'] ?? null,
+                'version' => $incomingVersion,
+                'device_id' => $existing?->device_id ?? (($payload['device_id'] ?? null) ?: null),
+                'created_at' => $payload['created_at'] ?? $existing?->created_at ?? now(),
+                'updated_at' => $payload['updated_at'] ?? now(),
+            ]
+        );
+    }
+
+    /**
+     * An OTP issued by a till. A code is issued once per business, ever: the
+     * same code arriving again for the same entry is a harmless re-send; for
+     * a different entry it means two tills drew the same code while out of
+     * touch — refused, so a manager sees it.
+     */
+    protected function recordPendingUsedOtp(string $uuid, array $payload): void
+    {
+        $businessId = $payload['business_id'] ?? null;
+        $otp = (string) ($payload['otp'] ?? '');
+        if ($businessId === null || $otp === '') {
+            throw new \RuntimeException('pending_collection_used_otps: business_id and otp are required.');
+        }
+
+        $existing = PendingCollectionUsedOtp::where('business_id', $businessId)
+            ->where('otp', $otp)
+            ->lockForUpdate()
+            ->first();
+        if ($existing) {
+            if ($existing->collection_id !== ($payload['collection_id'] ?? null)) {
+                throw new \RuntimeException(
+                    "pending_collection_used_otps: code already issued for another entry ({$existing->collection_id})."
+                );
+            }
+
+            return;
+        }
+
+        PendingCollectionUsedOtp::create([
+            'id' => $uuid,
+            'business_id' => $businessId,
+            'otp' => $otp,
+            'collection_id' => $payload['collection_id'] ?? null,
+            'issued_at' => $payload['issued_at'] ?? now(),
+        ]);
+    }
+
     protected function resolveParentOwner(string $table, string $parentId): ?string
     {
         return match ($table) {
@@ -573,6 +752,7 @@ class SyncProcessor
             'transaction_items', 'transaction_taxes', 'payments' => Transaction::where('id', $parentId)->value('business_id'),
             'loyalty_transactions', 'credit_transactions' => Customer::where('id', $parentId)->value('business_id'),
             'purchase_order_items', 'po_audit_logs', 'po_receipt_variances', 'receipt_inspections' => PurchaseOrder::where('id', $parentId)->value('business_id'),
+            'pending_collection_events' => PendingCollection::where('id', $parentId)->value('business_id'),
             'stock_take_items' => StockTake::where('id', $parentId)->value('business_id'),
             'quotation_items' => Quotation::where('id', $parentId)->value('business_id'),
             'invoice_items', 'invoice_payments' => Invoice::where('id', $parentId)->value('business_id'),
@@ -593,6 +773,7 @@ class SyncProcessor
             'delivery_note_items' => DeliveryNote::where('id', $parentId)->value('business_id'),
             'customer_debit_note_items' => CustomerDebitNote::where('id', $parentId)->value('business_id'),
             'customer_reconciliation_items' => CustomerReconciliation::where('id', $parentId)->value('business_id'),
+            'sales_return_items' => SalesReturn::where('id', $parentId)->value('business_id'),
             default => null,
         };
     }
@@ -741,8 +922,51 @@ class SyncProcessor
         }
     }
 
+    /**
+     * A signature's ink, signer and document never change once captured —
+     * a re-sent or tampered push can only void it (and a void sticks).
+     */
+    protected function upsertDocumentSignature(string $uuid, array $payload): void
+    {
+        $existing = DocumentSignature::find($uuid);
+        if ($existing) {
+            if ($existing->voided_at === null && ! empty($payload['voided_at'])) {
+                $existing->update([
+                    'voided_at' => $payload['voided_at'],
+                    'voided_by_user_id' => $payload['voided_by_user_id'] ?? null,
+                ]);
+            }
+
+            return;
+        }
+
+        if (empty($payload['image_png'])) {
+            throw new \RuntimeException('document_signatures: image_png is required.');
+        }
+
+        DocumentSignature::create([
+            'id' => $uuid,
+            'business_id' => $payload['business_id'] ?? null,
+            'document_type' => $payload['document_type'] ?? '',
+            'document_id' => $payload['document_id'] ?? '',
+            'slot' => $payload['slot'] ?? '',
+            'signer_name' => $payload['signer_name'] ?? '',
+            'image_png' => $payload['image_png'],
+            'signed_by_user_id' => $payload['signed_by_user_id'] ?? null,
+            'signed_at' => $payload['signed_at'] ?? now(),
+            'voided_at' => $payload['voided_at'] ?? null,
+            'voided_by_user_id' => $payload['voided_by_user_id'] ?? null,
+        ]);
+    }
+
     protected function handleUpsert(string $table, string $uuid, array $payload, bool $trusted = true, ?User $actingUser = null): void
     {
+        if (PayrollSync::handles($table)) {
+            app(PayrollSync::class)->upsert($table, $uuid, $payload, $trusted);
+
+            return;
+        }
+
         switch ($table) {
             case 'locations':
                 Location::updateOrCreate(
@@ -774,6 +998,22 @@ class SyncProcessor
                         'price_override' => $payload['price_override'] ?? null,
                     ]
                 );
+                // The pushed quantity is a device's snapshot, and it can be
+                // older than movements the same device pushes alongside it
+                // (the app's duplicate-row merge enqueues one before the
+                // movement that changes it). Once this location has a
+                // movement ledger, that ledger is the quantity — same rule
+                // as the 'stock_movements' case's recompute — so a stale
+                // snapshot can never overwrite it, whatever order the
+                // records arrive in.
+                $psProductId = $payload['product_id'] ?? $uuid;
+                $psLocationId = $payload['location_id'] ?? '';
+                if ($psLocationId !== '' && DB::table('stock_movements')
+                    ->where('product_id', $psProductId)
+                    ->where('location_id', $psLocationId)
+                    ->exists()) {
+                    $this->recomputeLocationStock($psProductId, $psLocationId);
+                }
                 break;
 
             case 'product_variant_stock':
@@ -851,37 +1091,14 @@ class SyncProcessor
                     );
                 }
 
-                // Same enforcement as ApprovalService::resolve() (separation
-                // of duties + rule-based required-role), applied here too —
-                // a device can resolve an approval_requests row through this
-                // generic sync-push path directly (the till's own PIN-
-                // approved/queued flows both write here), completely
-                // bypassing ApprovalService::resolve(), which only the
-                // BackOffice web controller ever calls. Without this, the
-                // guard added there closes the BackOffice route but leaves
-                // this one wide open — the same class of bypass every other
-                // escalation gate in this file exists to close. $actingUser
-                // (the device's own authenticated identity), never a
-                // payload-claimed approver_user_id, decides who's deciding.
-                if (! $trusted && $currentApprovalStatus === 'pending' && in_array($incomingApprovalStatus, ['approved', 'rejected'], true)) {
-                    $applicableRule = $existingApprovalRequest->rule_set_id
-                        ? app(ApprovalRuleEngine::class)->findApplicableRule(
-                            ApprovalRuleSet::find($existingApprovalRequest->rule_set_id),
-                            ['amount' => (float) ($existingApprovalRequest->estimated_value ?? 0)],
-                            $existingApprovalRequest->current_level ?? 1,
-                        )
-                        : null;
-
-                    if (! $actingUser || ! app(ApprovalRuleEngine::class)->canApprove($existingApprovalRequest->business_id, $actingUser->id, $existingApprovalRequest, $applicableRule)) {
-                        throw new \RuntimeException(
-                            match (true) {
-                                $applicableRule?->approval_group_id !== null => 'approval_requests: deciding this stage requires a member of the assigned approver group.',
-                                $applicableRule?->required_role !== null => "approval_requests: deciding this request requires {$applicableRule->required_role} authority or higher.",
-                                default => 'approval_requests: you cannot approve or reject your own request.',
-                            }
-                        );
-                    }
-                }
+                // The app decides approvals: the approver signs in on the till
+                // and decides from the Approvals inbox, where separation of
+                // duties, approver groups and required roles are enforced.
+                // The server only syncs the result. Re-checking authority
+                // here against $actingUser — the device token's owner, not
+                // the person who signed in to approve — rejected legitimate
+                // decisions made on shared tills. Only the transition shape
+                // above is validated.
 
                 ApprovalRequest::updateOrCreate(
                     ['id' => $uuid],
@@ -912,8 +1129,36 @@ class SyncProcessor
                         'branch_id' => $payload['branch_id'] ?? null,
                         'is_delegated' => $payload['is_delegated'] ?? false,
                         'delegated_from_user_id' => $payload['delegated_from_user_id'] ?? null,
+                        // Neither the app nor ApprovalService::resolve() sends
+                        // a separate rejection_reason — both carry the
+                        // decider's note in `reason`. Mirror it here so
+                        // anything reading rejection_reason sees why.
+                        'rejection_reason' => $incomingApprovalStatus === 'rejected'
+                            ? ($payload['rejection_reason'] ?? $payload['reason'] ?? null)
+                            : null,
                     ]
                 );
+
+                if ($currentApprovalStatus === 'pending'
+                    && in_array($incomingApprovalStatus, ['approved', 'rejected'], true)) {
+                    // A PO decided in the app's Approvals inbox: release or
+                    // cancel it here too, so the server never keeps a PO the
+                    // app already decided at pending_approval.
+                    if (($payload['action'] ?? null) === 'approve_purchase_order'
+                        && ($payload['subject_type'] ?? null) === 'PurchaseOrder') {
+                        $decided = ApprovalRequest::find($uuid);
+                        $approver = (string) ($payload['approver_user_id'] ?? $actingUser?->id ?? '');
+                        $incomingApprovalStatus === 'approved'
+                            ? app(PurchaseOrderApprovalGate::class)->resolveApproved($decided, $approver)
+                            : app(PurchaseOrderApprovalGate::class)->resolveRejected($decided, $approver);
+                    }
+
+                    // A manual journal held for approval posts (or is
+                    // discarded) on its final decision.
+                    if (($payload['action'] ?? null) === JournalEntryApprovalService::ACTION) {
+                        app(JournalEntryApprovalService::class)->applyDecision(ApprovalRequest::find($uuid));
+                    }
+                }
                 break;
 
             case 'stock_transfer_items':
@@ -1269,25 +1514,9 @@ class SyncProcessor
                 break;
 
             case 'exchange_rates':
-                // A rate change must be backed by an approved
-                // change_exchange_rate approval_requests row before it can
-                // become active — see hasApprovedRequest() above. The
-                // Flutter client always generates the exchange_rates row's
-                // own uuid as the approval's subject_id (rates_tab_screen.dart,
-                // approval_resolution.dart), so a direct subject_id match is
-                // sufficient here; no approval_request_id payload field
-                // needed. A rate change is always a brand-new uuid, so this
-                // still only ever gates first-insert of a given rate id — the
-                // one legitimate update to an existing row is
-                // ApprovalService::applyApprovedAction() closing out the
-                // previously-current row's valid_until (FX·06 audit history),
-                // which is server-authored ($trusted stays true there) and
-                // so never hits this untrusted-payload branch at all.
-                if (! $trusted && ! ExchangeRate::where('id', $uuid)->exists()
-                    && ! $this->hasApprovedRequest($payload['business_id'] ?? null, 'ExchangeRate', $uuid, ['change_exchange_rate'], $payload)) {
-                    throw new \RuntimeException('exchange_rates: a rate change requires an approved approval request.');
-                }
-
+                // The app decides rate-change approvals; the server only
+                // relays the resulting row (see the 2026-10-06 sync-only
+                // refactor).
                 ExchangeRate::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -1308,55 +1537,76 @@ class SyncProcessor
                 $productExisted = Product::where('id', $uuid)->exists();
                 $openingStock = (float) ($payload['stock_quantity'] ?? 0);
 
-                $product = Product::updateOrCreate(
-                    ['id' => $uuid],
-                    [
-                        'business_id' => $payload['business_id'] ?? null,
-                        'category_id' => $payload['category_id'] ?? null,
-                        'name' => $payload['name'] ?? '',
-                        'item_type' => $payload['item_type'] ?? 'product',
-                        'sku' => $payload['sku'] ?? null,
-                        'barcode' => $payload['barcode'] ?? null,
-                        'price' => $payload['price'] ?? 0,
-                        'min_price' => $payload['min_price'] ?? null,
-                        'discount_percent' => $payload['discount_percent'] ?? null,
-                        'cost_price' => $payload['cost_price'] ?? 0,
-                        'deposit_amount' => $payload['deposit_amount'] ?? null,
-                        'unit' => $payload['unit'] ?? 'piece',
-                        'sheet_width' => $payload['sheet_width'] ?? null,
-                        'sheet_height' => $payload['sheet_height'] ?? null,
-                        // GLS·02 — every 'products' upsert is a full-row
-                        // replace (see this case's other `?? default`
-                        // fields), so a payload built before these columns
-                        // existed — or from a call site that forgot them —
-                        // would otherwise silently wipe a sheet product's
-                        // cutting rules on every unrelated receive/sale.
-                        'sheet_min_usable_width' => $payload['sheet_min_usable_width'] ?? null,
-                        'sheet_min_usable_height' => $payload['sheet_min_usable_height'] ?? null,
-                        'sheet_kerf_width' => $payload['sheet_kerf_width'] ?? null,
-                        'sheet_cutting_charge' => $payload['sheet_cutting_charge'] ?? null,
-                        'sheet_allow_rotate' => $payload['sheet_allow_rotate'] ?? true,
-                        'track_stock' => $payload['track_stock'] ?? true,
-                        // stock_quantity is accepted from payload for initial setup.
-                        // It will be overridden below if movements exist (multi-device safe).
-                        'stock_quantity' => $payload['stock_quantity'] ?? 0,
-                        'low_stock_threshold' => $payload['low_stock_threshold'] ?? 5,
-                        'image_path' => $payload['image_path'] ?? null,
-                        'expiry_date' => $payload['expiry_date'] ?? null,
-                        'is_active' => $payload['is_active'] ?? true,
-                        'is_taxable' => $payload['is_taxable'] ?? true,
-                    ]
-                );
+                $productAttributes = [
+                    'business_id' => $payload['business_id'] ?? null,
+                    'category_id' => $payload['category_id'] ?? null,
+                    'name' => $payload['name'] ?? '',
+                    'item_type' => $payload['item_type'] ?? 'product',
+                    'sku' => $payload['sku'] ?? null,
+                    'barcode' => $payload['barcode'] ?? null,
+                    'price' => $payload['price'] ?? 0,
+                    'min_price' => $payload['min_price'] ?? null,
+                    'discount_percent' => $payload['discount_percent'] ?? null,
+                    'cost_price' => $payload['cost_price'] ?? 0,
+                    'deposit_amount' => $payload['deposit_amount'] ?? null,
+                    'unit' => $payload['unit'] ?? 'piece',
+                    'sheet_width' => $payload['sheet_width'] ?? null,
+                    'sheet_height' => $payload['sheet_height'] ?? null,
+                    // GLS·02 — every 'products' upsert is a full-row
+                    // replace (see this case's other `?? default`
+                    // fields), so a payload built before these columns
+                    // existed — or from a call site that forgot them —
+                    // would otherwise silently wipe a sheet product's
+                    // cutting rules on every unrelated receive/sale.
+                    'sheet_min_usable_width' => $payload['sheet_min_usable_width'] ?? null,
+                    'sheet_min_usable_height' => $payload['sheet_min_usable_height'] ?? null,
+                    'sheet_kerf_width' => $payload['sheet_kerf_width'] ?? null,
+                    'sheet_cutting_charge' => $payload['sheet_cutting_charge'] ?? null,
+                    'sheet_allow_rotate' => $payload['sheet_allow_rotate'] ?? true,
+                    'track_stock' => $payload['track_stock'] ?? true,
+                    // stock_quantity is accepted from payload for initial setup.
+                    // It will be overridden below if movements exist (multi-device safe).
+                    'stock_quantity' => $payload['stock_quantity'] ?? 0,
+                    'low_stock_threshold' => $payload['low_stock_threshold'] ?? 5,
+                    'image_path' => $payload['image_path'] ?? null,
+                    'expiry_date' => $payload['expiry_date'] ?? null,
+                    'is_active' => $payload['is_active'] ?? true,
+                    'is_taxable' => $payload['is_taxable'] ?? true,
+                ];
+                // A key that is absent (as opposed to sent as null) means the
+                // sender didn't know about that column — older app builds'
+                // stock-recompute/archive pushes never included sheet_* or
+                // is_taxable. Keep the stored value for an existing product
+                // instead of letting the `?? default` above wipe it; that
+                // wipe is what kept erasing sheet dimensions.
+                if ($productExisted) {
+                    foreach (self::PRODUCT_KEEP_WHEN_ABSENT as $column) {
+                        if (! array_key_exists($column, $payload)) {
+                            unset($productAttributes[$column]);
+                        }
+                    }
+                }
+                $product = Product::updateOrCreate(['id' => $uuid], $productAttributes);
                 // First time this product is created with an opening quantity: give it
                 // a ledger entry, same as every other stock change, so take-on has an
                 // audit trail instead of being a bare column write nothing can trace.
                 // An optional location_id (set by location-aware callers, e.g. the
                 // BackOffice create form) attributes the opening quantity to that
                 // location too, instead of leaving it in the flat total only.
+                // An older till build (or any caller that doesn't know its
+                // location) sends no location_id. A single-location business
+                // has only one place the stock can be, so attribute it there —
+                // an untagged opening line is invisible to that location's
+                // ledger, and the next recomputeLocationStock() would rebuild
+                // the location's quantity without it.
+                $openingLocationId = $payload['location_id'] ?? null;
+                if (! $productExisted && $openingStock != 0 && empty($openingLocationId)) {
+                    $openingLocationId = $this->soleLocationId($payload['business_id'] ?? null);
+                }
                 if (! $productExisted && $openingStock != 0) {
                     $openingMovement = StockMovement::create([
                         'business_id' => $payload['business_id'] ?? null,
-                        'location_id' => $payload['location_id'] ?? null,
+                        'location_id' => $openingLocationId,
                         'product_id' => $uuid,
                         'type' => 'opening_stock',
                         'quantity_change' => $openingStock,
@@ -1364,6 +1614,7 @@ class SyncProcessor
                         'reason' => 'Opening stock (take-on)',
                         'user_id' => $payload['user_id'] ?? null,
                     ]);
+                    $this->broadcastStockMovement($openingMovement);
                     // Record the take-on value in the books too — see
                     // ProductOpeningStockPostingService for why this ledger
                     // entry alone previously left the balance sheet blind to
@@ -1374,8 +1625,8 @@ class SyncProcessor
                 // If any movements exist for this product, recompute from the ledger
                 // so concurrent pushes from multiple devices converge correctly.
                 $this->recomputeProductStock($uuid);
-                if (! empty($payload['location_id'])) {
-                    $this->recomputeLocationStock($uuid, $payload['location_id']);
+                if (! empty($openingLocationId)) {
+                    $this->recomputeLocationStock($uuid, $openingLocationId);
                 }
                 break;
 
@@ -1521,24 +1772,11 @@ class SyncProcessor
                 $previousStatus = $existingTx?->status;
                 $incomingStatus = $payload['status'] ?? 'completed';
 
-                // Untrusted (device-pushed) writes that move a sale into a
-                // void/refund status must be backed by an approved
-                // approval_requests row — see hasApprovedRequest() above.
-                // $previousStatus !== $incomingStatus also covers a brand
-                // new transaction born already voided/refunded (an offline
-                // void/refund of a sale that had never synced before),
-                // since $previousStatus is null there.
-                if (! $trusted && $previousStatus !== $incomingStatus) {
-                    $gatedActions = match ($incomingStatus) {
-                        'voided' => ['void_transaction'],
-                        'refunded', 'partial_refund' => ['refund_transaction'],
-                        default => null,
-                    };
-
-                    if ($gatedActions && ! $this->hasApprovedRequest($payload['business_id'] ?? null, 'Transaction', $uuid, $gatedActions, $payload)) {
-                        throw new \RuntimeException("transactions: {$incomingStatus} requires an approved approval request.");
-                    }
-                }
+                // Voids and refunds are approved in the app; the server
+                // relays them. A server-side "must have an approved request"
+                // check raced the approval row itself — a refund pushed in
+                // the same second as its approval was rejected even though
+                // the approval landed moments later.
 
                 $txData = [
                     'business_id' => $payload['business_id'] ?? null,
@@ -1557,6 +1795,7 @@ class SyncProcessor
                     'sale_number' => $payload['sale_number'] ?? null,
                     'notes' => $payload['notes'] ?? null,
                     'void_reason' => $payload['void_reason'] ?? null,
+                    'fiscalisation_requested' => $payload['fiscalisation_requested'] ?? true,
                 ];
                 $tx = Transaction::updateOrCreate(['id' => $uuid], $txData);
 
@@ -1601,14 +1840,11 @@ class SyncProcessor
                     app(ZimraSalesService::class)->queueFiscalisation($tx);
                 }
 
-                // Accounting (Phase 11b) — same transition-based trigger as
-                // ZIMRA above, plus voiding, which needs to reverse whatever
-                // was already posted rather than post something new. No-ops
-                // quietly if this sale's items/payments haven't all synced
-                // yet; the accounting:post-pending-sales sweep catches it.
-                if ($tx->status !== $previousStatus) {
-                    app(SalePostingService::class)->postIfReady($tx);
-                }
+                // No journal posting here, or anywhere in sync: the app posts
+                // every journal (and reverses it on a void) and syncs it up
+                // like any other record. Server-side posting raced the app's
+                // on 2026-10-05 — both posted the same sales, the app's were
+                // rejected as duplicates and the server's lacked COGS.
                 break;
 
             case 'transaction_items':
@@ -1627,13 +1863,6 @@ class SyncProcessor
                         'notes' => $payload['notes'] ?? null,
                     ]
                 );
-
-                // The transaction row itself may well have synced first with
-                // its items still missing — retry posting now that one more
-                // piece has landed (see the 'transactions' case above).
-                if ($parentTx = Transaction::find($payload['transaction_id'] ?? null)) {
-                    app(SalePostingService::class)->postIfReady($parentTx);
-                }
                 break;
 
             case 'transaction_taxes':
@@ -1665,38 +1894,18 @@ class SyncProcessor
                         'rounding_adjustment' => $payload['rounding_adjustment'] ?? 0,
                         'bank_account_id' => $payload['bank_account_id'] ?? null,
                         'pop_attachment_path' => $payload['pop_attachment_path'] ?? null,
+                        'provider' => $payload['provider'] ?? null,
+                        'gl_account_id' => $payload['gl_account_id'] ?? null,
                     ]
                 );
-
-                // Same retry-on-arrival reasoning as transaction_items above.
-                if ($parentTx = Transaction::find($payload['transaction_id'] ?? null)) {
-                    app(SalePostingService::class)->postIfReady($parentTx);
-                }
                 break;
 
             case 'stock_movements':
-                // STK·03 — "a requisition alone must never remove stock,"
-                // and issuing one is gated on approval. Unlike void/refund/
-                // exchange-rate changes, a requisition's approval lives on
-                // its own `status` column rather than the generic
-                // `approval_requests` table (see Requisition::isApproved()),
-                // so this can't reuse hasApprovedRequest() — but the
-                // principle is identical: an untrusted device claiming a
-                // 'requisition_issue' stock movement must point at a
-                // requisition that's actually been approved, not just
-                // trust whatever the Flutter UI's own button-visibility
-                // gate would normally have enforced. Without this, a
-                // device that talks to the API directly (bypassing the
-                // app) could deduct real stock against a requisition
-                // that was never approved.
-                if (! $trusted && ($payload['type'] ?? null) === 'requisition_issue') {
-                    $requisitionId = $payload['reference_id'] ?? null;
-                    $requisition = $requisitionId ? Requisition::find($requisitionId) : null;
-
-                    if (! $requisition || ! $requisition->isApproved()) {
-                        throw new \RuntimeException('stock_movements: requisition_issue requires an approved requisition.');
-                    }
-                }
+                // Requisition issues are approved in the app; the server
+                // relays the stock movement without re-checking the
+                // requisition's status (it can lag behind the movement, or
+                // never show 'approved' at all when approve + issue were
+                // pushed together — see Requisition::ALLOWED_TRANSITIONS).
 
                 // 2026-09-29 sync audit finding C3: transfer_detail_screen.
                 // dart::_confirmReceive() is gated only by local button
@@ -1728,6 +1937,22 @@ class SyncProcessor
                     }
                 }
 
+                // Same sole-location fallback as the 'products' case, for
+                // till pushes only: a till paired minutes earlier has no
+                // active location yet and pushes untagged movements, which
+                // count toward the product's total but no location's stock —
+                // so the location looks short and staff re-enter the count
+                // there (BARBED WIRE 50KG, 2026-10-05). Server-authored
+                // writes are left alone — e.g. BackOffice's stock reset
+                // deliberately posts an untagged line to cancel legacy
+                // untagged stock. Transfers carry their own from/to.
+                $attributedToSoleLocation = false;
+                if (! $trusted && empty($payload['location_id'])
+                    && ! in_array($payload['type'] ?? null, ['transfer_out', 'transfer_in', 'transfer'], true)) {
+                    $payload['location_id'] = $this->soleLocationId($payload['business_id'] ?? null);
+                    $attributedToSoleLocation = $payload['location_id'] !== null;
+                }
+
                 $movement = StockMovement::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -1745,6 +1970,11 @@ class SyncProcessor
                         'user_id' => $payload['user_id'] ?? null,
                     ]
                 );
+                // The SyncRecord other tills pull is the pushed payload, which
+                // still has no location — re-publish the attributed row.
+                if ($attributedToSoleLocation) {
+                    $this->broadcastStockMovement($movement);
+                }
                 // Recompute the product's stock from the full movement ledger.
                 // Both must run: recomputeLocationStock keeps the per-location ledger
                 // (product_stock) accurate, and recomputeProductStock keeps the legacy
@@ -1766,24 +1996,8 @@ class SyncProcessor
                     $this->recomputePurchaseOrderItemReceivedQty($movement->reference_id, $movement->product_id);
                 }
 
-                // Purchasing & Cash Vault Blueprint, part A — a 'receive'
-                // movement that references a real PurchaseOrder (a known
-                // supplier) gets a GRV and a GL posting; walk-in receiving
-                // (reference_id null) is a no-op inside the service itself.
-                // quantity_rejected/rejection_reason are payload-only (never
-                // a stock_movements column — a rejected unit never entered
-                // inventory in the first place), reported by the till's
-                // receiving screen alongside the movement.
-                app(GrvPostingService::class)->recordReceipt(
-                    $movement,
-                    (float) ($payload['quantity_rejected'] ?? 0),
-                    $payload['rejection_reason'] ?? null,
-                );
-
-                // A 'stocktake' movement is one variance line from an
-                // approved stock take — post its GL effect the same
-                // tolerant-of-failure way as the GRV posting above.
-                app(StockTakePostingService::class)->recordVariance($movement);
+                // GRV and stock-take journals are posted by the app (see the
+                // 'transactions' case) — nothing posts here.
 
                 // An 'opening_stock' movement here is a take-on figure set
                 // (or corrected) via ProductsController::applyLocationBalance()
@@ -1823,16 +2037,15 @@ class SyncProcessor
                         'reference' => $payload['reference'] ?? null,
                         'receipt_number' => $payload['receipt_number'] ?? null,
                         'bank_account_id' => $payload['bank_account_id'] ?? null,
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'exchange_rate' => $payload['exchange_rate'] ?? 1.0,
+                        'base_amount' => $payload['base_amount'] ?? null,
                     ]
                 );
                 // Recompute customer credit_balance from the full ledger.
                 if (! empty($payload['customer_id'])) {
                     $this->recomputeCustomerBalances($payload['customer_id']);
                 }
-                // The missing half of credit-sale accounting — see
-                // CreditPaymentPostingService's doc comment. Only 'repayment'
-                // rows post anything; the service itself no-ops otherwise.
-                app(CreditPaymentPostingService::class)->postIfReady($creditTransaction);
                 // A one-time opening balance also needs to land in the
                 // formal books (if this business has any) — see
                 // OpeningBalanceService's doc comment. The till-side ledger
@@ -2194,6 +2407,8 @@ class SyncProcessor
                         'journal_header_id' => $payload['journal_header_id'] ?? null,
                         'created_by_user_id' => $payload['created_by_user_id'] ?? null,
                         'sync_status' => $payload['sync_status'] ?? 'synced',
+                        'provider' => $payload['provider'] ?? null,
+                        'gl_account_id' => $payload['gl_account_id'] ?? null,
                     ]
                 );
                 break;
@@ -2396,6 +2611,64 @@ class SyncProcessor
                 );
                 break;
 
+            case 'sales_returns':
+                SalesReturn::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'location_id' => $payload['location_id'] ?? null,
+                        'customer_id' => $payload['customer_id'] ?? null,
+                        'return_number' => $payload['return_number'] ?? '',
+                        'original_transaction_id' => $payload['original_transaction_id'] ?? null,
+                        'return_transaction_id' => $payload['return_transaction_id'] ?? null,
+                        'exchange_transaction_id' => $payload['exchange_transaction_id'] ?? null,
+                        'outcome' => $payload['outcome'] ?? 'refund',
+                        'returned_value' => $payload['returned_value'] ?? 0,
+                        'new_items_value' => $payload['new_items_value'] ?? 0,
+                        'net_amount' => $payload['net_amount'] ?? 0,
+                        'settlement_method' => $payload['settlement_method'] ?? null,
+                        'reason' => $payload['reason'] ?? '',
+                        'requested_by_user_id' => $payload['requested_by_user_id'] ?? null,
+                        'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
+                        'approval_request_id' => $payload['approval_request_id'] ?? null,
+                    ]
+                );
+                break;
+
+            case 'sales_return_items':
+                SalesReturnItem::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'sales_return_id' => $payload['sales_return_id'] ?? null,
+                        'original_transaction_item_id' => $payload['original_transaction_item_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
+                        'product_name' => $payload['product_name'] ?? '',
+                        'quantity' => $payload['quantity'] ?? 0,
+                        'unit_value' => $payload['unit_value'] ?? 0,
+                        'tax_amount' => $payload['tax_amount'] ?? 0,
+                        'line_value' => $payload['line_value'] ?? 0,
+                        'condition' => $payload['condition'] ?? 'resellable',
+                    ]
+                );
+                break;
+
+            case 'sales_return_settings':
+                // business_id is this table's own primary key (see
+                // ap_tolerance_settings below), so a device can only ever
+                // touch its own row. The return period is the owner's call.
+                if (! $trusted && ! ($actingUser?->hasRole(['business_owner']) ?? false)) {
+                    throw new \RuntimeException('sales_return_settings: only the business owner can change the return period.');
+                }
+
+                DB::table('sales_return_settings')->updateOrInsert(
+                    ['business_id' => $uuid],
+                    [
+                        'return_window_days' => max(0, (int) ($payload['return_window_days'] ?? 0)),
+                        'updated_at' => now(),
+                    ]
+                );
+                break;
+
             case 'ap_tolerance_settings':
                 // Deliberately unguarded — see role_permissions' identical
                 // note: business_id IS this table's own primary key, so a
@@ -2469,7 +2742,7 @@ class SyncProcessor
 
             case 'purchase_orders':
                 $existingPo = PurchaseOrder::find($uuid);
-                [$status, $justGated, $gateReason] = $this->gatePurchaseOrderStatus($existingPo, $payload);
+                [$status] = $this->gatePurchaseOrderStatus($existingPo, $payload);
 
                 PurchaseOrder::updateOrCreate(
                     ['id' => $uuid],
@@ -2492,9 +2765,6 @@ class SyncProcessor
                 );
                 $this->recomputePurchaseOrderTotals($uuid);
 
-                if ($justGated) {
-                    app(PurchaseOrderApprovalGate::class)->requestApproval($uuid, $gateReason);
-                }
                 break;
 
             case 'purchase_order_items':
@@ -2557,6 +2827,75 @@ class SyncProcessor
                         'rejection_reason' => $payload['rejection_reason'] ?? null,
                     ]
                 );
+                break;
+
+            case 'pending_collections':
+                $this->upsertPendingCollection($uuid, $payload);
+                break;
+
+            case 'pending_collection_events':
+                // Append-only: the first push wins (a reversal decision
+                // recorded on two devices shares one deterministic id).
+                PendingCollectionEvent::firstOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'collection_id' => $payload['collection_id'] ?? null,
+                        'business_id' => $payload['business_id'] ?? null,
+                        'event_type' => $payload['event_type'] ?? '',
+                        'from_status' => $payload['from_status'] ?? null,
+                        'to_status' => $payload['to_status'] ?? null,
+                        'actor_user_id' => $payload['actor_user_id'] ?? null,
+                        'approver_user_id' => $payload['approver_user_id'] ?? null,
+                        'approval_request_id' => $payload['approval_request_id'] ?? null,
+                        'reason' => $payload['reason'] ?? null,
+                        'data_json' => $payload['data_json'] ?? null,
+                        'created_at' => $payload['created_at'] ?? now(),
+                    ]
+                );
+                break;
+
+            case 'pending_collection_used_otps':
+                $this->recordPendingUsedOtp($uuid, $payload);
+                break;
+
+            case 'pending_book_settings':
+                // business_id is the primary key (see sales_return_settings),
+                // so a device only ever touches its own row. Whether a
+                // customer must sign for Pending Book goods is the owner's call.
+                if (! $trusted && ! ($actingUser?->hasRole(['business_owner']) ?? false)) {
+                    throw new \RuntimeException('pending_book_settings: only the business owner can change this.');
+                }
+
+                DB::table('pending_book_settings')->updateOrInsert(
+                    ['business_id' => $uuid],
+                    [
+                        'require_collection_signature' => (bool) ($payload['require_collection_signature'] ?? false),
+                        'updated_at' => now(),
+                    ]
+                );
+                break;
+
+            case 'user_credentials':
+                $this->syncUserCredential($uuid, $payload, $trusted, $actingUser);
+                break;
+
+            case 'password_policies':
+                // One row per business, keyed by business_id. The rules
+                // every till password must meet are the owner's call.
+                if (! $trusted) {
+                    if (! ($actingUser?->hasRole(['business_owner']) ?? false)) {
+                        throw new \RuntimeException('password_policies: only the business owner can change this.');
+                    }
+                    if ((string) $actingUser->business_id !== $uuid) {
+                        throw new \RuntimeException('password_policies: record belongs to a different business.');
+                    }
+                }
+
+                app(TillCredentials::class)->applyPolicyPayload($uuid, $payload);
+                break;
+
+            case 'document_signatures':
+                $this->upsertDocumentSignature($uuid, $payload);
                 break;
 
             case 'receipt_inspections':
@@ -2790,8 +3129,6 @@ class SyncProcessor
                         'deleted_at' => $payload['deleted_at'] ?? null,
                     ]
                 );
-
-                app(ExpensePostingService::class)->postIfReady($expense);
                 break;
 
             case 'product_requests':
@@ -2800,11 +3137,20 @@ class SyncProcessor
                     [
                         'business_id' => $payload['business_id'] ?? null,
                         'location_id' => $payload['location_id'] ?? null,
+                        'product_id' => $payload['product_id'] ?? null,
                         'requested_by_user_id' => $payload['requested_by_user_id'] ?? null,
                         'product_name' => $payload['product_name'] ?? '',
+                        'customer_name' => $payload['customer_name'] ?? null,
+                        'customer_phone' => $payload['customer_phone'] ?? null,
+                        'quantity' => $payload['quantity'] ?? null,
                         'note' => $payload['note'] ?? null,
                         'status' => $payload['status'] ?? 'open',
+                        'stock_available_at' => $payload['stock_available_at'] ?? null,
+                        'notified_by_user_id' => $payload['notified_by_user_id'] ?? null,
+                        'notified_at' => $payload['notified_at'] ?? null,
+                        'sms_message_id' => $payload['sms_message_id'] ?? null,
                         'created_at' => $payload['created_at'] ?? now(),
+                        'updated_at' => $payload['updated_at'] ?? now(),
                         'deleted_at' => $payload['deleted_at'] ?? null,
                     ]
                 );
@@ -2851,7 +3197,9 @@ class SyncProcessor
                         'approved_by_user_id' => $payload['approved_by_user_id'] ?? null,
                         'approved_at' => $payload['approved_at'] ?? null,
                         'review_comment' => $payload['review_comment'] ?? null,
-                    ]
+                    ] + $this->presentStockTakeColumns($payload, [
+                        'scope_type', 'scope_bin_ids', 'scope_label',
+                    ])
                 );
                 break;
 
@@ -2878,7 +3226,10 @@ class SyncProcessor
                         'notes' => $payload['notes'] ?? null,
                         'flagged_for_recount' => $flagged,
                         'recount_completed_at' => $recountCompletedAt,
-                    ]
+                    ] + $this->presentStockTakeColumns($payload, [
+                        'damaged_qty', 'damage_breakdown', 'counted_at',
+                        'counted_by_user_id', 'warehouse_bin_id',
+                    ])
                 );
 
                 // A device's own push payload never carries
@@ -2905,6 +3256,11 @@ class SyncProcessor
                             'notes' => $stockTakeItem->notes,
                             'flagged_for_recount' => $stockTakeItem->flagged_for_recount,
                             'recount_completed_at' => $stockTakeItem->recount_completed_at?->toIso8601String(),
+                            'damaged_qty' => $stockTakeItem->damaged_qty !== null ? (float) $stockTakeItem->damaged_qty : null,
+                            'damage_breakdown' => $stockTakeItem->damage_breakdown,
+                            'counted_at' => $stockTakeItem->counted_at?->toIso8601String(),
+                            'counted_by_user_id' => $stockTakeItem->counted_by_user_id,
+                            'warehouse_bin_id' => $stockTakeItem->warehouse_bin_id,
                         ],
                         'source_updated_at' => now(),
                         'synced_at' => now(),
@@ -3038,8 +3394,6 @@ class SyncProcessor
                         'bank_account_id' => $payload['bank_account_id'] ?? null,
                     ]
                 );
-
-                app(SalaryPostingService::class)->recordPayment($salaryPayment);
                 break;
 
             case 'quotations':
@@ -3168,9 +3522,6 @@ class SyncProcessor
                 if (! empty($payload['invoice_id'])) {
                     $this->recomputeInvoiceAmountPaid($payload['invoice_id']);
                 }
-                // The missing half of invoice accounting — see
-                // InvoicePaymentPostingService's doc comment.
-                app(InvoicePaymentPostingService::class)->postIfReady($invoicePayment);
                 break;
 
             case 'credit_notes':
@@ -3319,6 +3670,8 @@ class SyncProcessor
                     'sale', 'salary_payment', 'supplier_payment',
                     'credit_payment', 'invoice_payment',
                     'asset_acquisition', 'asset_disposal',
+                    // Payroll — see PayRunPostingService.
+                    'pay_run', 'pay_run_payment', 'statutory_remittance', 'staff_loan',
                 ];
                 $idempotencyKey = ($sourceType && $sourceId && in_array($sourceType, $singleJournalPerSourceTypes, true))
                     ? "{$sourceType}:{$sourceId}"
@@ -3556,6 +3909,24 @@ class SyncProcessor
                 );
                 break;
 
+            case 'payment_method_configs':
+                PaymentMethodConfig::updateOrCreate(
+                    ['id' => $uuid],
+                    [
+                        'business_id' => $payload['business_id'] ?? null,
+                        'method' => $payload['method'] ?? 'cash',
+                        'currency_code' => $payload['currency_code'] ?? 'USD',
+                        'payment_account_id' => $payload['payment_account_id'] ?? null,
+                        'provider' => $payload['provider'] ?? null,
+                        'gl_account_id' => $payload['gl_account_id'] ?? null,
+                        'is_enabled' => $payload['is_enabled'] ?? true,
+                        'require_reference' => $payload['require_reference'] ?? false,
+                        'allows_change' => $payload['allows_change'] ?? false,
+                        'display_label' => $payload['display_label'] ?? '',
+                    ]
+                );
+                break;
+
             case 'bank_reconciliations':
                 $currentReconciliationStatus = BankReconciliation::where('id', $uuid)->value('status');
                 $incomingReconciliationStatus = $payload['status'] ?? 'in_progress';
@@ -3657,9 +4028,10 @@ class SyncProcessor
                         'reference' => $payload['reference'] ?? null,
                         'recorded_by_user_id' => $payload['recorded_by_user_id'] ?? null,
                         'bank_account_id' => $payload['bank_account_id'] ?? null,
+                        'provider' => $payload['provider'] ?? null,
+                        'gl_account_id' => $payload['gl_account_id'] ?? null,
                     ]
                 );
-                app(SupplierPaymentService::class)->postIfReady($supplierPayment);
                 break;
 
             case 'assets':
@@ -3714,7 +4086,6 @@ class SyncProcessor
                         'created_by_user_id' => $payload['created_by_user_id'] ?? null,
                     ]
                 );
-                app(AssetPostingService::class)->postIfReady($asset);
                 break;
 
             case 'approval_rule_sets':
@@ -3849,17 +4220,12 @@ class SyncProcessor
                 break;
 
             case 'approval_request_stage_decisions':
-                // Append-only audit trail — never mutated once written, and
-                // the device pushing it must be reporting its own action
-                // (acted_by_user_id), never fabricating a decision on behalf
-                // of someone else. The authority check for the decision
-                // itself already happened in the 'approval_requests' case
-                // above (both are pushed in the same sync batch); this case
-                // only guards against forging *who* made it.
+                // Append-only audit trail — never mutated once written.
+                // acted_by_user_id is whoever signed in to the app to decide,
+                // which on a shared till is not the device token's owner, so
+                // it is recorded as the app reports it (see the
+                // 'approval_requests' case above).
                 $actedByUserId = $payload['acted_by_user_id'] ?? null;
-                if (! $trusted && $actingUser?->id !== $actedByUserId) {
-                    throw new \RuntimeException('approval_request_stage_decisions: you may only record a decision as yourself.');
-                }
 
                 ApprovalRequestStageDecision::updateOrCreate(
                     ['id' => $uuid],
@@ -3878,6 +4244,30 @@ class SyncProcessor
                 );
                 break;
         }
+    }
+
+    /**
+     * A till password change, pushed by a paired device. The target user
+     * must belong to the same business as the record and as the device's
+     * own account. Which person at the till may change whose password (self,
+     * or the owner resetting someone) is enforced on the till, since the
+     * device token belongs to whoever paired it, not whoever is signed in.
+     */
+    protected function syncUserCredential(string $uuid, array $payload, bool $trusted, ?User $actingUser): void
+    {
+        $target = User::find($uuid);
+        if (! $target) {
+            throw new MissingParentRecordException('user_credentials');
+        }
+        $businessId = (string) ($payload['business_id'] ?? '');
+        if ((string) $target->business_id !== $businessId) {
+            throw new \RuntimeException('user_credentials: record belongs to a different business.');
+        }
+        if (! $trusted && (string) $actingUser?->business_id !== $businessId) {
+            throw new \RuntimeException('user_credentials: record belongs to a different business.');
+        }
+
+        app(TillCredentials::class)->applyCredentialPayload($uuid, $payload);
     }
 
     protected function syncUser(string $uuid, array $payload, bool $trusted = true, ?User $actingUser = null): void
@@ -4118,7 +4508,56 @@ class SyncProcessor
             'image_path' => $product->image_path,
             'expiry_date' => $product->expiry_date?->toIso8601String(),
             'is_active' => (bool) $product->is_active,
+            'is_taxable' => (bool) $product->is_taxable,
+            'sheet_width' => $product->sheet_width !== null ? (float) $product->sheet_width : null,
+            'sheet_height' => $product->sheet_height !== null ? (float) $product->sheet_height : null,
+            'sheet_min_usable_width' => $product->sheet_min_usable_width !== null ? (float) $product->sheet_min_usable_width : null,
+            'sheet_min_usable_height' => $product->sheet_min_usable_height !== null ? (float) $product->sheet_min_usable_height : null,
+            'sheet_kerf_width' => $product->sheet_kerf_width !== null ? (float) $product->sheet_kerf_width : null,
+            'sheet_cutting_charge' => $product->sheet_cutting_charge !== null ? (float) $product->sheet_cutting_charge : null,
+            'sheet_allow_rotate' => (bool) ($product->sheet_allow_rotate ?? true),
         ];
+    }
+
+    /**
+     * Publishes a stock movement's current server state to every device. For
+     * movements no device pushed (a server-created 'opening_stock' line) or
+     * whose stored push payload is now stale (a location the server filled
+     * in): without this no till would pull them, and the till's stock
+     * history (built purely from its local stock_movements) would be wrong.
+     */
+    public function broadcastStockMovement(StockMovement $movement): void
+    {
+        $this->emitBroadcastSyncRecord('stock_movements', $movement->id, $movement->business_id, [
+            'business_id' => $movement->business_id,
+            'location_id' => $movement->location_id,
+            'to_location_id' => $movement->to_location_id,
+            'product_id' => $movement->product_id,
+            'type' => $movement->type,
+            'quantity_change' => (float) $movement->quantity_change,
+            'unit_cost' => $movement->unit_cost !== null ? (float) $movement->unit_cost : null,
+            'running_avg_cost' => $movement->running_avg_cost !== null ? (float) $movement->running_avg_cost : null,
+            'reason' => $movement->reason,
+            'reference_id' => $movement->reference_id,
+            'attachment_path' => $movement->attachment_path,
+            'user_id' => $movement->user_id,
+            'created_at' => $movement->created_at?->toIso8601String(),
+        ]);
+    }
+
+    /**
+     * The business's only location, or null when it has none or several —
+     * with several there's no safe guess, so the caller leaves it unset.
+     */
+    public function soleLocationId(?string $businessId): ?string
+    {
+        if (! $businessId) {
+            return null;
+        }
+
+        $ids = Location::where('business_id', $businessId)->limit(2)->pluck('id');
+
+        return $ids->count() === 1 ? $ids->first() : null;
     }
 
     /**
@@ -4215,67 +4654,6 @@ class SyncProcessor
     }
 
     /**
-     * Purchasing & Cash Vault Blueprint, part D — a PO over the business's
-     * configured threshold is held at 'pending_approval' instead of moving
-     * to 'sent', with a remote ApprovalRequest raised for an owner/manager
-     * to clear (see PurchaseOrderApprovalGate). Only the first transition
-     * into 'sent' (from null/'draft') is ever gated — once a PO has reached
-     * pending_approval, this device's payload is a stale copy of the
-     * original submission (it doesn't know a review is pending yet), so its
-     * 'sent' claim is ignored rather than re-applied. Resolving the request
-     * writes the final status directly (bypassing this method entirely —
-     * see PurchaseOrderApprovalGate::resolve()), so there's no path back
-     * into this gate once a decision has been made.
-     *
-     * @param  array<string, mixed>  $payload
-     * @return array{0: string, 1: bool} the status to persist, and whether this call just newly raised the gate
-     */
-    /**
-     * @return array{0: string, 1: bool, 2: ?string} [status, justGated, gateReason]
-     */
-    /**
-     * Server-side backstop for actions the spec requires a supervisor to
-     * approve before they take effect: void/refund/exchange-rate-change.
-     * The Flutter approval dialog (`requireApproval()`) already raises an
-     * `approval_requests` row before executing the action locally, but that
-     * row is just another sync record — a modified client (or a raw sync
-     * payload) could otherwise push the resulting mutation directly with no
-     * approval behind it at all, since none of these upserts previously
-     * checked for one server-side.
-     *
-     * Matching is subject_id-first (the common case: the approval's subject
-     * IS the record being upserted, e.g. voiding a transaction or changing
-     * an exchange rate). A caller may instead pass an explicit
-     * `approval_request_id` in $payload for the rare case where the upserted
-     * row is a NEW record distinct from the approval's subject (a refund's
-     * compensating transaction is a fresh uuid; the approval's subject is
-     * the original sale) — that id is verified directly instead.
-     *
-     * @param  array<string, mixed>  $payload
-     * @param  string[]  $actions
-     */
-    private function hasApprovedRequest(?string $businessId, string $subjectType, string $subjectId, array $actions, array $payload): bool
-    {
-        if (empty($businessId)) {
-            return false;
-        }
-
-        $query = ApprovalRequest::where('business_id', $businessId)
-            ->where('status', 'approved')
-            ->whereIn('action', $actions);
-
-        if (! empty($payload['approval_request_id'])) {
-            return (clone $query)->where('id', $payload['approval_request_id'])
-                ->where('subject_type', $subjectType)
-                ->exists();
-        }
-
-        return $query->where('subject_type', $subjectType)
-            ->where('subject_id', $subjectId)
-            ->exists();
-    }
-
-    /**
      * Whether an inbound chart-of-accounts row (gl_accounts or
      * account_sub_categories) either doesn't exist yet (a create) or
      * differs from what's currently stored (a change) — a device resending
@@ -4313,6 +4691,42 @@ class SyncProcessor
         if (! in_array($actingRole, ['business_owner', 'manager'], true)) {
             throw new \RuntimeException("{$context} requires the owner or manager role.");
         }
+    }
+
+    /**
+     * Stock-take v2 columns (scope, damage, counted-by and warehouse bin)
+     * are only written when the payload actually carries the key, so a
+     * push from an older app build (which doesn't know them) can't null
+     * out values another device already recorded. JSON columns are stored
+     * as text — an already-decoded array is re-encoded.
+     *
+     * @param  array<string, mixed>  $payload
+     * @param  array<int, string>  $columns
+     * @return array<string, mixed>
+     */
+    private function presentStockTakeColumns(array $payload, array $columns): array
+    {
+        $attributes = [];
+
+        foreach ($columns as $column) {
+            if (! array_key_exists($column, $payload)) {
+                continue;
+            }
+
+            $value = $payload[$column];
+
+            if (is_array($value)) {
+                $value = json_encode($value);
+            }
+
+            if ($column === 'scope_type' && ($value === null || $value === '')) {
+                $value = 'all';
+            }
+
+            $attributes[$column] = $value;
+        }
+
+        return $attributes;
     }
 
     /**
@@ -4366,54 +4780,61 @@ class SyncProcessor
         return $businessId ? Business::find($businessId)?->stockTakeVarianceThresholdPercent() : null;
     }
 
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array{0: string, 1: bool, 2: ?string} [status, justGated (always false), gateReason]
+     */
     private function gatePurchaseOrderStatus(?PurchaseOrder $existing, array $payload): array
     {
         $incomingStatus = $payload['status'] ?? 'draft';
 
-        if ($existing?->status === 'pending_approval') {
-            return ['pending_approval', false, null];
-        }
-
-        if (! PurchaseOrder::isValidTransition($existing?->status, $incomingStatus)) {
+        // Approval of a PO is decided in the app (Approval Setup's
+        // 'purchase_order' stages + the app's Approvals inbox), which only
+        // ever pushes 'sent' once that approval is cleared — the server
+        // honours it rather than holding the PO under a second, server-only
+        // threshold/budget check. Only the lifecycle itself is enforced.
+        if (! PurchaseOrder::isValidTransition($existing?->status, $incomingStatus)
+            && ! ($incomingStatus === 'cancelled' && $existing !== null
+                && $this->purchaseOrderReceiptsFullyReversed($existing->id))) {
             throw new \RuntimeException(
                 "Invalid purchase order transition: '{$existing?->status}' -> '{$incomingStatus}'"
             );
         }
 
-        $isFirstSubmission = $incomingStatus === 'sent' && ($existing === null || $existing->status === 'draft');
-        if (! $isFirstSubmission) {
-            return [$incomingStatus, false, null];
+        return [$incomingStatus, false, null];
+    }
+
+    /**
+     * True when the PO has received stock and every one of its 'receive'
+     * movements has been fully offset by later movements referencing it
+     * (reference_id = the receive movement's id) — i.e. the receipt was
+     * posted in error and undone, so the PO can be cancelled even though
+     * 'received' is otherwise terminal. Goods received, GRV lines and
+     * journals are immutable, so cancelling is the only way to retire such
+     * a PO; requiring the stock to be fully reversed first means a PO with
+     * real goods still on hand can never be cancelled this way. Added for
+     * the 2026-10-10 duplicate goods-receipt cleanup.
+     */
+    private function purchaseOrderReceiptsFullyReversed(string $poId): bool
+    {
+        $receipts = DB::table('stock_movements')
+            ->where('reference_id', $poId)
+            ->where('type', 'receive')
+            ->get(['id', 'quantity_change']);
+        if ($receipts->isEmpty()) {
+            return false;
         }
 
-        $businessId = $payload['business_id'] ?? null;
-        $threshold = Business::find($businessId)?->poApprovalThreshold();
-        $totalOrdered = (float) ($payload['total_ordered'] ?? 0);
-
-        // A PO with no creator can never raise a properly-attributed
-        // ApprovalRequest (requested_by_user_id and po_audit_logs.user_id
-        // both require a real user) — gating it anyway would strand it at
-        // pending_approval with nothing able to resolve it, so it's left
-        // ungated instead of risking that dead end.
-        $hasCreator = ! empty($payload['created_by_user_id']);
-
-        if ($threshold !== null && $totalOrdered > $threshold && $hasCreator) {
-            return ['pending_approval', true, "total exceeds this business's configured PO threshold"];
-        }
-
-        // PUR·02 — a period procurement budget catches what the flat
-        // per-PO threshold above can't: many individually-small POs that
-        // add up past what's been allocated for the period. Checked
-        // against spend excluding this PO (it isn't 'sent' yet at this
-        // point) plus its own total, so the PO that actually tips the
-        // balance is the one that gets held.
-        if ($hasCreator && $businessId) {
-            $budget = ProcurementBudget::activeFor($businessId, now());
-            if ($budget && $budget->spentSoFar() + $totalOrdered > (float) $budget->amount) {
-                return ['pending_approval', true, "would exceed the '{$budget->name}' procurement budget for this period"];
+        foreach ($receipts as $receipt) {
+            $offset = (float) DB::table('stock_movements')
+                ->where('reference_id', $receipt->id)
+                ->sum('quantity_change');
+            if (abs((float) $receipt->quantity_change + $offset) > 0.0001) {
+                return false;
             }
         }
 
-        return [$incomingStatus, false, null];
+        return true;
     }
 
     /**
@@ -4520,23 +4941,28 @@ class SyncProcessor
         $cardSales = 0.0;
         $mobileSales = 0.0;
         $creditSales = 0.0;
+        $bankTransferSales = 0.0;
+        $otherSales = 0.0;
         // Payment-method breakdown deliberately scoped to `completed` only,
         // same as the client — a refund's cash/card payout has no Payments
         // row of its own, so widening this to refunded/partial_refund
         // originals would count cash that's since left the till.
         $payments = Payment::whereIn('transaction_id', $completed->pluck('id'))->get();
         foreach ($payments as $payment) {
-            $method = strtolower($payment->method);
+            $method = strtolower($payment->method ?? '');
             $amount = (float) $payment->base_equivalent;
-            if (str_contains($method, 'cash')) {
+            if ($method === 'cash' || str_starts_with($method, 'cash')) {
                 $cashSales += $amount;
-            } elseif (str_contains($method, 'card') || str_contains($method, 'swipe')) {
+            } elseif ($method === 'card' || $method === 'swipe' || str_contains($method, 'card') || str_contains($method, 'swipe')) {
                 $cardSales += $amount;
-            } elseif (str_contains($method, 'mobile') || str_contains($method, 'ecocash')
-                || str_contains($method, 'm-pesa') || str_contains($method, 'mpesa')) {
+            } elseif ($method === 'bank_transfer' || $method === 'bank transfer' || $method === 'eft' || $method === 'cheque' || str_starts_with($method, 'bank transfer')) {
+                $bankTransferSales += $amount;
+            } elseif ($method === 'mobile_money' || $method === 'ecocash' || str_contains($method, 'mobile') || str_contains($method, 'ecocash')) {
                 $mobileSales += $amount;
-            } elseif (str_contains($method, 'credit')) {
+            } elseif ($method === 'credit' || $method === 'layby') {
                 $creditSales += $amount;
+            } else {
+                $otherSales += $amount;
             }
         }
 
@@ -4565,6 +4991,8 @@ class SyncProcessor
             'card_sales' => $cardSales,
             'mobile_money_sales' => $mobileSales,
             'credit_sales' => $creditSales,
+            'bank_transfer_sales' => $bankTransferSales,
+            'other_sales' => $otherSales,
             'total_refunds' => $refundTotal,
             'total_discounts' => $discountTotal,
             'transaction_count' => $completed->count(),
@@ -4600,6 +5028,12 @@ class SyncProcessor
     protected function handleDelete(string $table, string $uuid, bool $trusted = true, ?User $actingUser = null): void
     {
         if (in_array($table, self::IMMUTABLE)) {
+            return;
+        }
+
+        if (PayrollSync::handles($table)) {
+            app(PayrollSync::class)->delete($table, $uuid, $trusted);
+
             return;
         }
 

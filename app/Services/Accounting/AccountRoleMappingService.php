@@ -66,6 +66,17 @@ class AccountRoleMappingService
         // keeps for good — see the Flutter side's identical note. Shares
         // '4010' Other Income rather than a new code.
         'deposit_forfeiture_income' => ['category' => 'Revenue', 'subCategory' => 'Other Income', 'code' => '4010', 'name' => 'Other Income'],
+        // Payroll — see PayRunPostingService and the Flutter side's
+        // identical roles (account_role_mapping_service.dart).
+        'employer_payroll_expense' => ['category' => 'Expenses', 'subCategory' => 'Operating Expenses', 'code' => '6025', 'name' => 'Employer Payroll Costs'],
+        'net_wages_payable' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2050', 'name' => 'Net Wages Payable'],
+        'paye_payable_usd' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2051', 'name' => 'PAYE Payable (USD)'],
+        'paye_payable_zwg' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2052', 'name' => 'PAYE Payable (ZiG)'],
+        'nssa_payable' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2053', 'name' => 'NSSA Payable'],
+        'zimdef_payable' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2054', 'name' => 'ZIMDEF Payable'],
+        'other_deductions_payable' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2055', 'name' => 'Payroll Deductions Payable'],
+        'nec_payable' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2056', 'name' => 'NEC Levy Payable'],
+        'staff_loans_receivable' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1160', 'name' => 'Staff Loans & Advances'],
         // Deliberately NOT mapped: 'accumulated depreciation' would need to
         // match whatever GL account the still-hardcoded, still-server-only
         // monthly depreciation sweep (postMonthlyDepreciation()) posts

@@ -1,14 +1,20 @@
 <?php
 
+use App\Http\Controllers\Api\AppReleaseController;
+use App\Http\Controllers\Api\AuditController;
 use App\Http\Controllers\Api\BackOfficeAccessController;
 use App\Http\Controllers\Api\BusinessBrandingController;
 use App\Http\Controllers\Api\DeviceAuthController;
+use App\Http\Controllers\Api\DeviceDbSnapshotController;
+use App\Http\Controllers\Api\DeviceOverviewController;
 use App\Http\Controllers\Api\LocalSyncConflictController;
 use App\Http\Controllers\Api\LocationController;
+use App\Http\Controllers\Api\PayrollPeriodLockController;
 use App\Http\Controllers\Api\StockResetController;
 use App\Http\Controllers\Api\StockTransferController;
 use App\Http\Controllers\Api\SubscriptionController;
 use App\Http\Controllers\Api\SyncController;
+use App\Http\Controllers\Api\SyncDiagnosticsController;
 use App\Http\Controllers\Api\SyncHealthController;
 use App\Http\Controllers\Api\TillController;
 use App\Http\Controllers\Api\WebhookController;
@@ -16,6 +22,14 @@ use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function () {
     Route::get('health', fn () => response()->json(['ok' => true]));
+});
+
+// CI reports each newly published app installer, or the release build
+// machine uploads it (shared-secret auth, see AppReleaseController) —
+// relayed to devices on /sync/pull.
+Route::prefix('v1')->middleware(['throttle:30,1'])->group(function () {
+    Route::post('app-releases', [AppReleaseController::class, 'store']);
+    Route::post('app-releases/upload', [AppReleaseController::class, 'upload']);
 });
 
 // POS device authentication (no tenant context needed yet — tenant resolved by business_code)
@@ -31,6 +45,8 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::post('sync/push', [SyncController::class, 'push']);
     Route::post('sync/fiscalise/{transactionId}', [SyncController::class, 'fiscalise']);
     Route::get('sync/pull', [SyncController::class, 'pull']);
+    Route::get('app-releases', [AppReleaseController::class, 'index']);
+    Route::get('devices/overview', [DeviceOverviewController::class, 'index']);
     Route::get('sync/status', [SyncController::class, 'status']);
     Route::get('sync/conflicts', [SyncController::class, 'conflicts']);
     Route::post('sync/conflicts/{id}/resolve', [SyncController::class, 'resolveConflict']);
@@ -38,6 +54,24 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::get('sync/health', [SyncHealthController::class, 'index']);
     Route::post('sync/local-conflicts', [LocalSyncConflictController::class, 'store']);
     Route::get('sync/local-conflicts', [LocalSyncConflictController::class, 'index']);
+
+    // Per-device sync diagnostics — every device reports, only the
+    // developer device(s) in config('sync.diagnostics_reader_devices') read.
+    Route::post('sync/diagnostics', [SyncDiagnosticsController::class, 'store']);
+    Route::get('sync/diagnostics', [SyncDiagnosticsController::class, 'index']);
+    Route::post('sync/diagnostics/resolve', [SyncDiagnosticsController::class, 'resolve']);
+    // On-demand copies of a device's database — the reader requests and
+    // downloads, the asked device uploads. See DeviceDbSnapshotController.
+    Route::post('sync/diagnostics/db-snapshots', [DeviceDbSnapshotController::class, 'store']);
+    Route::get('sync/diagnostics/db-snapshots', [DeviceDbSnapshotController::class, 'index']);
+    Route::get('sync/diagnostics/db-snapshots/{id}/download', [DeviceDbSnapshotController::class, 'download'])->whereNumber('id');
+    Route::post('sync/diagnostics/db-snapshots/{id}/chunks', [DeviceDbSnapshotController::class, 'chunk'])->whereNumber('id');
+    Route::post('sync/diagnostics/db-snapshots/{id}/complete', [DeviceDbSnapshotController::class, 'complete'])->whereNumber('id');
+
+    // The owner's audit trail — every device uploads, the app reads it back
+    // (who may open it is the app's reportsAudit permission). Append-only.
+    Route::post('audit/push', [AuditController::class, 'push']);
+    Route::get('audit', [AuditController::class, 'index']);
 
     // Back Office access — portal details + owner/manager password set/reset
     Route::get('backoffice/info', [BackOfficeAccessController::class, 'info']);
@@ -90,6 +124,11 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     // token (see StockResetService). The till itself does the zeroing and
     // pushes it through the normal sync/push above.
     Route::post('stock/reset-claim', [StockResetController::class, 'claim']);
+
+    // Claims a month for one pay run just before a till approves it, so two
+    // offline devices can't both approve the same payroll (see
+    // PayrollPeriodLockController and PayrollSync).
+    Route::post('payroll/period-locks', [PayrollPeriodLockController::class, 'store']);
 });
 
 // Webhooks (no auth — verified by payload signature)

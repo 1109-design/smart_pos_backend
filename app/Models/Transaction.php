@@ -16,7 +16,7 @@ class Transaction extends Model
         'subtotal', 'tax_total', 'discount_total', 'deposit_total',
         'surcharge_total', 'total',
         'base_currency', 'status', 'sale_number', 'notes', 'void_reason',
-        'fiscal_status', 'fiscal_receipt_number', 'fiscal_qr_code',
+        'fiscal_status', 'fiscal_receipt_number', 'fiscal_qr_code', 'fiscalisation_requested',
     ];
 
     protected static function booted(): void
@@ -47,6 +47,7 @@ class Transaction extends Model
             'deposit_total' => 'decimal:4',
             'surcharge_total' => 'decimal:4',
             'total' => 'decimal:4',
+            'fiscalisation_requested' => 'boolean',
         ];
     }
 

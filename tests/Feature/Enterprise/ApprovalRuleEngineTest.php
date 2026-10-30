@@ -27,12 +27,31 @@ class ApprovalRuleEngineTest extends TestCase
         $this->engine = new ApprovalRuleEngine;
     }
 
+    /**
+     * A throwaway ApprovalRuleSet row to satisfy approval_rules's FK on
+     * rule_set_id — these unit-level condition/authority checks don't care
+     * about the rule set's own fields, just that one genuinely exists.
+     */
+    private function dummyRuleSetId(string $businessId): string
+    {
+        // 'process' is unique per business_id — a distinct value per call so
+        // a test that creates more than one dummy rule set for the same
+        // business (e.g. two roleRule() calls) doesn't collide.
+        return ApprovalRuleSet::forceCreate([
+            'id' => Str::uuid(),
+            'business_id' => $businessId,
+            'process' => 'test-'.Str::uuid(),
+            'name' => 'test',
+        ])->id;
+    }
+
     public function test_evaluates_amount_gt_condition_correctly()
     {
+        $businessId = Str::uuid()->toString();
         $rule = ApprovalRule::forceCreate([
             'id' => Str::uuid(),
-            'business_id' => Str::uuid(),
-            'rule_set_id' => Str::uuid(), // dummy
+            'business_id' => $businessId,
+            'rule_set_id' => $this->dummyRuleSetId($businessId),
             'condition_type' => 'amount_gt',
             'condition_value' => 1000,
         ]);
@@ -44,10 +63,11 @@ class ApprovalRuleEngineTest extends TestCase
 
     public function test_evaluates_percentage_gt_condition_correctly()
     {
+        $businessId = Str::uuid()->toString();
         $rule = ApprovalRule::forceCreate([
             'id' => Str::uuid(),
-            'business_id' => Str::uuid(),
-            'rule_set_id' => Str::uuid(),
+            'business_id' => $businessId,
+            'rule_set_id' => $this->dummyRuleSetId($businessId),
             'condition_type' => 'percentage_gt',
             'condition_value' => 10,
         ]);
@@ -59,10 +79,11 @@ class ApprovalRuleEngineTest extends TestCase
 
     public function test_evaluates_always_condition_as_true()
     {
+        $businessId = Str::uuid()->toString();
         $rule = ApprovalRule::forceCreate([
             'id' => Str::uuid(),
-            'business_id' => Str::uuid(),
-            'rule_set_id' => Str::uuid(),
+            'business_id' => $businessId,
+            'rule_set_id' => $this->dummyRuleSetId($businessId),
             'condition_type' => 'always',
         ]);
 
@@ -155,7 +176,7 @@ class ApprovalRuleEngineTest extends TestCase
     public function test_separation_of_duties_respects_require_different_user_false()
     {
         $businessId = Str::uuid()->toString();
-        $ruleSetId = Str::uuid()->toString();
+        $ruleSetId = $this->dummyRuleSetId($businessId);
 
         ApprovalRule::forceCreate([
             'id' => Str::uuid(),
@@ -185,7 +206,7 @@ class ApprovalRuleEngineTest extends TestCase
         return ApprovalRule::forceCreate([
             'id' => Str::uuid(),
             'business_id' => $businessId,
-            'rule_set_id' => Str::uuid(), // dummy — no matching ApprovalRuleSet needed for these unit checks
+            'rule_set_id' => $this->dummyRuleSetId($businessId),
             'level' => $level,
             'required_role' => $requiredRole,
         ]);
@@ -359,7 +380,7 @@ class ApprovalRuleEngineTest extends TestCase
         $rule = ApprovalRule::forceCreate([
             'id' => Str::uuid(),
             'business_id' => $businessId,
-            'rule_set_id' => Str::uuid(),
+            'rule_set_id' => $this->dummyRuleSetId($businessId),
             'level' => 1,
             'approval_group_id' => $groupId,
         ]);

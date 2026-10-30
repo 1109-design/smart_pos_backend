@@ -33,7 +33,7 @@ export default function BusinessForm({ business, tiers = [] }: Props) {
         country:       business?.country ?? '',
         currency_code: business?.currency_code ?? 'USD',
         admin_name:    '',
-        admin_pin:     '',
+        admin_password: '',
     });
 
     const submit = (e: React.FormEvent) => {
@@ -60,6 +60,17 @@ export default function BusinessForm({ business, tiers = [] }: Props) {
             </h1>
 
             <form onSubmit={submit} className="max-w-lg space-y-6">
+                {Object.keys(errors).length > 0 && (
+                    <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl p-4">
+                        <p className="font-medium">The business couldn't be saved. Please fix the following:</p>
+                        <ul className="list-disc list-inside mt-1.5 space-y-0.5">
+                            {Object.entries(errors).map(([field, message]) => (
+                                <li key={field}>{message}</li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
+
                 <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 space-y-5">
                     <div>
                         <label className="form-label">Business Name</label>
@@ -99,6 +110,7 @@ export default function BusinessForm({ business, tiers = [] }: Props) {
                                     <option key={t.key} value={t.key}>{t.label} — {t.price}</option>
                                 ))}
                             </select>
+                            {errors.tier && <p className="text-red-500 text-xs mt-1.5">{errors.tier}</p>}
                         </div>
 
                         <div>
@@ -111,6 +123,7 @@ export default function BusinessForm({ business, tiers = [] }: Props) {
                                 placeholder="USD"
                                 className="form-input"
                             />
+                            {errors.currency_code && <p className="text-red-500 text-xs mt-1.5">{errors.currency_code}</p>}
                         </div>
                     </div>
 
@@ -141,6 +154,7 @@ export default function BusinessForm({ business, tiers = [] }: Props) {
                             placeholder="US"
                             className="form-input"
                         />
+                        {errors.country && <p className="text-red-500 text-xs mt-1.5">{errors.country}</p>}
                     </div>
                 </div>
 
@@ -163,18 +177,18 @@ export default function BusinessForm({ business, tiers = [] }: Props) {
                                 </div>
 
                                 <div>
-                                    <label className="form-label">Admin PIN <span className="text-slate-400 font-normal">(4 digits)</span></label>
+                                    <label className="form-label">Temporary till password <span className="text-slate-400 font-normal">(owner changes it at first sign-in)</span></label>
                                     <input
                                         type="password"
-                                        inputMode="numeric"
-                                        maxLength={4}
-                                        value={data.admin_pin}
-                                        onChange={(e) => setData('admin_pin', e.target.value.replace(/\D/g, ''))}
-                                        placeholder="••••"
+                                        autoComplete="new-password"
+                                        minLength={8}
+                                        value={data.admin_password}
+                                        onChange={(e) => setData('admin_password', e.target.value)}
+                                        placeholder="At least 8 characters"
                                         className="form-input"
                                         required
                                     />
-                                    {errors.admin_pin && <p className="text-red-500 text-xs mt-1.5">{errors.admin_pin}</p>}
+                                    {errors.admin_password && <p className="text-red-500 text-xs mt-1.5">{errors.admin_password}</p>}
                                 </div>
                             </div>
                         </div>

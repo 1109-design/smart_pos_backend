@@ -88,6 +88,24 @@ class ZimraSalesService
             ];
         }
 
+        // Per-sale cashier override: the checkout "Fiscalise this sale"
+        // toggle was unticked. This is the actual compliance-enforcing
+        // check — the client already strips this sale's tax fields, but
+        // without this guard the flag would be cosmetic and the sale would
+        // still get submitted to ZIMRA.
+        if (! $transaction->fiscalisation_requested) {
+            if ($transaction->fiscal_status !== 'excluded') {
+                $transaction->update(['fiscal_status' => 'excluded']);
+            }
+
+            return [
+                'success' => true,
+                'message' => 'Fiscalisation excluded for this sale by the cashier',
+                'fiscalised' => false,
+                'skipped' => true,
+            ];
+        }
+
         // Environment/host guard: refuse to touch live ZIMRA devices from a
         // non-production runtime (e.g. a cloned production database on a dev
         // machine). Skip cleanly so the sale is unaffected.

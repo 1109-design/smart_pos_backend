@@ -6,7 +6,10 @@ use App\Models\ApprovalRequest;
 use App\Models\ApprovalRequestStageDecision;
 use App\Models\ApprovalRule;
 use App\Models\ExchangeRate;
+use App\Models\Requisition;
+use App\Models\StockTake;
 use App\Models\SyncRecord;
+use App\Models\User;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -22,6 +25,17 @@ use Illuminate\Support\Str;
  */
 class ApprovalService
 {
+    /**
+     * Actions whose approval only the till app can carry out — see
+     * approval_resolution.dart's resolveApprovalRequest.
+     */
+    public const APP_APPLIED_ACTIONS = [
+        'cash_vault_drop',
+        'import_customer_opening_balances',
+        'import_ap_opening_balances',
+        'approve_supplier_invoice',
+    ];
+
     public function __construct(
         private readonly SyncProcessor $processor,
         private readonly ApprovalRuleEngine $ruleEngine,
@@ -158,6 +172,13 @@ class ApprovalService
             throw new \RuntimeException('This approval request has already been resolved.');
         }
 
+        // Approving these is carried out by the app (it holds the data and
+        // the posting logic), not here — approving from BackOffice would
+        // mark them approved with nothing ever applied. Rejecting is fine.
+        if ($decision === 'approved' && in_array($request->action, self::APP_APPLIED_ACTIONS, true)) {
+            throw new \RuntimeException('This approval is carried out by the app — approve it from the Approvals inbox in the app.');
+        }
+
         // Separation of duties (always) + group/role-based authority (only
         // when request() attached a rule_set_id — see resolveRuleFieldsForLevel()).
         // ApprovalsController::approve()/reject() only ever checked the
@@ -185,6 +206,11 @@ class ApprovalService
                     default => 'You cannot approve or reject your own request.',
                 }
             );
+        }
+
+        $permissionBlock = app(ApprovalActionPermissions::class)->missing($request, User::find($approverUserId));
+        if ($permissionBlock !== null) {
+            throw new \RuntimeException($permissionBlock);
         }
 
         $delegatedFromUserId = $rule ? $this->ruleEngine->resolveDelegationSource($request->business_id, $approverUserId, $rule) : null;
@@ -314,6 +340,21 @@ class ApprovalService
             return;
         }
 
+        if ($request->subject_type === 'Requisition' && $request->action === 'approve_requisition') {
+            $this->decideRequisition($request, 'approved', $approverUserId);
+
+            return;
+        }
+
+        if ($request->subject_type === StockTakeApprovalService::SUBJECT_TYPE && $request->action === StockTakeApprovalService::ACTION) {
+            $take = StockTake::with('items')->find($request->subject_id);
+            if ($take !== null) {
+                app(StockTakeApprovalService::class)->approve($take, $approverUserId, $request->fresh()?->reason);
+            }
+
+            return;
+        }
+
         if ($request->subject_type !== 'ExchangeRate' || $request->action !== 'change_exchange_rate') {
             return;
         }
@@ -405,11 +446,66 @@ class ApprovalService
      */
     private function applyRejectedAction(ApprovalRequest $request, string $approverUserId): void
     {
+        if ($request->subject_type === 'Requisition' && $request->action === 'approve_requisition') {
+            $this->decideRequisition($request, 'rejected', $approverUserId);
+
+            return;
+        }
+
+        if ($request->subject_type === StockTakeApprovalService::SUBJECT_TYPE && $request->action === StockTakeApprovalService::ACTION) {
+            $take = StockTake::find($request->subject_id);
+            if ($take !== null && $take->status === 'pending_approval') {
+                app(StockTakeApprovalService::class)->reject($take, $approverUserId, $request->fresh()?->reason);
+            }
+
+            return;
+        }
+
         if ($request->subject_type !== 'PurchaseOrder' || $request->action !== 'approve_purchase_order') {
             return;
         }
 
         app(PurchaseOrderApprovalGate::class)->resolveRejected($request, $approverUserId);
+    }
+
+    /**
+     * Mirrors requisition_approval.dart's applyRequisitionDecision: the
+     * final inbox decision flips a still-pending requisition.
+     */
+    private function decideRequisition(ApprovalRequest $request, string $status, string $approverUserId): void
+    {
+        $requisition = Requisition::where('id', $request->subject_id)
+            ->where('business_id', $request->business_id)
+            ->first();
+        if ($requisition === null || $requisition->status !== 'pending') {
+            return;
+        }
+
+        $payload = [
+            'business_id' => $requisition->business_id,
+            'requisition_number' => $requisition->requisition_number,
+            'location_id' => $requisition->location_id,
+            'purpose' => $requisition->purpose,
+            'project_id' => $requisition->project_id,
+            'notes' => $requisition->notes,
+            'status' => $status,
+            'requested_by_user_id' => $requisition->requested_by_user_id,
+            'approved_by_user_id' => $approverUserId,
+            'approved_at' => now()->toIso8601String(),
+            'issued_by_user_id' => $requisition->issued_by_user_id,
+            'issued_at' => $requisition->issued_at?->toIso8601String(),
+        ];
+
+        $this->processor->process('requisitions', $requisition->id, 'upsert', $payload);
+        SyncRecord::create([
+            'business_id' => $requisition->business_id,
+            'table_name' => 'requisitions',
+            'record_uuid' => $requisition->id,
+            'operation' => 'upsert',
+            'payload' => $payload,
+            'source_updated_at' => now(),
+            'synced_at' => now(),
+        ]);
     }
 
     /**

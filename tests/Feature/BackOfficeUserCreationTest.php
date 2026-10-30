@@ -7,6 +7,7 @@ use App\Models\Tenant;
 use App\Models\User;
 use Database\Seeders\RolesAndPermissionsSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 use Tests\TestCase;
@@ -56,7 +57,7 @@ class BackOfficeUserCreationTest extends TestCase
             'name' => 'New Cashier',
             'email' => 'new-cashier@example.com',
             'role' => 'cashier',
-            'pin' => '4321',
+            'till_password' => 'Temp-Pass-4321',
         ]);
 
         $response->assertRedirect(route('office.users.index'));
@@ -67,9 +68,16 @@ class BackOfficeUserCreationTest extends TestCase
         $this->assertSame('cashier', $created->roles->first()?->name);
         $this->assertTrue((bool) $created->is_active);
 
-        // PIN is bcrypt-hashed, never stored raw.
-        $this->assertTrue(Hash::isHashed($created->pin_hash));
-        $this->assertTrue(Hash::check('4321', $created->pin_hash));
+        // Their till password is temporary (changed at first sign-in),
+        // bcrypt-hashed, and goes out to every till.
+        $credential = DB::table('user_credentials')->where('user_id', $created->id)->first();
+        $this->assertTrue(Hash::check('Temp-Pass-4321', $credential->password_hash));
+        $this->assertTrue((bool) $credential->must_change);
+        $this->assertDatabaseHas('sync_records', [
+            'table_name' => 'user_credentials',
+            'record_uuid' => $created->id,
+        ]);
+        $this->assertNull($created->pin_hash);
 
         // A device-facing sync record was published so every till picks
         // this user up on its next pull, same as one created at the till.
@@ -90,7 +98,7 @@ class BackOfficeUserCreationTest extends TestCase
             'name' => 'New Manager',
             'email' => 'new-manager@example.com',
             'role' => 'manager',
-            'pin' => '1111',
+            'till_password' => 'Temp-Pass-1111',
         ])->assertRedirect();
 
         $created = User::where('email', 'new-manager@example.com')->first();
@@ -107,7 +115,7 @@ class BackOfficeUserCreationTest extends TestCase
             'name' => 'Duplicate',
             'email' => 'taken@example.com',
             'role' => 'cashier',
-            'pin' => '2222',
+            'till_password' => 'Temp-Pass-2222',
         ]);
 
         $response->assertSessionHasErrors('email');
@@ -134,7 +142,7 @@ class BackOfficeUserCreationTest extends TestCase
             'name' => 'Nope',
             'email' => (string) Str::uuid().'@example.com',
             'role' => 'cashier',
-            'pin' => '3333',
+            'till_password' => 'Temp-Pass-3333',
         ]);
 
         $response->assertForbidden();
@@ -171,7 +179,7 @@ class BackOfficeUserCreationTest extends TestCase
             'name' => 'Self-Promoted',
             'email' => 'self-promoted@example.com',
             'role' => 'business_owner',
-            'pin' => '9999',
+            'till_password' => 'Temp-Pass-9999',
         ]);
 
         $response->assertSessionHasErrors('role');
@@ -218,7 +226,7 @@ class BackOfficeUserCreationTest extends TestCase
             'name' => 'Co-Owner',
             'email' => 'co-owner@example.com',
             'role' => 'business_owner',
-            'pin' => '5555',
+            'till_password' => 'Temp-Pass-5555',
         ]);
 
         $response->assertRedirect(route('office.users.index'));

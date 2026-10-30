@@ -16,7 +16,7 @@ class SyncHealthCommand extends Command
 {
     protected $signature = 'sync:health {business_id? : Restrict to one business}';
 
-    protected $description = 'Per-device sync reconciliation report: pending pulls, stuck conflicts, oversells, last sync, and a changelog-vs-live-table integrity check';
+    protected $description = 'Per-device sync reconciliation report: pending pulls, stuck conflicts, oversells, last sync, and a changelog-vs-live-table integrity check, and product-total-vs-locations stock mismatches';
 
     public function handle(SyncHealthReport $report): int
     {
@@ -50,6 +50,15 @@ class SyncHealthCommand extends Command
                 $this->table(
                     ['Table', 'Expected (from changelog)', 'Actual (live rows)'],
                     $mismatches->map(fn ($m) => [$m['table'], $m['expected_from_changelog'], $m['actual_live_rows']])->all()
+                );
+            }
+
+            $stockMismatches = $report->stockMismatchesFor($tenantId);
+            if ($stockMismatches !== []) {
+                $this->warn('Stock mismatches (product total vs. sum of its locations):');
+                $this->table(
+                    ['Product', 'Total', 'Sum of locations', 'Untagged movements'],
+                    collect($stockMismatches)->map(fn ($m) => [$m['name'], $m['total'], $m['locations_sum'], $m['untagged_movements']])->all()
                 );
             }
 
