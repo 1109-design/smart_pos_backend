@@ -12,7 +12,7 @@ class InvoiceItem extends Model
 
     protected $fillable = [
         'id', 'invoice_id', 'quotation_item_id', 'product_id', 'product_name',
-        'quantity', 'unit_price', 'discount_pct', 'tax_rate_id', 'line_total',
+        'quantity', 'unit_price', 'discount_pct', 'tax_rate_id', 'tax_amount', 'line_total',
     ];
 
     public function invoice(): BelongsTo

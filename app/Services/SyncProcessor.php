@@ -1745,6 +1745,7 @@ class SyncProcessor
                 break;
 
             case 'customers':
+                $existingCustomer = Customer::find($uuid);
                 Customer::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -1761,6 +1762,10 @@ class SyncProcessor
                         'credit_limit' => $payload['credit_limit'] ?? 0,
                         'is_tax_exempt' => $payload['is_tax_exempt'] ?? false,
                         'group' => $payload['group'] ?? 'regular',
+                        // Most writers of this row don't carry these, such as a
+                        // balance update, and must not wipe them.
+                        'tax_number' => array_key_exists('tax_number', $payload) ? $payload['tax_number'] : $existingCustomer?->tax_number,
+                        'vat_number' => array_key_exists('vat_number', $payload) ? $payload['vat_number'] : $existingCustomer?->vat_number,
                     ]
                 );
                 $this->recomputeCustomerBalances($uuid);
@@ -1836,8 +1841,17 @@ class SyncProcessor
                 // fiscal_status is 'fiscalised' or ZIMRA has already accepted
                 // the receipt — so this only ever queues real transitions,
                 // never a duplicate submission.
-                if ($tx->status === 'completed' && $previousStatus !== 'completed') {
+                // A credit sale is a taxable supply the moment it is made, so it
+                // goes too; settling its balance later never submits it again.
+                $fiscalStatuses = ['completed', 'credit_sale'];
+                if (in_array($tx->status, $fiscalStatuses, true) && ! in_array($previousStatus, $fiscalStatuses, true)) {
                     app(ZimraSalesService::class)->queueFiscalisation($tx);
+                }
+
+                // Normally the return row arrives after this one and queues the
+                // credit note; this covers a push that delivers them the other way.
+                if (! $txExists && ($salesReturn = SalesReturn::where('return_transaction_id', $tx->id)->first())) {
+                    app(ZimraSalesService::class)->queueCreditNoteForReturn($salesReturn);
                 }
 
                 // No journal posting here, or anywhere in sync: the app posts
@@ -2612,7 +2626,7 @@ class SyncProcessor
                 break;
 
             case 'sales_returns':
-                SalesReturn::updateOrCreate(
+                $salesReturn = SalesReturn::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'business_id' => $payload['business_id'] ?? null,
@@ -2633,6 +2647,9 @@ class SyncProcessor
                         'approval_request_id' => $payload['approval_request_id'] ?? null,
                     ]
                 );
+                if ($salesReturn->wasRecentlyCreated) {
+                    app(ZimraSalesService::class)->queueCreditNoteForReturn($salesReturn);
+                }
                 break;
 
             case 'sales_return_items':
@@ -3481,9 +3498,12 @@ class SyncProcessor
                         'recurring_schedule_id' => $preserveInvoice('recurring_schedule_id'),
                         'notes' => $preserveInvoice('notes'),
                         'created_by_user_id' => $preserveInvoice('created_by_user_id'),
+                        'currency_code' => $preserveInvoice('currency_code'),
+                        'exchange_rate' => $preserveInvoice('exchange_rate', 1) ?? 1,
                     ]
                 );
                 $this->recomputeInvoiceAmountPaid($uuid);
+                app(ZimraSalesService::class)->queueInvoiceIfIssued(Invoice::findOrFail($uuid), $existingInvoice?->status);
                 break;
 
             case 'invoice_items':
@@ -3498,6 +3518,7 @@ class SyncProcessor
                         'unit_price' => $payload['unit_price'] ?? 0,
                         'discount_pct' => $payload['discount_pct'] ?? 0,
                         'tax_rate_id' => $payload['tax_rate_id'] ?? null,
+                        'tax_amount' => $payload['tax_amount'] ?? 0,
                         'line_total' => $payload['line_total'] ?? 0,
                     ]
                 );
@@ -3544,7 +3565,7 @@ class SyncProcessor
                     }
                 }
 
-                CreditNote::updateOrCreate(
+                $creditNote = CreditNote::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'business_id' => $payload['business_id'] ?? null,
@@ -3558,6 +3579,9 @@ class SyncProcessor
                         'created_by_user_id' => $payload['created_by_user_id'] ?? null,
                     ]
                 );
+                if ($creditNote->wasRecentlyCreated) {
+                    app(ZimraSalesService::class)->queueFiscalisation($creditNote);
+                }
                 break;
 
             case 'credit_note_items':
@@ -3571,6 +3595,7 @@ class SyncProcessor
                         'product_name' => $payload['product_name'] ?? '',
                         'quantity' => $payload['quantity'] ?? 0,
                         'unit_price' => $payload['unit_price'] ?? 0,
+                        'tax_amount' => $payload['tax_amount'] ?? 0,
                         'line_total' => $payload['line_total'] ?? 0,
                     ]
                 );

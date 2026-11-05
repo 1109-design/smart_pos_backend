@@ -57,23 +57,24 @@ class ProcessZimraFiscalisationJob implements ShouldBeUnique, ShouldQueue
             ->get();
 
         foreach ($pending as $zimraSale) {
-            $transaction = $zimraSale->transaction;
-            if (! $transaction) {
+            $document = $zimraSale->document();
+            if (! $document) {
                 continue;
             }
 
-            $result = $service->processQueued($transaction);
+            $result = $service->processQueued($document);
 
             Log::info('ZIMRA sequential fiscalisation processed', [
                 'device_id' => $this->deviceId,
-                'transaction_id' => $transaction->id,
+                'document' => $document->fiscalNumber(),
                 'fiscalised' => $result['fiscalised'] ?? false,
                 'message' => $result['message'] ?? null,
             ]);
 
             // Stop draining on infrastructure failure — the retry backoff will
             // re-dispatch; continuing would just fail every remaining receipt.
-            if (! ($result['fiscalised'] ?? false) && ! ($result['skipped'] ?? false)) {
+            // A rejection is about this one receipt, so the rest still go.
+            if (! ($result['fiscalised'] ?? false) && ! ($result['skipped'] ?? false) && empty($result['red_errors'])) {
                 break;
             }
         }

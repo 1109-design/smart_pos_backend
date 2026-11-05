@@ -31,6 +31,13 @@ Schedule::command('zimra:retry-failed')
     ->withoutOverlapping()
     ->onOneServer();
 
+// Email the alert recipients when sales stop being fiscalised, so nobody has to
+// be looking at a till to find out.
+Schedule::command('zimra:check-health')
+    ->everyFifteenMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
 // ── Recurring invoices ───────────────────────────────────────────────────────
 Schedule::command('invoices:generate-recurring')
     ->dailyAt('06:00')
