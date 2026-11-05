@@ -287,24 +287,18 @@ class ZimraSalesServiceTest extends TestCase
         $this->assertSame('fiscalised', $transaction->fresh()->fiscal_status);
     }
 
-    public function test_the_next_receipt_still_chains_from_a_rejected_one(): void
+    public function test_nothing_more_is_sent_after_a_rejected_receipt_in_the_same_day(): void
     {
         $this->redCodesByReceipt = [['RCPT020']];
         $this->service()->processQueued($this->makeSale('sale-1'));
-        $rejectedHash = ZimraSale::firstOrFail()->device_signature_hash;
-        $this->assertNotEmpty($rejectedHash);
+        $next = $this->makeSale('sale-2');
 
-        $signed = [];
-        Event::listen(MessageLogged::class, function (MessageLogged $log) use (&$signed) {
-            if ($log->message === 'ZIMRA signing string') {
-                $signed[] = $log->context['string_to_sign'];
-            }
-        });
+        $result = $this->service()->processQueued($next);
 
-        $this->service()->processQueued($this->makeSale('sale-2'));
-
-        $this->assertCount(1, $signed);
-        $this->assertStringEndsWith($rejectedHash, $signed[0]);
+        $this->assertSame(1, $this->submissions());
+        $this->assertTrue($result['held']);
+        $this->assertSame('pending', $next->fresh()->fiscal_status);
+        $this->assertStringContainsString('Public Portal', $next->fresh()->fiscal_error);
     }
 
     public function test_the_day_close_still_counts_a_rejected_receipt(): void
@@ -317,7 +311,7 @@ class ZimraSalesServiceTest extends TestCase
         $this->assertStringContainsString('115', json_encode($payload));
     }
 
-    public function test_the_queue_carries_on_past_a_rejected_receipt(): void
+    public function test_the_queue_stops_at_a_rejected_receipt(): void
     {
         $this->redCodesByReceipt = [['RCPT020']];
         $first = $this->makeSale('sale-1');
@@ -335,7 +329,8 @@ class ZimraSalesServiceTest extends TestCase
         (new ProcessZimraFiscalisationJob('321'))->handle($this->service());
 
         $this->assertSame('failed', $first->fresh()->fiscal_status);
-        $this->assertSame('fiscalised', $second->fresh()->fiscal_status);
+        $this->assertSame(1, $this->submissions());
+        $this->assertNotSame('fiscalised', $second->fresh()->fiscal_status);
     }
 
     public function test_the_tills_get_zimras_codes_for_a_rejected_sale(): void

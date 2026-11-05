@@ -6,6 +6,7 @@ use App\Models\Business;
 use App\Models\CreditNote;
 use App\Models\Invoice;
 use App\Models\Transaction;
+use App\Models\Zimra\ZimraFiscalDay;
 use App\Models\Zimra\ZimraSale;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
@@ -183,7 +184,17 @@ class ZimraHealthMonitor
 
         return "These sales and invoices at {$business->name} have not been fiscalised:\n\n{$lines}"
             .($more > 0 ? "\n...and {$more} more." : '')
+            .$this->manualCloseNotice($business)
             ."\n\nDetails are in the app under Reports > Fiscalisation Summary.";
+    }
+
+    private function manualCloseNotice(Business $business): string
+    {
+        $days = ZimraFiscalDay::where('business_id', $business->id)
+            ->where('closing_error_code', ZimraFiscalDay::MANUAL_CLOSE_REQUIRED)
+            ->get();
+
+        return $days->map(fn (ZimraFiscalDay $day) => "\n\nDevice {$day->device_id}: {$day->error_message}")->implode('');
     }
 
     private function send(string $subject, string $body): bool

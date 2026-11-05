@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\Business;
 use App\Models\Invoice;
 use App\Models\Transaction;
+use App\Models\Zimra\ZimraFiscalDay;
 use App\Models\Zimra\ZimraSale;
 use App\Services\Zimra\ZimraHealthMonitor;
 use Carbon\Carbon;
@@ -196,5 +197,21 @@ class ZimraHealthMonitorTest extends TestCase
 
         $this->assertStringContainsString('INV-9', $this->lastBody());
         $this->assertStringContainsString('RCPT020', $this->lastBody());
+    }
+
+    public function test_the_email_says_when_a_day_must_be_closed_in_the_portal(): void
+    {
+        $this->makeSale(['fiscal_status' => 'failed']);
+        ZimraFiscalDay::create([
+            'business_id' => 'biz-1',
+            'device_id' => '321',
+            'fiscal_day_no' => 7,
+            'closing_error_code' => ZimraFiscalDay::MANUAL_CLOSE_REQUIRED,
+            'error_message' => 'Fiscal day 7 must be closed in the ZIMRA Public Portal.',
+        ]);
+
+        app(ZimraHealthMonitor::class)->check();
+
+        $this->assertStringContainsString('Device 321: Fiscal day 7 must be closed in the ZIMRA Public Portal.', $this->lastBody());
     }
 }

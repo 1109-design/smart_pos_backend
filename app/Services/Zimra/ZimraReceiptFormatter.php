@@ -5,6 +5,7 @@ namespace App\Services\Zimra;
 use App\Models\Business;
 use App\Models\Customer;
 use App\Models\Zimra\ZimraDevice;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -34,6 +35,7 @@ class ZimraReceiptFormatter
     /**
      * @param  iterable<object>  $items
      * @param  iterable<object>  $payments
+     * @param  string|null  $previousReceiptDate  The device's last submitted receiptDate.
      * @param  array{reference: array<string, int>, notes: string}|null  $creditNote  Makes this a CreditNote: lines, taxes, payments and total go negative while quantities stay positive (FDMS spec, RCPT022/023/028/040).
      */
     public static function formatReceipt(
@@ -49,7 +51,8 @@ class ZimraReceiptFormatter
         ?array $taxCodeMap,
         ?array $applicableTaxes,
         string $invoiceNo,
-        ?array $creditNote = null
+        ?array $creditNote = null,
+        ?string $previousReceiptDate = null
     ): array {
         $receiptType = $creditNote === null ? 'FiscalInvoice' : 'CreditNote';
         $sign = $creditNote === null ? 1.0 : -1.0;
@@ -217,7 +220,16 @@ class ZimraReceiptFormatter
         // ── Assemble ─────────────────────────────────────────────────────────
         // Spec §2.4 requires Africa/Harare timestamps; using the sale's original
         // created_at causes RCPT030 when fiscalising older transactions.
-        $receiptDate = now('Africa/Harare')->format('Y-m-d\TH:i:s');
+        // It must also be strictly later than the last receipt: two in the same
+        // second would be a Red RCPT030.
+        $receiptMoment = now('Africa/Harare')->startOfSecond();
+        if ($previousReceiptDate !== null) {
+            $previous = Carbon::parse($previousReceiptDate, 'Africa/Harare');
+            if ($receiptMoment->lte($previous)) {
+                $receiptMoment = $previous->copy()->addSecond();
+            }
+        }
+        $receiptDate = $receiptMoment->format('Y-m-d\TH:i:s');
         $currencyCode = $document->fiscalCurrency();
 
         $receipt = [

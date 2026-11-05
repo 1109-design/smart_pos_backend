@@ -2,8 +2,10 @@
 
 namespace App\Services\Zimra;
 
+use App\Jobs\ProcessZimraFiscalisationJob;
 use App\Models\Zimra\ZimraDevice;
 use App\Models\Zimra\ZimraFiscalDay;
+use App\Models\Zimra\ZimraSale;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
@@ -32,6 +34,9 @@ class ZimraFiscalDayService
 
     private const STATUS_CLOSE_FAILED = 'FiscalDayCloseFailed';
 
+    /** A close ZIMRA rejects for another reason gets this many sends in all. */
+    private const MAX_CLOSE_ATTEMPTS = 3;
+
     private const CONFIRM_ATTEMPTS = 3;
 
     private const CONFIRM_WAIT_SECONDS = 5;
@@ -43,7 +48,125 @@ class ZimraFiscalDayService
         private ZimraClient $client,
         private ZimraCloseDayPayloadBuilder $builder,
         private FiscalisationGuard $guard,
+        private ZimraReceiptPreflightService $preflight,
     ) {}
+
+    /**
+     * Get a held device moving, or flag it for the Public Portal. Makes no ZIMRA
+     * call for a device with nothing wrong and nothing waiting.
+     *
+     * @return array{outcome: string, message: string}
+     */
+    public function reprobe(ZimraDevice $device): array
+    {
+        if ($reason = $this->guard->blockReason()) {
+            return ['outcome' => self::BLOCKED, 'message' => $reason];
+        }
+
+        if (! $this->needsReprobe($device)) {
+            return ['outcome' => self::CLOSED, 'message' => 'Nothing to recover.'];
+        }
+
+        $status = $this->client->getStatus((string) $device->device_id, $device);
+        if (! $status['success']) {
+            return ['outcome' => self::PENDING, 'message' => 'GetStatus failed: '.$status['error']];
+        }
+
+        $statusData = $status['data'];
+        $fiscalDayStatus = $statusData['fiscalDayStatus'] ?? null;
+
+        // Closed, including in the Public Portal. The first send reopens the day.
+        if ($fiscalDayStatus === self::STATUS_CLOSED) {
+            $this->settle($device, $statusData);
+            ProcessZimraFiscalisationJob::dispatch((string) $device->device_id);
+
+            return ['outcome' => self::CLOSED, 'message' => 'The fiscal day is closed; sending anything held.'];
+        }
+
+        $day = ZimraFiscalDay::recordFor($device, ZimraFiscalDay::dayNoFromStatus($statusData));
+
+        if ($fiscalDayStatus === self::STATUS_CLOSE_FAILED) {
+            if ($this->isValidationErrorClose($statusData['fiscalDayClosingErrorCode'] ?? null)) {
+                return $this->markManualCloseRequired($device, $day, $statusData);
+            }
+
+            if (count($day->close_attempts ?? []) >= self::MAX_CLOSE_ATTEMPTS) {
+                return $this->markManualCloseRequired(
+                    $device,
+                    $day,
+                    $statusData,
+                    'ZIMRA rejected the close '.self::MAX_CLOSE_ATTEMPTS.' times: '.($statusData['fiscalDayClosingErrorCode'] ?? 'no reason given').'.'
+                );
+            }
+
+            return $this->submit($device, $statusData);
+        }
+
+        if ($fiscalDayStatus === self::STATUS_CLOSE_INITIATED) {
+            return $this->settle($device, $statusData);
+        }
+
+        if ($this->preflight->dayHasRedReceipt($device)) {
+            return $this->markManualCloseRequired($device, $day, $statusData);
+        }
+
+        if ($this->preflight->dayHasExpired($device)) {
+            return $this->submit($device, $statusData);
+        }
+
+        ProcessZimraFiscalisationJob::dispatch((string) $device->device_id);
+
+        return ['outcome' => self::PENDING, 'message' => 'Fiscal day is open; sending anything held.'];
+    }
+
+    private function needsReprobe(ZimraDevice $device): bool
+    {
+        return $this->unresolvedDays($device)->exists()
+            || $this->preflight->dayHasRedReceipt($device)
+            || $this->preflight->dayHasExpired($device)
+            || ZimraSale::where('device_id', (string) $device->device_id)->whereIn('status', ['pending', 'retry'])->exists();
+    }
+
+    /**
+     * ZIMRA's enum, which can arrive as its name or its number (spec §5.4).
+     */
+    private function isValidationErrorClose(mixed $closingError): bool
+    {
+        return $closingError === 2
+            || $closingError === '2'
+            || str_contains((string) $closingError, 'ReceiptsWithValidationErrors')
+            || str_contains((string) $closingError, '"fiscalDayClosingErrorCode":2');
+    }
+
+    /**
+     * ZIMRA refuses CloseDay outright for a day with a Red or Grey receipt, so
+     * nothing here can close it. Say what to do, once, and stop trying.
+     *
+     * @param  array<string, mixed>|null  $statusData
+     * @return array{outcome: string, message: string}
+     */
+    private function markManualCloseRequired(ZimraDevice $device, ZimraFiscalDay $day, ?array $statusData, ?string $detail = null): array
+    {
+        $alreadyFlagged = $day->requiresManualClose();
+        $message = "Fiscal day {$day->fiscal_day_no} must be closed in the ZIMRA Public Portal, or by a ZIMRA officer. "
+            .($detail ?? 'It has a receipt ZIMRA marked Red, so ZIMRA will not let it close normally.')
+            .' Sales and invoices are held and will be sent once it is closed.';
+
+        $day->update([
+            'status' => $statusData !== null && ($statusData['fiscalDayStatus'] ?? null) === self::STATUS_CLOSE_FAILED
+                ? ZimraFiscalDay::STATUS_CLOSE_FAILED
+                : $day->status,
+            'closing_error_code' => ZimraFiscalDay::MANUAL_CLOSE_REQUIRED,
+            'close_status_response' => $statusData ?? $day->close_status_response,
+            'error_message' => $message,
+        ]);
+
+        if (! $alreadyFlagged) {
+            $this->alert($device, $day, 'A fiscal day must be closed in the ZIMRA Public Portal', $message, canRetry: false);
+        }
+
+        return ['outcome' => self::FAILED, 'message' => $message];
+    }
 
     /**
      * Close the device's fiscal day, or retry a close ZIMRA rejected.
@@ -76,6 +199,14 @@ class ZimraFiscalDayService
 
         if ($fiscalDayStatus === self::STATUS_CLOSE_INITIATED) {
             return $this->awaitConfirmation($device, $statusData);
+        }
+
+        if ($this->isValidationErrorClose($statusData['fiscalDayClosingErrorCode'] ?? null) || $this->preflight->dayHasRedReceipt($device)) {
+            return $this->markManualCloseRequired(
+                $device,
+                ZimraFiscalDay::recordFor($device, ZimraFiscalDay::dayNoFromStatus($statusData)),
+                $statusData
+            );
         }
 
         return $this->submit($device, $statusData);
@@ -230,7 +361,7 @@ class ZimraFiscalDayService
 
             // ZIMRA never took this close (CloseDay itself was refused), so the
             // day is simply still open and the failure stands until a retry.
-            if ($day->status === ZimraFiscalDay::STATUS_CLOSE_FAILED) {
+            if ($day->status === ZimraFiscalDay::STATUS_CLOSE_FAILED || $day->requiresManualClose()) {
                 $result = ['outcome' => self::FAILED, 'message' => (string) $day->error_message];
 
                 continue;
@@ -274,6 +405,10 @@ class ZimraFiscalDayService
      */
     private function markFailed(ZimraDevice $device, ZimraFiscalDay $day, ?array $statusData, string $message): array
     {
+        if ($this->isValidationErrorClose($statusData['fiscalDayClosingErrorCode'] ?? $message)) {
+            return $this->markManualCloseRequired($device, $day, $statusData);
+        }
+
         $day->update([
             'status' => ZimraFiscalDay::STATUS_CLOSE_FAILED,
             'closing_error_code' => $statusData['fiscalDayClosingErrorCode'] ?? null,
@@ -310,11 +445,11 @@ class ZimraFiscalDayService
         return ZimraFiscalDay::where('device_id', (string) $device->device_id)->unresolved();
     }
 
-    private function alert(ZimraDevice $device, ?ZimraFiscalDay $day, string $subject, string $message): void
+    private function alert(ZimraDevice $device, ?ZimraFiscalDay $day, string $subject, string $message, bool $canRetry = true): void
     {
         $dayText = $day ? "fiscal day {$day->fiscal_day_no}" : 'current fiscal day';
-        $body = "ZIMRA device {$device->device_id}, {$dayText}.\n\n{$message}\n\n"
-            ."To retry, run: php artisan zimra:fiscal-day close {$device->device_id}";
+        $body = "ZIMRA device {$device->device_id}, {$dayText}.\n\n{$message}"
+            .($canRetry ? "\n\nTo retry, run: php artisan zimra:fiscal-day close {$device->device_id}" : '');
 
         Log::error('ZIMRA fiscal day alert: '.$subject, [
             'device_id' => (string) $device->device_id,

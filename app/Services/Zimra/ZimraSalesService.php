@@ -22,6 +22,7 @@ class ZimraSalesService
     public function __construct(
         private ZimraClient $client,
         private FiscalisationGuard $fiscalisationGuard,
+        private ZimraReceiptPreflightService $preflight,
     ) {}
 
     /**
@@ -81,6 +82,7 @@ class ZimraSalesService
     public function retryFailedFiscalisations(): array
     {
         $results = ['attempted' => 0, 'fiscalised' => 0, 'failed' => 0];
+        $heldDevices = [];
 
         $pending = ZimraSale::whereIn('status', ['pending', 'retry'])
             ->orderBy('created_at')
@@ -88,12 +90,16 @@ class ZimraSalesService
 
         foreach ($pending as $zimraSale) {
             $document = $zimraSale->document();
-            if (! $document) {
+            if (! $document || isset($heldDevices[$zimraSale->device_id])) {
                 continue;
             }
 
             $results['attempted']++;
             $result = $this->processQueued($document);
+            // One hold covers everything behind it on that device.
+            if ($result['held'] ?? false) {
+                $heldDevices[$zimraSale->device_id] = true;
+            }
             if ($result['fiscalised'] ?? false) {
                 $results['fiscalised']++;
             } else {
@@ -244,6 +250,14 @@ class ZimraSalesService
                     'fiscalised' => false,
                     'skipped' => true,
                 ];
+            }
+
+            if ($badLine = $this->unsendableLine($document)) {
+                $zimraSale->markAsFailed($badLine);
+                $document->update(['fiscal_status' => 'failed', 'fiscal_error' => $badLine]);
+                $this->emitFiscalSyncRecord($document);
+
+                return ['success' => true, 'message' => $badLine, 'fiscalised' => false, 'skipped' => true];
             }
 
             // Ensure tax codes are loaded from GetConfig (refresh when all codes
@@ -439,32 +453,14 @@ class ZimraSalesService
                 $statusData = $statusResponse['data'];
             }
 
-            $receiptGlobalNo = (int) ($statusData['lastReceiptGlobalNo'] ?? 0) + 1;
-
-            // ZIMRA GetStatus does not consistently return lastReceiptCounter (often
-            // only returning lastReceiptGlobalNo). When absent, compute it from the
-            // receipts recorded for this device in the current fiscal day.
-            $dayOpenedAt = $device->fiscal_day_opened_at ?? now()->startOfDay();
-            if (isset($statusData['lastReceiptCounter']) && (int) $statusData['lastReceiptCounter'] > 0) {
-                $receiptCounter = (int) $statusData['lastReceiptCounter'] + 1;
-            } else {
-                $dayReceiptsCount = ZimraSale::where('device_id', $device->device_id)
-                    ->whereNotNull('fiscalised_at')
-                    ->where('fiscalised_at', '>=', $dayOpenedAt)
-                    ->count();
-                $receiptCounter = $dayReceiptsCount + 1;
+            $preflight = $this->preflight->evaluate($device->refresh(), $statusData);
+            if (! $preflight['safe']) {
+                return $this->holdForPreflight($document, $zimraSale, $invoiceNo, $preflight);
             }
 
-            // Hash chains are per fiscal day (spec §2.3): the previous hash is the
-            // device signature hash of the last accepted receipt in THIS day only.
-            $previousHash = null;
-            if ($receiptCounter > 1 && $device->fiscal_day_opened_at) {
-                $previousHash = ZimraSale::where('device_id', $device->device_id)
-                    ->whereIn('status', ZimraSale::IN_CHAIN_STATUSES)
-                    ->where('fiscalised_at', '>=', $device->fiscal_day_opened_at)
-                    ->orderByDesc('receipt_global_no')
-                    ->value('device_signature_hash');
-            }
+            $receiptGlobalNo = $preflight['next_global_no'];
+            $receiptCounter = $preflight['next_counter'];
+            $previousHash = $preflight['previous_hash'];
 
             $fiscalDayNo = ZimraFiscalDay::dayNoFromStatus($statusData);
             if ($fiscalDayNo > 0) {
@@ -495,7 +491,8 @@ class ZimraSalesService
                 $taxCodeMap,
                 $device->applicable_taxes ?? [],
                 $invoiceNo,
-                $creditNotePlan === null ? null : ['reference' => $creditNotePlan['reference'], 'notes' => $creditNotePlan['notes']]
+                $creditNotePlan === null ? null : ['reference' => $creditNotePlan['reference'], 'notes' => $creditNotePlan['notes']],
+                $this->lastSubmittedReceiptDate($device)
             );
 
             $apiResponse = $this->client->submitReceipt($device->device_id, $receiptData, $device);
@@ -608,6 +605,60 @@ class ZimraSalesService
             'fiscalised' => true,
             'zimra_receipt_id' => $zimraData['receiptID'] ?? null,
         ];
+    }
+
+    /**
+     * Keep the document queued without sending it. Nothing is consumed: no retry
+     * count, invoice number or global number.
+     *
+     * @param  array{reason: string|null, message: string|null}  $preflight
+     * @return array<string, mixed>
+     */
+    private function holdForPreflight(FiscalDocument $document, ZimraSale $zimraSale, string $invoiceNo, array $preflight): array
+    {
+        $zimraSale->update(['status' => 'pending', 'error_message' => $preflight['message']]);
+        $zimraSale->appendRetryHistory([
+            'invoice_no_used' => $invoiceNo,
+            'result' => 'held',
+            'error' => $preflight['reason'],
+        ]);
+        $document->update(['fiscal_status' => 'pending', 'fiscal_error' => $preflight['message']]);
+        if ($document->wasChanged('fiscal_error')) {
+            $this->emitFiscalSyncRecord($document);
+        }
+
+        Log::warning('ZIMRA receipt held by preflight', [
+            'document' => $document->fiscalNumber(),
+            'reason' => $preflight['reason'],
+        ]);
+
+        return ['success' => true, 'message' => $preflight['message'], 'fiscalised' => false, 'held' => true];
+    }
+
+    /**
+     * ZIMRA marks a zero or wrongly signed sale line Red (RCPT022), which would
+     * stop the whole day closing. Such a document can never be sent as it stands.
+     */
+    private function unsendableLine(FiscalDocument $document): ?string
+    {
+        $isCreditNote = $this->isCreditNote($document);
+
+        foreach ($document->fiscalLines() as $line) {
+            $total = (float) $line->line_total;
+            if ($isCreditNote ? round(abs($total), 2) == 0 : round($total, 2) <= 0) {
+                return 'A line has no price ('.($line->product_name ?: 'Item').'), which ZIMRA rejects (RCPT022).';
+            }
+        }
+
+        return null;
+    }
+
+    private function lastSubmittedReceiptDate(ZimraDevice $device): ?string
+    {
+        return ZimraSale::where('device_id', (string) $device->device_id)
+            ->whereNotNull('submitted_receipt')
+            ->orderByDesc('receipt_global_no')
+            ->first()?->submitted_receipt['receiptDate'] ?? null;
     }
 
     /**

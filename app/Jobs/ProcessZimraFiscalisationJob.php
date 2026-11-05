@@ -71,10 +71,10 @@ class ProcessZimraFiscalisationJob implements ShouldBeUnique, ShouldQueue
                 'message' => $result['message'] ?? null,
             ]);
 
-            // Stop draining on infrastructure failure — the retry backoff will
-            // re-dispatch; continuing would just fail every remaining receipt.
-            // A rejection is about this one receipt, so the rest still go.
-            if (! ($result['fiscalised'] ?? false) && ! ($result['skipped'] ?? false) && empty($result['red_errors'])) {
+            // Stop on an outage, a hold or a Red receipt: receipts sent after a Red
+            // one only add to a day ZIMRA won't let close. Held ones go once the
+            // device recovers.
+            if (! ($result['fiscalised'] ?? false) && ! ($result['skipped'] ?? false)) {
                 break;
             }
         }

@@ -20,6 +20,9 @@ class ZimraFiscalDay extends Model
 
     public const STATUS_CLOSE_FAILED = 'close_failed';
 
+    /** Stored as closing_error_code: only the Public Portal or ZIMRA can close this day. */
+    public const MANUAL_CLOSE_REQUIRED = 'ManualCloseRequired';
+
     protected $fillable = [
         'business_id',
         'device_id',
@@ -71,7 +74,9 @@ class ZimraFiscalDay extends Model
      */
     public function scopeUnresolved(Builder $query): Builder
     {
-        return $query->whereIn('status', [self::STATUS_CLOSE_SUBMITTED, self::STATUS_CLOSE_FAILED]);
+        return $query->where(fn (Builder $days) => $days
+            ->whereIn('status', [self::STATUS_CLOSE_SUBMITTED, self::STATUS_CLOSE_FAILED])
+            ->orWhere('closing_error_code', self::MANUAL_CLOSE_REQUIRED));
     }
 
     /**
@@ -97,6 +102,11 @@ class ZimraFiscalDay extends Model
                 'opened_at' => $device->fiscal_day_opened_at,
             ]
         );
+    }
+
+    public function requiresManualClose(): bool
+    {
+        return $this->closing_error_code === self::MANUAL_CLOSE_REQUIRED;
     }
 
     public function appendCloseAttempt(array $entry): void
