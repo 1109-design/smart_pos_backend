@@ -15,6 +15,7 @@ class ZimraSale extends Model
         'business_id',
         'tin',
         'device_id',
+        'fiscal_day_no',
         'status',
         'zimra_receipt_id',
         'zimra_qr_code',

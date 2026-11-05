@@ -10,6 +10,7 @@ use App\Models\SyncRecord;
 use App\Models\Transaction;
 use App\Models\TransactionItem;
 use App\Models\Zimra\ZimraDevice;
+use App\Models\Zimra\ZimraFiscalDay;
 use App\Models\Zimra\ZimraSale;
 use Exception;
 use Illuminate\Support\Facades\DB;
@@ -320,7 +321,16 @@ class ZimraSalesService
                     ->value('device_signature_hash');
             }
 
-            $zimraSale->update(['receipt_global_no' => $receiptGlobalNo, 'fiscal_invoice_no' => $invoiceNo]);
+            $fiscalDayNo = ZimraFiscalDay::dayNoFromStatus($statusData);
+            if ($fiscalDayNo > 0) {
+                ZimraFiscalDay::recordFor($device, $fiscalDayNo);
+            }
+
+            $zimraSale->update([
+                'receipt_global_no' => $receiptGlobalNo,
+                'fiscal_invoice_no' => $invoiceNo,
+                'fiscal_day_no' => $fiscalDayNo ?: null,
+            ]);
 
             $items = TransactionItem::where('transaction_id', $transaction->id)->get();
             $payments = Payment::where('transaction_id', $transaction->id)->get();

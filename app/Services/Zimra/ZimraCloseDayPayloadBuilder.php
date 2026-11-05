@@ -66,7 +66,9 @@ class ZimraCloseDayPayloadBuilder
 
         $counters = $this->buildCounters($saleByTax, $balanceByType);
         $receiptCounter = $lastReceiptCounter ?? $acceptedRows->count();
-        $fiscalDayDate = $openedAt->toDateString();
+        // The fiscal day's date is the Harare date it opened on: a day opened just
+        // after midnight there is still the previous date in UTC.
+        $fiscalDayDate = $openedAt->copy()->timezone('Africa/Harare')->toDateString();
         $signingString = $this->signingString((string) $device->device_id, $fiscalDayNo, $fiscalDayDate, $counters);
 
         Log::info('ZIMRA CloseDay payload built', [

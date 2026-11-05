@@ -4,19 +4,19 @@ namespace App\Console\Commands\Zimra;
 
 use App\Models\Zimra\ZimraDevice;
 use App\Services\Zimra\ZimraClient;
-use App\Services\Zimra\ZimraCloseDayPayloadBuilder;
+use App\Services\Zimra\ZimraFiscalDayService;
 use Illuminate\Console\Command;
 
 class ManageFiscalDay extends Command
 {
     protected $signature = 'zimra:fiscal-day
-        {action : open or close}
+        {action : open, close, or confirm (check an unconfirmed close with ZIMRA)}
         {device_id? : ZIMRA device ID}
         {--all : Run the action for every active fiscal device (used by the scheduler)}';
 
-    protected $description = 'Open or close the fiscal day for a ZIMRA device';
+    protected $description = 'Open or close the fiscal day for a ZIMRA device, or confirm a close';
 
-    public function handle(ZimraClient $client, ZimraCloseDayPayloadBuilder $builder): int
+    public function handle(ZimraClient $client, ZimraFiscalDayService $fiscalDays): int
     {
         $action = (string) $this->argument('action');
 
@@ -31,7 +31,7 @@ class ManageFiscalDay extends Command
             $failures = 0;
             foreach ($devices as $device) {
                 $this->info("— device {$device->device_id}:");
-                if ($this->runForDevice($client, $builder, $action, $device) !== self::SUCCESS) {
+                if ($this->runForDevice($client, $fiscalDays, $action, $device) !== self::SUCCESS) {
                     $failures++;
                 }
             }
@@ -53,11 +53,19 @@ class ManageFiscalDay extends Command
             return self::FAILURE;
         }
 
-        return $this->runForDevice($client, $builder, $action, $device);
+        return $this->runForDevice($client, $fiscalDays, $action, $device);
     }
 
-    private function runForDevice(ZimraClient $client, ZimraCloseDayPayloadBuilder $builder, string $action, ZimraDevice $device): int
+    private function runForDevice(ZimraClient $client, ZimraFiscalDayService $fiscalDays, string $action, ZimraDevice $device): int
     {
+        if ($action === 'confirm') {
+            return $this->report($fiscalDays->confirm($device));
+        }
+
+        if ($action === 'close') {
+            return $this->report($fiscalDays->close($device));
+        }
+
         $deviceId = (string) $device->device_id;
 
         $status = $client->getStatus($deviceId, $device);
@@ -89,33 +97,30 @@ class ManageFiscalDay extends Command
             return self::SUCCESS;
         }
 
-        if ($action === 'close') {
-            if (($statusData['fiscalDayStatus'] ?? null) === 'FiscalDayClosed') {
-                $this->info('Fiscal day is already closed.');
+        $this->error("Unknown action '{$action}' — use open, close or confirm.");
 
-                return self::SUCCESS;
-            }
+        return self::INVALID;
+    }
 
-            $fiscalDayNo = (int) ($statusData['fiscalDayNo'] ?? ($statusData['lastFiscalDayNo'] ?? 0));
-            $lastReceiptCounter = isset($statusData['lastReceiptCounter']) ? (int) $statusData['lastReceiptCounter'] : null;
-
-            $payload = $builder->build($device, $fiscalDayNo, $lastReceiptCounter);
-
-            $result = $client->closeFiscalDay($deviceId, $payload, $device);
-            if (! $result['success']) {
-                $this->error('CloseDay failed: '.$result['error']);
-
-                return self::FAILURE;
-            }
-
-            $device->update(['fiscal_day_opened_at' => null]);
-            $this->info("Fiscal day {$fiscalDayNo} closed.");
+    /**
+     * @param  array{outcome: string, message: string}  $result
+     */
+    private function report(array $result): int
+    {
+        if ($result['outcome'] === ZimraFiscalDayService::CLOSED) {
+            $this->info($result['message']);
 
             return self::SUCCESS;
         }
 
-        $this->error("Unknown action '{$action}' — use open or close.");
+        if ($result['outcome'] === ZimraFiscalDayService::PENDING) {
+            $this->warn($result['message'].' It is checked again every 15 minutes.');
 
-        return self::INVALID;
+            return self::SUCCESS;
+        }
+
+        $this->error($result['message']);
+
+        return self::FAILURE;
     }
 }

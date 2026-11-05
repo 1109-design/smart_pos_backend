@@ -18,6 +18,13 @@ Schedule::command('zimra:fiscal-day close --all')
     ->withoutOverlapping()
     ->onOneServer();
 
+// ZIMRA finishes validating a close after accepting it, so check on any close it
+// hasn't confirmed. Only devices with an unconfirmed close call ZIMRA.
+Schedule::command('zimra:fiscal-day confirm --all')
+    ->everyFifteenMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
 // Re-submit pending/failed fiscalisations left behind by ZIMRA outages.
 Schedule::command('zimra:retry-failed')
     ->everyFifteenMinutes()

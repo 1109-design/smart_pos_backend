@@ -4,6 +4,7 @@ namespace App\Services\Zimra;
 
 use App\Models\Zimra\ZimraConfiguration;
 use App\Models\Zimra\ZimraDevice;
+use App\Models\Zimra\ZimraFiscalDay;
 use Exception;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Http;
@@ -202,6 +203,10 @@ class ZimraClient
             // Stamp fiscal_day_opened_at so previousReceiptHash queries are scoped
             // to the current fiscal day only (spec §2.3: hash chains are per day).
             $device->update(['fiscal_day_opened_at' => now()]);
+
+            if ($fiscalDayNo = (int) ($result['data']['fiscalDayNo'] ?? 0)) {
+                ZimraFiscalDay::recordFor($device, $fiscalDayNo);
+            }
         }
 
         return $result;
