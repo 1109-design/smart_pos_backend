@@ -197,6 +197,34 @@ class ChartOfAccountsSeeder
         ['Expenses', 'Operating Expenses', ['code' => '6025', 'name' => 'Employer Payroll Costs']],
     ];
 
+    /**
+     * Where a disposed asset's value goes when it isn't cash — see
+     * AssetPostingService::recordDisposal(). A return to the supplier waits
+     * in Supplier Refunds Due until the supplier's credit note clears it
+     * against Accounts Payable; a theft or loss claimed on insurance waits
+     * in Insurance Claims Receivable until the insurer pays.
+     * [category, sub-category, account].
+     */
+    public const ASSET_DISPOSAL_ACCOUNTS = [
+        ['Assets', 'Current Assets', ['code' => '1165', 'name' => 'Supplier Refunds Due']],
+        ['Assets', 'Current Assets', ['code' => '1170', 'name' => 'Insurance Claims Receivable']],
+    ];
+
+    /**
+     * Donation accounts — see the till's donation_posting_service.dart.
+     * Treated like grants (IFRS for SMEs s24 / IAS 20): an unconditional
+     * donation is income; one with conditions waits in Deferred Donations
+     * until they're met; one for a capital project waits in Deferred
+     * Capital Grants and is released over the asset's life. Donations a
+     * business gives away are an expense. [category, sub-category, account].
+     */
+    public const DONATION_ACCOUNTS = [
+        ['Revenue', 'Other Income', ['code' => '4030', 'name' => 'Donations Received']],
+        ['Liabilities', 'Current Liabilities', ['code' => '2060', 'name' => 'Deferred Donations']],
+        ['Liabilities', 'Long-Term Liabilities', ['code' => '2065', 'name' => 'Deferred Capital Grants']],
+        ['Expenses', 'Other Expenses', ['code' => '6085', 'name' => 'Donations Given']],
+    ];
+
     private const CHART = [
         [
             'name' => 'Assets', 'code' => 1000, 'is_debit_normal' => true, 'statement_type' => 'balance_sheet',
@@ -210,6 +238,8 @@ class ChartOfAccountsSeeder
                     // AP module — recoverable input tax on supplier invoices.
                     ['code' => '1150', 'name' => 'Input VAT'],
                     ['code' => '1160', 'name' => 'Staff Loans & Advances'],
+                    ['code' => '1165', 'name' => 'Supplier Refunds Due'],
+                    ['code' => '1170', 'name' => 'Insurance Claims Receivable'],
                     ['code' => '1200', 'name' => 'Inventory', 'control_type' => 'inventory'],
                 ]],
                 ['name' => 'Fixed Assets', 'accounts' => [
@@ -238,9 +268,11 @@ class ChartOfAccountsSeeder
                     ['code' => '2054', 'name' => 'ZIMDEF Payable'],
                     ['code' => '2055', 'name' => 'Payroll Deductions Payable'],
                     ['code' => '2056', 'name' => 'NEC Levy Payable'],
+                    ['code' => '2060', 'name' => 'Deferred Donations'],
                 ]],
                 ['name' => 'Long-Term Liabilities', 'accounts' => [
                     ['code' => '2040', 'name' => 'Loans'],
+                    ['code' => '2065', 'name' => 'Deferred Capital Grants'],
                 ]],
             ],
         ],
@@ -268,6 +300,7 @@ class ChartOfAccountsSeeder
                     // supplier grants that reduce the invoice's cost.
                     ['code' => '4015', 'name' => 'Discount Received'],
                     ['code' => '4020', 'name' => 'FX Gain'],
+                    ['code' => '4030', 'name' => 'Donations Received'],
                 ]],
             ],
         ],
@@ -302,6 +335,7 @@ class ChartOfAccountsSeeder
                     ['code' => '6070', 'name' => 'Depreciation Expense'],
                     ['code' => '6075', 'name' => 'Gain/Loss on Disposal of Assets'],
                     ['code' => '6080', 'name' => 'FX Loss'],
+                    ['code' => '6085', 'name' => 'Donations Given'],
                 ]],
             ],
         ],
