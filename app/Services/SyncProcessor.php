@@ -3582,6 +3582,9 @@ class SyncProcessor
                 if ($creditNote->wasRecentlyCreated) {
                     app(ZimraSalesService::class)->queueFiscalisation($creditNote);
                 }
+                if (! empty($payload['invoice_id'])) {
+                    $this->recomputeInvoiceAmountPaid($payload['invoice_id']);
+                }
                 break;
 
             case 'credit_note_items':
@@ -4889,14 +4892,24 @@ class SyncProcessor
      * from every report that reads amount_paid/status. Called after both
      * an 'invoices' upsert and an 'invoice_payments' upsert, so a genuine
      * new payment is reflected immediately either way.
+     *
+     * Credit notes on the invoice count towards it too, up to what the payments
+     * left owing; anything above that stays as credit on the customer's account.
+     * They're ledger rows the server holds, created behind
+     * finance.credit_note.create, so the rule above still holds. Called after a
+     * 'credit_notes' upsert as well.
      */
     protected function recomputeInvoiceAmountPaid(string $invoiceId): void
     {
-        $amountPaid = max(0, InvoicePayment::where('invoice_id', $invoiceId)->sum('base_equivalent'));
+        $paid = max(0, InvoicePayment::where('invoice_id', $invoiceId)->sum('base_equivalent'));
         $invoice = Invoice::find($invoiceId);
         if (! $invoice) {
             return;
         }
+
+        $credited = (float) CreditNote::where('invoice_id', $invoiceId)->sum('total');
+        $applied = min($credited, max(0, (float) $invoice->total - $paid));
+        $amountPaid = $paid + $applied;
 
         $update = ['amount_paid' => $amountPaid];
 
@@ -4904,7 +4917,11 @@ class SyncProcessor
         // when status is itself payment-derived — never override a
         // lifecycle state (draft/sent/cancelled) that has nothing to do
         // with how much has been paid.
-        if (in_array($invoice->status, ['paid', 'partial'], true)) {
+        // A credit note arrives on an issued invoice with no payment to have
+        // moved it to 'partial' yet.
+        $paymentDerived = in_array($invoice->status, ['paid', 'partial'], true)
+            || ($applied > 0 && in_array($invoice->status, ['sent', 'issued', 'overdue'], true));
+        if ($paymentDerived) {
             $update['status'] = $amountPaid >= (float) $invoice->total ? 'paid' : 'partial';
         }
 
