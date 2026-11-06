@@ -7,6 +7,7 @@ use App\Models\Business;
 use App\Models\CreditNote;
 use App\Models\Customer;
 use App\Models\Invoice;
+use App\Models\ProductTaxRate;
 use App\Models\SalesReturn;
 use App\Models\SyncRecord;
 use App\Models\Transaction;
@@ -14,11 +15,15 @@ use App\Models\Zimra\ZimraDevice;
 use App\Models\Zimra\ZimraFiscalDay;
 use App\Models\Zimra\ZimraSale;
 use Exception;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Sleep;
 
 class ZimraSalesService
 {
+    private const WAIT_AFTER_OPENING_SECONDS = 2;
+
     public function __construct(
         private ZimraClient $client,
         private FiscalisationGuard $fiscalisationGuard,
@@ -443,6 +448,10 @@ class ZimraSalesService
                     ];
                 }
 
+                // A receipt dated the same second as the opening draws a Yellow
+                // RCPT014, even though it was sent after it.
+                Sleep::for(self::WAIT_AFTER_OPENING_SECONDS)->seconds();
+
                 $statusResponse = $this->client->getStatus($device->device_id, $device);
                 if (! $statusResponse['success']) {
                     $zimraSale->markAsRetry();
@@ -492,7 +501,8 @@ class ZimraSalesService
                 $device->applicable_taxes ?? [],
                 $invoiceNo,
                 $creditNotePlan === null ? null : ['reference' => $creditNotePlan['reference'], 'notes' => $creditNotePlan['notes']],
-                $this->lastSubmittedReceiptDate($device)
+                $this->lastSubmittedReceiptDate($device),
+                $this->exemptProductIds($items)
             );
 
             $apiResponse = $this->client->submitReceipt($device->device_id, $receiptData, $device);
@@ -651,6 +661,22 @@ class ZimraSalesService
         }
 
         return null;
+    }
+
+    /**
+     * The lines' products that are on the Exempt rate from the tax settings.
+     *
+     * @param  Collection<int, object>  $items
+     * @return array<int, string>
+     */
+    private function exemptProductIds(Collection $items): array
+    {
+        return ProductTaxRate::query()
+            ->join('tax_rates', 'tax_rates.id', '=', 'product_tax_rates.tax_rate_id')
+            ->whereIn('product_tax_rates.product_id', $items->pluck('product_id')->filter()->unique())
+            ->where('tax_rates.name', 'like', '%exempt%')
+            ->pluck('product_tax_rates.product_id')
+            ->all();
     }
 
     private function lastSubmittedReceiptDate(ZimraDevice $device): ?string

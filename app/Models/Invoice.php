@@ -128,6 +128,7 @@ class Invoice extends Model implements FiscalDocument
         $rate = $this->fiscalExchangeRate();
 
         return $this->items()->orderBy('created_at')->get()->map(fn (InvoiceItem $item) => (object) [
+            'product_id' => $item->product_id,
             'quantity' => $item->quantity,
             'line_total' => (float) $item->line_total * $rate,
             'tax_amount' => (float) $item->tax_amount * $rate,

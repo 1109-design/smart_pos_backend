@@ -168,6 +168,21 @@ class ZimraFiscalDayTest extends TestCase
         $this->assertSame(1, $this->alertsSent());
     }
 
+    public function test_closing_a_day_settles_earlier_days_closed_in_the_portal(): void
+    {
+        $device = $this->makeDevice();
+        $portalClosed = ZimraFiscalDay::recordFor($device, 5);
+        $this->fakeZimra([
+            ['fiscalDayStatus' => 'FiscalDayOpened', 'lastFiscalDayNo' => 7],
+            ['fiscalDayStatus' => 'FiscalDayClosed', 'lastFiscalDayNo' => 7],
+        ]);
+
+        $this->service()->close($device);
+
+        $this->assertSame(ZimraFiscalDay::STATUS_CLOSED, $portalClosed->fresh()->status);
+        $this->assertNull($portalClosed->fresh()->closed_at);
+    }
+
     public function test_retrying_a_rejected_close_totals_the_days_receipts_and_keeps_both_attempts(): void
     {
         $device = $this->makeDevice();

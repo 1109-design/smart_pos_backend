@@ -375,6 +375,13 @@ class ZimraFiscalDayService
             $device->update(['fiscal_day_opened_at' => null]);
         }
 
+        // A day closed in the Public Portal never had a close here, but a later
+        // day means it is closed. When it closed is unknown, so closed_at stays empty.
+        ZimraFiscalDay::where('device_id', (string) $device->device_id)
+            ->where('status', ZimraFiscalDay::STATUS_OPEN)
+            ->where('fiscal_day_no', '<', $currentDayNo)
+            ->update(['status' => ZimraFiscalDay::STATUS_CLOSED]);
+
         return $result;
     }
 

@@ -37,6 +37,7 @@ class ZimraReceiptFormatter
      * @param  iterable<object>  $payments
      * @param  string|null  $previousReceiptDate  The device's last submitted receiptDate.
      * @param  array{reference: array<string, int>, notes: string}|null  $creditNote  Makes this a CreditNote: lines, taxes, payments and total go negative while quantities stay positive (FDMS spec, RCPT022/023/028/040).
+     * @param  array<int, string>  $exemptProductIds  Products on an Exempt tax rate. A line's stored tax can't tell exempt from zero-rated, as both are nil.
      */
     public static function formatReceipt(
         FiscalDocument $document,
@@ -52,7 +53,8 @@ class ZimraReceiptFormatter
         ?array $applicableTaxes,
         string $invoiceNo,
         ?array $creditNote = null,
-        ?string $previousReceiptDate = null
+        ?string $previousReceiptDate = null,
+        array $exemptProductIds = []
     ): array {
         $receiptType = $creditNote === null ? 'FiscalInvoice' : 'CreditNote';
         $sign = $creditNote === null ? 1.0 : -1.0;
@@ -78,7 +80,8 @@ class ZimraReceiptFormatter
             $netAmount = abs((float) $item->line_total) - abs((float) $item->tax_amount);
             $taxRate = $netAmount > 0 ? round((abs((float) $item->tax_amount) / $netAmount) * 100, 2) : 0.0;
 
-            $resolved = self::resolveTax($taxRate, $applicableTaxes);
+            $isExemptLine = $taxRate === 0.0 && in_array($item->product_id ?? null, $exemptProductIds, true);
+            $resolved = ($isExemptLine ? self::exemptTax($applicableTaxes) : null) ?? self::resolveTax($taxRate, $applicableTaxes);
             $taxId = $resolved['taxID'];
             $fdmsTaxPercent = $resolved['taxPercent'];
 
@@ -99,7 +102,7 @@ class ZimraReceiptFormatter
 
             // Only include taxPercent for non-exempt lines, using the FDMS value
             // so it matches the device config exactly.
-            if ($taxId !== 1 && $fdmsTaxPercent !== null) {
+            if ($fdmsTaxPercent !== null) {
                 $lineObj['taxPercent'] = (float) round($fdmsTaxPercent, 2);
             }
 
@@ -166,6 +169,7 @@ class ZimraReceiptFormatter
                 $taxGroups[$key] = [
                     'taxID' => $tId,
                     'taxPercent' => $tRate,
+                    'isExempt' => ! isset($line['taxPercent']),
                     'salesAmountWithTax' => 0.0,
                 ];
             }
@@ -186,8 +190,8 @@ class ZimraReceiptFormatter
                 $taxObj['taxCode'] = $taxCodeValue;
             }
 
-            // Only omit taxPercent for taxID=1 (Exempt); zero-rated must send 0.
-            if ($group['taxID'] !== 1) {
+            // Only omit taxPercent for Exempt; zero-rated must send 0.
+            if (! $group['isExempt']) {
                 $taxObj['taxPercent'] = (float) round($group['taxPercent'], 2);
             }
 
@@ -305,6 +309,22 @@ class ZimraReceiptFormatter
         ];
 
         return ['receipt' => $receipt];
+    }
+
+    /**
+     * The device's Exempt tax: the one GetConfig lists with no percent.
+     *
+     * @return array{taxID: int, taxPercent: null}|null
+     */
+    private static function exemptTax(?array $applicableTaxes): ?array
+    {
+        foreach ($applicableTaxes ?? [] as $tax) {
+            if ($tax['taxPercent'] === null) {
+                return ['taxID' => (int) $tax['taxID'], 'taxPercent' => null];
+            }
+        }
+
+        return null;
     }
 
     /**

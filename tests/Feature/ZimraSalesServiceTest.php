@@ -10,8 +10,11 @@ use App\Models\Customer;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
 use App\Models\Payment;
+use App\Models\Product;
+use App\Models\ProductTaxRate;
 use App\Models\SalesReturn;
 use App\Models\SyncRecord;
+use App\Models\TaxRate;
 use App\Models\Transaction;
 use App\Models\TransactionItem;
 use App\Models\Zimra\ZimraDevice;
@@ -410,6 +413,177 @@ class ZimraSalesServiceTest extends TestCase
         ]);
 
         return $reversal;
+    }
+
+    /**
+     * A sale with an exempt line (product on the Exempt rate), a zero-rated line
+     * (nil tax, no such rate) and a standard line, on a device with all three.
+     */
+    private function makeMixedTaxSale(): Transaction
+    {
+        $this->device->update(['applicable_taxes' => [
+            ['taxID' => 1, 'taxPercent' => null, 'taxName' => 'Exempt'],
+            ['taxID' => 2, 'taxPercent' => 0.0, 'taxName' => 'Zero rated 0%'],
+            ['taxID' => 517, 'taxPercent' => 15.5, 'taxName' => 'Standard rated 15.5%'],
+        ], 'tax_codes' => [1 => '', 2 => '', 517 => '']]);
+
+        $exemptProductId = (string) Str::uuid();
+        Product::create(['id' => $exemptProductId, 'business_id' => 'biz-1', 'name' => 'Maize meal', 'price' => 5]);
+        $exemptRate = TaxRate::create(['business_id' => 'biz-1', 'name' => 'Exempt', 'rate' => 0, 'type' => 'inclusive']);
+        ProductTaxRate::create(['product_id' => $exemptProductId, 'tax_rate_id' => $exemptRate->id]);
+
+        $sale = Transaction::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => 'biz-1',
+            'user_id' => (string) Str::uuid(),
+            'subtotal' => 23,
+            'tax_total' => 1.55,
+            'total' => 24.55,
+            'base_currency' => 'USD',
+            'status' => 'completed',
+            'sale_number' => 'MIXED-1',
+            'fiscalisation_requested' => true,
+        ]);
+        foreach ([
+            [$exemptProductId, 'Maize meal', 0, 5],
+            [(string) Str::uuid(), 'Export goods', 0, 8],
+            [(string) Str::uuid(), 'Paint', 1.55, 11.55],
+        ] as [$productId, $name, $tax, $total]) {
+            TransactionItem::create([
+                'id' => (string) Str::uuid(),
+                'transaction_id' => $sale->id,
+                'product_id' => $productId,
+                'product_name' => $name,
+                'quantity' => 1,
+                'unit_price' => $total,
+                'tax_amount' => $tax,
+                'line_total' => $total,
+            ]);
+        }
+        Payment::create([
+            'id' => (string) Str::uuid(),
+            'transaction_id' => $sale->id,
+            'method' => 'cash',
+            'amount' => 24.55,
+            'currency_code' => 'USD',
+            'base_equivalent' => 24.55,
+        ]);
+
+        return $sale;
+    }
+
+    public function test_exempt_zero_rated_and_standard_lines_each_go_out_under_their_own_tax(): void
+    {
+        $sale = $this->makeMixedTaxSale();
+
+        $this->assertTrue($this->service()->processQueued($sale)['fiscalised']);
+
+        $receipt = ZimraSale::where('transaction_id', $sale->id)->firstOrFail()->submitted_receipt;
+        $linesByName = collect($receipt['receiptLines'])->keyBy('receiptLineName');
+
+        $this->assertSame(1, $linesByName['Maize meal']['taxID']);
+        $this->assertArrayNotHasKey('taxPercent', $linesByName['Maize meal']);
+        $this->assertSame(2, $linesByName['Export goods']['taxID']);
+        $this->assertEquals(0, $linesByName['Export goods']['taxPercent']);
+        $this->assertSame(517, $linesByName['Paint']['taxID']);
+        $this->assertEquals(15.5, $linesByName['Paint']['taxPercent']);
+
+        $this->assertSame([1, 2, 517], array_column($receipt['receiptTaxes'], 'taxID'));
+        $this->assertArrayNotHasKey('taxPercent', $receipt['receiptTaxes'][0]);
+        $this->assertEquals(0, $receipt['receiptTaxes'][1]['taxPercent']);
+        $this->assertEquals(1.55, $receipt['receiptTaxes'][2]['taxAmount']);
+    }
+
+    public function test_the_day_close_counts_exempt_sales_with_no_tax_percent(): void
+    {
+        $this->service()->processQueued($this->makeMixedTaxSale());
+
+        $payload = app(ZimraCloseDayPayloadBuilder::class)->build($this->device->fresh(), 7, 1);
+        $saleCounters = collect($payload['fiscalDayCounters'])->where('fiscalCounterType', 'SaleByTax')->values();
+
+        $this->assertSame([1, 2, 517], $saleCounters->pluck('fiscalCounterTaxID')->all());
+        $this->assertArrayNotHasKey('fiscalCounterTaxPercent', $saleCounters[0]);
+        $this->assertEquals(5, $saleCounters[0]['fiscalCounterValue']);
+        $this->assertEquals(0, $saleCounters[1]['fiscalCounterTaxPercent']);
+        $this->assertEquals(15.5, $saleCounters[2]['fiscalCounterTaxPercent']);
+    }
+
+    private function tenderInZwg(Transaction $sale, float $amount = 4600): void
+    {
+        Payment::where('transaction_id', $sale->id)->update([
+            'currency_code' => 'ZWG',
+            'exchange_rate_used' => 40,
+            'amount' => $amount,
+        ]);
+    }
+
+    public function test_a_till_sale_paid_in_zwg_is_declared_in_zwg(): void
+    {
+        $sale = $this->makeSale();
+        $this->tenderInZwg($sale);
+
+        $this->service()->processQueued($sale);
+
+        $receipt = ZimraSale::where('transaction_id', $sale->id)->firstOrFail()->submitted_receipt;
+        $this->assertSame('ZWG', $receipt['receiptCurrency']);
+        $this->assertEquals(4600, $receipt['receiptTotal']);
+        $this->assertEquals(4600, $receipt['receiptLines'][0]['receiptLineTotal']);
+        $this->assertEquals(2300, $receipt['receiptLines'][0]['receiptLinePrice']);
+        $this->assertEquals(15.0, $receipt['receiptLines'][0]['taxPercent']);
+        $this->assertEquals(600, $receipt['receiptTaxes'][0]['taxAmount']);
+        $this->assertEquals(4600, $receipt['receiptPayments'][0]['paymentAmount']);
+    }
+
+    public function test_a_refund_of_a_zwg_sale_is_declared_in_zwg_though_it_pays_out_in_base(): void
+    {
+        $sale = $this->makeSale();
+        $this->tenderInZwg($sale);
+        $this->service()->processQueued($sale);
+
+        $reversal = $this->makeRefund($sale);
+        $this->service()->processQueued($reversal);
+
+        $receipt = ZimraSale::where('transaction_id', $reversal->id)->firstOrFail()->submitted_receipt;
+        $this->assertSame('CreditNote', $receipt['receiptType']);
+        $this->assertSame('ZWG', $receipt['receiptCurrency']);
+        $this->assertEquals(-2300, $receipt['receiptTotal']);
+        $this->assertEquals(-300, $receipt['receiptTaxes'][0]['taxAmount']);
+        $this->assertEquals(-2300, $receipt['receiptPayments'][0]['paymentAmount']);
+    }
+
+    public function test_a_refund_keeps_the_currency_its_original_receipt_was_declared_in(): void
+    {
+        $sale = $this->makeSale();
+        $this->service()->processQueued($sale);
+        $this->tenderInZwg($sale);
+
+        $reversal = $this->makeRefund($sale);
+        $this->service()->processQueued($reversal);
+
+        $receipt = ZimraSale::where('transaction_id', $reversal->id)->firstOrFail()->submitted_receipt;
+        $this->assertSame('USD', $receipt['receiptCurrency']);
+        $this->assertEquals(-57.50, $receipt['receiptTotal']);
+    }
+
+    public function test_a_sale_tendered_in_two_currencies_stays_in_base(): void
+    {
+        $sale = $this->makeSale();
+        Payment::where('transaction_id', $sale->id)->update(['amount' => 15, 'base_equivalent' => 15]);
+        Payment::create([
+            'id' => (string) Str::uuid(),
+            'transaction_id' => $sale->id,
+            'method' => 'cash',
+            'amount' => 4000,
+            'currency_code' => 'ZWG',
+            'exchange_rate_used' => 40,
+            'base_equivalent' => 100,
+        ]);
+
+        $this->service()->processQueued($sale);
+
+        $receipt = ZimraSale::where('transaction_id', $sale->id)->firstOrFail()->submitted_receipt;
+        $this->assertSame('USD', $receipt['receiptCurrency']);
+        $this->assertEquals(115, $receipt['receiptTotal']);
     }
 
     public function test_a_refund_is_sent_as_a_credit_note_against_the_original_receipt(): void

@@ -45,6 +45,20 @@ Schedule::command('zimra:check-health')
     ->withoutOverlapping()
     ->onOneServer();
 
+// ZIMRA requires every device to report in once every 5 minutes.
+Schedule::command('zimra:ping')
+    ->everyFiveMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
+// Renew certificates close to expiring. Runs after the 23:45 close, because a
+// certificate is only replaced while the fiscal day is closed.
+Schedule::command('zimra:renew-certificates')
+    ->dailyAt('00:15')
+    ->timezone('Africa/Harare')
+    ->withoutOverlapping()
+    ->onOneServer();
+
 // ── Recurring invoices ───────────────────────────────────────────────────────
 Schedule::command('invoices:generate-recurring')
     ->dailyAt('06:00')

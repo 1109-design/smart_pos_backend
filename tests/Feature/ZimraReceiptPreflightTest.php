@@ -417,6 +417,15 @@ class ZimraReceiptPreflightTest extends TestCase
         $this->assertSame(1, $this->callsTo('CloseDay'));
     }
 
+    public function test_the_first_receipt_waits_past_the_second_the_day_opened(): void
+    {
+        $this->status['fiscalDayStatus'] = 'FiscalDayClosed';
+
+        $this->service()->processQueued($this->makeSale('sale-1'));
+
+        Sleep::assertSequence([Sleep::for(2)->seconds()]);
+    }
+
     public function test_reprobe_queues_the_backlog_once_the_day_is_closed(): void
     {
         ZimraFiscalDay::recordFor($this->device, 7)->update(['closing_error_code' => ZimraFiscalDay::MANUAL_CLOSE_REQUIRED]);

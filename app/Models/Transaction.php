@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Events\TransactionRecorded;
+use App\Models\Zimra\ZimraSale;
 use App\Services\Zimra\FiscalDocument;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
@@ -80,12 +81,51 @@ class Transaction extends Model implements FiscalDocument
 
     public function fiscalCurrency(): string
     {
-        return $this->base_currency ?: 'USD';
+        return $this->fiscalPresentment()['currency'];
     }
 
     public function fiscalLines(): Collection
     {
-        return TransactionItem::where('transaction_id', $this->id)->get()->toBase();
+        $rate = $this->fiscalPresentment()['rate'];
+
+        return TransactionItem::where('transaction_id', $this->id)->get()->map(fn (TransactionItem $item) => (object) [
+            'product_id' => $item->product_id,
+            'quantity' => $item->quantity,
+            'line_total' => (float) $item->line_total * $rate,
+            'tax_amount' => (float) $item->tax_amount * $rate,
+            'product_name' => $item->product_name,
+        ])->toBase();
+    }
+
+    /**
+     * The currency ZIMRA is told the sale happened in, and its rate from the base
+     * amounts a till stores. A receipt has one currency, so a sale tendered in
+     * several stays in base. A refund pays out in base whatever the customer paid,
+     * but ZIMRA requires the original receipt's currency and rate (RCPT042).
+     *
+     * @return array{currency: string, rate: float}
+     */
+    private function fiscalPresentment(): array
+    {
+        $base = ['currency' => $this->base_currency ?: 'USD', 'rate' => 1.0];
+
+        $originalId = SalesReturn::where('return_transaction_id', $this->id)->value('original_transaction_id');
+        if ($originalId) {
+            $declared = ZimraSale::where('transaction_id', $originalId)->first()?->submitted_receipt['receiptCurrency'] ?? null;
+            if ($declared === $base['currency']) {
+                return $base;
+            }
+        }
+
+        $legs = Payment::where('transaction_id', $originalId ?: $this->id)->where('amount', '!=', 0)->get();
+        $currency = $legs->pluck('currency_code')->unique();
+        $rate = (float) $legs->first()?->exchange_rate_used;
+
+        if ($currency->count() !== 1 || $currency->first() === $base['currency'] || $rate <= 0) {
+            return $base;
+        }
+
+        return ['currency' => (string) $currency->first(), 'rate' => $rate];
     }
 
     public function fiscalPayments(): Collection
