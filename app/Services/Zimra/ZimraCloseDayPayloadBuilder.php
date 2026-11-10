@@ -39,7 +39,11 @@ class ZimraCloseDayPayloadBuilder
             }
 
             $currency = strtoupper((string) ($snapshot['receiptCurrency'] ?? 'USD'));
-            $counterPrefix = ($snapshot['receiptType'] ?? 'FiscalInvoice') === 'CreditNote' ? 'CreditNote' : 'Sale';
+            $counterPrefix = match ($snapshot['receiptType'] ?? 'FiscalInvoice') {
+                'CreditNote' => 'CreditNote',
+                'DebitNote' => 'DebitNote',
+                default => 'Sale',
+            };
 
             foreach ($snapshot['receiptTaxes'] as $tax) {
                 $taxPercent = array_key_exists('taxPercent', $tax) ? (float) $tax['taxPercent'] : null;
@@ -159,6 +163,8 @@ class ZimraCloseDayPayloadBuilder
             'SaleTaxByTax' => 1,
             'CreditNoteByTax' => 2,
             'CreditNoteTaxByTax' => 3,
+            'DebitNoteByTax' => 4,
+            'DebitNoteTaxByTax' => 5,
             'BalanceByMoneyType' => 6,
         ];
 

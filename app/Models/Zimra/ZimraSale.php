@@ -3,6 +3,7 @@
 namespace App\Models\Zimra;
 
 use App\Models\CreditNote;
+use App\Models\CustomerDebitNote;
 use App\Models\Invoice;
 use App\Models\Transaction;
 use App\Services\Zimra\FiscalDocument;
@@ -26,6 +27,7 @@ class ZimraSale extends Model
         'transaction_id',
         'invoice_id',
         'credit_note_id',
+        'customer_debit_note_id',
         'business_id',
         'tin',
         'device_id',
@@ -72,10 +74,15 @@ class ZimraSale extends Model
         return $this->belongsTo(CreditNote::class);
     }
 
+    public function debitNote(): BelongsTo
+    {
+        return $this->belongsTo(CustomerDebitNote::class, 'customer_debit_note_id');
+    }
+
     /** Whichever kind of document this receipt was issued for. */
     public function document(): ?FiscalDocument
     {
-        return $this->transaction ?? $this->invoice ?? $this->creditNote;
+        return $this->transaction ?? $this->invoice ?? $this->creditNote ?? $this->debitNote;
     }
 
     public function isFiscalised(): bool
@@ -161,8 +168,11 @@ class ZimraSale extends Model
             return null;
         }
 
+        // GetConfig's qrUrl is authoritative; the fallbacks cover a device whose
+        // config hasn't been fetched since this was added.
         $config = ZimraConfiguration::getCurrent();
-        $baseUrl = $config?->settings['qr_verification_url']
+        $baseUrl = ZimraDevice::where('device_id', (string) $this->device_id)->first()?->fdms_config['qrUrl']
+            ?? $config?->settings['qr_verification_url']
             ?? ($config?->isTest() ? 'https://fdmstest.zimra.co.zw' : 'https://fdms.zimra.co.zw');
         $baseUrl = rtrim($baseUrl, '/');
 

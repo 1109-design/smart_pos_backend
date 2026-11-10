@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Events\CreditNoteChanged;
 use App\Services\Zimra\FiscalDocument;
+use App\Services\Zimra\ZimraPrintDetails;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -133,6 +134,7 @@ class CreditNote extends Model implements FiscalDocument
             'fiscal_error' => $this->fiscal_error,
             'fiscal_receipt_number' => $this->fiscal_receipt_number,
             'fiscal_qr_code' => $this->fiscal_qr_code,
+            'fiscal_details' => ZimraPrintDetails::forDocument($this),
         ];
     }
 }

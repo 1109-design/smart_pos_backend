@@ -36,7 +36,7 @@ class ZimraReceiptFormatter
      * @param  iterable<object>  $items
      * @param  iterable<object>  $payments
      * @param  string|null  $previousReceiptDate  The device's last submitted receiptDate.
-     * @param  array{reference: array<string, int>, notes: string}|null  $creditNote  Makes this a CreditNote: lines, taxes, payments and total go negative while quantities stay positive (FDMS spec, RCPT022/023/028/040).
+     * @param  array{reference: array<string, int>, notes: string, type?: 'CreditNote'|'DebitNote'}|null  $creditNote  Makes this a CreditNote, whose lines, taxes, payments and total go negative while quantities stay positive (FDMS spec, RCPT022/023/028/040), or a DebitNote, which stays positive.
      * @param  array<int, string>  $exemptProductIds  Products on an Exempt tax rate. A line's stored tax can't tell exempt from zero-rated, as both are nil.
      */
     public static function formatReceipt(
@@ -56,8 +56,8 @@ class ZimraReceiptFormatter
         ?string $previousReceiptDate = null,
         array $exemptProductIds = []
     ): array {
-        $receiptType = $creditNote === null ? 'FiscalInvoice' : 'CreditNote';
-        $sign = $creditNote === null ? 1.0 : -1.0;
+        $receiptType = $creditNote === null ? 'FiscalInvoice' : ($creditNote['type'] ?? 'CreditNote');
+        $sign = $receiptType === 'CreditNote' ? -1.0 : 1.0;
         $receiptLines = [];
         $lineNo = 0;
 
@@ -218,6 +218,13 @@ class ZimraReceiptFormatter
             ];
             if (preg_match('/^\d{9}$/', (string) $customer->vat_number)) {
                 $buyerData['VATNumber'] = $customer->vat_number;
+            }
+            $contacts = array_filter([
+                'phoneNo' => mb_substr(trim((string) $customer->phone), 0, 20),
+                'email' => filter_var(trim((string) $customer->email), FILTER_VALIDATE_EMAIL) ?: '',
+            ]);
+            if ($contacts !== []) {
+                $buyerData['buyerContacts'] = $contacts;
             }
         }
 

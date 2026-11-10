@@ -7,6 +7,8 @@ use App\Models\Business;
 use App\Models\CreditNote;
 use App\Models\CreditNoteItem;
 use App\Models\Customer;
+use App\Models\CustomerDebitNote;
+use App\Models\CustomerDebitNoteItem;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
 use App\Models\Payment;
@@ -1030,6 +1032,141 @@ class ZimraSalesServiceTest extends TestCase
         $balance = $counters->firstWhere('fiscalCounterType', 'BalanceByMoneyType');
         $this->assertSame('Credit', $balance['fiscalCounterMoneyType']);
         $this->assertEquals(57.50, $balance['fiscalCounterValue']);
+    }
+
+    private function makeDebitNote(Invoice $invoice, float $total = 23.00, float $tax = 3.00, string $status = 'posted'): CustomerDebitNote
+    {
+        $note = CustomerDebitNote::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => 'biz-1',
+            'invoice_id' => $invoice->id,
+            'customer_id' => $invoice->customer_id,
+            'debit_note_number' => 'DN-'.Str::random(5),
+            'note_date' => now()->toDateString(),
+            'reason' => 'Freight left off the invoice',
+            'subtotal' => $total - $tax,
+            'tax_total' => $tax,
+            'total' => $total,
+            'status' => $status,
+        ]);
+        CustomerDebitNoteItem::create([
+            'id' => (string) Str::uuid(),
+            'customer_debit_note_id' => $note->id,
+            'product_id' => (string) Str::uuid(),
+            'description' => 'Consulting',
+            'quantity' => 2,
+            'unit_price' => 10,
+            'tax_amount' => $tax,
+            'line_total' => $total,
+        ]);
+
+        return $note->fresh();
+    }
+
+    public function test_a_debit_note_is_sent_positive_against_its_invoices_receipt(): void
+    {
+        $invoice = $this->makeInvoice();
+        $this->service()->processQueued($invoice);
+        $invoiceReceiptId = (int) ZimraSale::where('invoice_id', $invoice->id)->value('zimra_receipt_id');
+        $note = $this->makeDebitNote($invoice);
+
+        $result = $this->service()->processQueued($note);
+
+        $this->assertTrue($result['fiscalised']);
+        $receipt = ZimraSale::where('customer_debit_note_id', $note->id)->firstOrFail()->submitted_receipt;
+        $this->assertSame('DebitNote', $receipt['receiptType']);
+        $this->assertSame(['receiptID' => $invoiceReceiptId], $receipt['creditDebitNote']);
+        $this->assertSame('Freight left off the invoice', $receipt['receiptNotes']);
+        $this->assertEquals(23.00, $receipt['receiptTotal']);
+        $this->assertEquals(23.00, $receipt['receiptLines'][0]['receiptLineTotal']);
+        $this->assertEquals(3.00, $receipt['receiptTaxes'][0]['taxAmount']);
+        $this->assertEquals(23.00, $receipt['receiptPayments'][0]['paymentAmount']);
+        $this->assertSame('fiscalised', $note->fresh()->fiscal_status);
+    }
+
+    public function test_a_draft_debit_note_is_not_sent(): void
+    {
+        $invoice = $this->makeInvoice();
+        $this->service()->processQueued($invoice);
+
+        $result = $this->service()->processQueued($this->makeDebitNote($invoice, status: 'draft'));
+
+        $this->assertTrue($result['skipped']);
+        $this->assertSame(1, $this->submissions());
+    }
+
+    public function test_the_day_close_counts_debit_notes_in_their_own_counters(): void
+    {
+        $invoice = $this->makeInvoice();
+        $this->service()->processQueued($invoice);
+        $this->service()->processQueued($this->makeCreditNote($invoice));
+        $this->service()->processQueued($this->makeDebitNote($invoice));
+
+        $counters = collect(app(ZimraCloseDayPayloadBuilder::class)->build($this->device->fresh(), 7, 3)['fiscalDayCounters']);
+
+        $this->assertSame(
+            ['SaleByTax', 'SaleTaxByTax', 'CreditNoteByTax', 'CreditNoteTaxByTax', 'DebitNoteByTax', 'DebitNoteTaxByTax', 'BalanceByMoneyType'],
+            $counters->pluck('fiscalCounterType')->all()
+        );
+        $this->assertEquals(23.00, $counters->firstWhere('fiscalCounterType', 'DebitNoteByTax')['fiscalCounterValue']);
+        $this->assertEquals(3.00, $counters->firstWhere('fiscalCounterType', 'DebitNoteTaxByTax')['fiscalCounterValue']);
+        $this->assertEquals(80.50, $counters->firstWhere('fiscalCounterType', 'BalanceByMoneyType')['fiscalCounterValue']);
+    }
+
+    public function test_the_buyers_contacts_go_on_the_receipt(): void
+    {
+        $customer = Customer::create([
+            'id' => (string) Str::uuid(), 'business_id' => 'biz-1', 'name' => 'Acme Ltd',
+            'tax_number' => '2000123456', 'phone' => '0772000000', 'email' => 'accounts@acme.co.zw',
+        ]);
+        $invoice = $this->makeInvoice(['customer_id' => $customer->id]);
+
+        $this->service()->processQueued($invoice);
+
+        $buyer = ZimraSale::where('invoice_id', $invoice->id)->firstOrFail()->submitted_receipt['buyerData'];
+        $this->assertSame(['phoneNo' => '0772000000', 'email' => 'accounts@acme.co.zw'], $buyer['buyerContacts']);
+    }
+
+    public function test_the_tills_get_everything_zimra_requires_on_a_printed_note(): void
+    {
+        $this->device->update(['device_serial_no' => 'SN-1', 'fdms_config' => [
+            'taxPayerName' => 'Fiscal Shop (Pvt) Ltd', 'taxPayerTIN' => '1234567890', 'vatNumber' => '220000001',
+            'deviceBranchName' => 'Fiscal Shop Hwange', 'deviceSerialNo' => 'SN-1', 'qrUrl' => 'https://fdms.zimra.co.zw',
+            'deviceBranchAddress' => ['houseNo' => '1', 'street' => 'Main', 'city' => 'Hwange', 'province' => 'Matabeleland North'],
+            'deviceBranchContacts' => ['phoneNo' => '0778000000', 'email' => 'shop@example.com'],
+        ]]);
+        $invoice = $this->makeInvoice();
+        $this->service()->processQueued($invoice);
+        $note = $this->makeDebitNote($invoice);
+        $this->service()->processQueued($note);
+
+        $details = $note->fresh()->fiscalSyncPayload()['fiscal_details'];
+
+        $this->assertSame('DEBIT NOTE', $details['title']);
+        $this->assertSame('Fiscal Shop (Pvt) Ltd', $details['seller']['name']);
+        $this->assertSame('Hwange', $details['seller']['address']['city']);
+        $this->assertSame('SN-1', $details['device_serial_no']);
+        $this->assertSame('321', $details['device_id']);
+        $this->assertSame(2, $details['receipt_counter']);
+        $this->assertSame(48, $details['receipt_global_no']);
+        $this->assertStringStartsWith('https://fdms.zimra.co.zw/', $details['qr_code']);
+        $this->assertSame('https://fdms.zimra.co.zw', $details['verification_url']);
+        $this->assertMatchesRegularExpression('/^[0-9A-F]{4}(-[0-9A-F]{4}){3}$/', $details['verification_code']);
+        $this->assertSame('Freight left off the invoice', $details['notes']);
+        $this->assertSame('Debited invoice', $details['referenced']['label']);
+        $this->assertSame(47, $details['referenced']['receipt_global_no']);
+        $this->assertSame($invoice->invoice_number, $details['referenced']['invoice_no']);
+        $this->assertEquals(20.00, $details['taxes'][0]['net']);
+        $this->assertSame('VAT 15%', $details['taxes'][0]['tax_name']);
+    }
+
+    public function test_a_document_zimra_has_not_accepted_has_no_print_details(): void
+    {
+        $this->redCodesByReceipt = [['RCPT013']];
+        $invoice = $this->makeInvoice();
+        $this->service()->processQueued($invoice);
+
+        $this->assertNull($invoice->fresh()->fiscalSyncPayload()['fiscal_details']);
     }
 
     public function test_a_buyer_with_a_valid_tin_is_named_on_the_receipt(): void

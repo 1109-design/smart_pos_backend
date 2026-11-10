@@ -2278,7 +2278,7 @@ class SyncProcessor
                         'supplier_invoice_id' => $payload['supplier_invoice_id'] ?? null,
                         'note_number' => $payload['note_number'] ?? '',
                         'note_type' => $payload['note_type'] ?? 'credit',
-                        'note_date' => $payload['note_date'] ?? now()->toDateString(),
+                        'note_date' => $payload['note_date'] ?? $payload['debit_note_date'] ?? now()->toDateString(),
                         'reason' => $payload['reason'] ?? null,
                         'currency_code' => $payload['currency_code'] ?? 'USD',
                         'exchange_rate' => $payload['exchange_rate'] ?? 1,
@@ -2444,7 +2444,8 @@ class SyncProcessor
                 break;
 
             case 'customer_debit_notes':
-                CustomerDebitNote::updateOrCreate(
+                $existingDebitNoteStatus = CustomerDebitNote::where('id', $uuid)->value('status');
+                $debitNote = CustomerDebitNote::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'business_id' => $payload['business_id'] ?? null,
@@ -2466,6 +2467,11 @@ class SyncProcessor
                         'created_by_user_id' => $payload['created_by_user_id'] ?? null,
                     ]
                 );
+                // Sent once, when it stops being a draft. Its lines arrive after it,
+                // so the queue waits for them (fiscalReadyToSend).
+                if (in_array($existingDebitNoteStatus, [null, 'draft'], true) && $debitNote->wantsFiscalisation()) {
+                    app(ZimraSalesService::class)->queueFiscalisation($debitNote);
+                }
                 break;
 
             case 'customer_debit_note_items':

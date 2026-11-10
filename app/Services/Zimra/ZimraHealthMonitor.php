@@ -4,6 +4,7 @@ namespace App\Services\Zimra;
 
 use App\Models\Business;
 use App\Models\CreditNote;
+use App\Models\CustomerDebitNote;
 use App\Models\Invoice;
 use App\Models\Transaction;
 use App\Models\Zimra\ZimraFiscalDay;
@@ -60,6 +61,7 @@ class ZimraHealthMonitor
         return $this->salesWithProblems($business, $settledBy)->toBase()
             ->concat($this->openDocuments(Invoice::class, $business, $settledBy))
             ->concat($this->openDocuments(CreditNote::class, $business, $settledBy))
+            ->concat($this->openDocuments(CustomerDebitNote::class, $business, $settledBy))
             ->values();
     }
 

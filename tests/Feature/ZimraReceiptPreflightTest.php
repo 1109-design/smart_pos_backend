@@ -82,6 +82,9 @@ class ZimraReceiptPreflightTest extends TestCase
             if (str_contains($request->url(), 'CloseDay')) {
                 return Http::response(['operationID' => 'op-1']);
             }
+            if (str_contains($request->url(), 'GetConfig')) {
+                return Http::response(['taxPayerName' => 'Fiscal Shop', 'operationID' => 'op-2']);
+            }
 
             $this->status['lastReceiptGlobalNo']++;
             if (isset($this->status['lastReceiptCounter'])) {
@@ -424,6 +427,20 @@ class ZimraReceiptPreflightTest extends TestCase
         $this->service()->processQueued($this->makeSale('sale-1'));
 
         Sleep::assertSequence([Sleep::for(2)->seconds()]);
+    }
+
+    public function test_the_device_config_is_refreshed_before_a_day_opens(): void
+    {
+        $this->status['fiscalDayStatus'] = 'FiscalDayClosed';
+
+        $this->service()->processQueued($this->makeSale('sale-1'));
+
+        $calls = collect(Http::recorded())->map(fn ($pair) => $pair[0]->url())
+            ->filter(fn (string $url) => str_contains($url, 'GetConfig') || str_contains($url, 'OpenDay'))
+            ->map(fn (string $url) => str_contains($url, 'GetConfig') ? 'GetConfig' : 'OpenDay')
+            ->values()->all();
+        $this->assertSame(['GetConfig', 'OpenDay'], $calls);
+        $this->assertSame('Fiscal Shop', $this->device->fresh()->fdms_config['taxPayerName']);
     }
 
     public function test_reprobe_queues_the_backlog_once_the_day_is_closed(): void

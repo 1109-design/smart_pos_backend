@@ -6,6 +6,7 @@ use App\Jobs\ProcessZimraFiscalisationJob;
 use App\Models\Business;
 use App\Models\CreditNote;
 use App\Models\Customer;
+use App\Models\CustomerDebitNote;
 use App\Models\Invoice;
 use App\Models\ProductTaxRate;
 use App\Models\SalesReturn;
@@ -209,7 +210,7 @@ class ZimraSalesService
                 return $this->settleFromExistingReceipt($document, $zimraSale);
             }
 
-            $creditNotePlan = $this->isCreditNote($document) ? $this->planCreditNote($document) : null;
+            $creditNotePlan = $this->isCreditNote($document) || $document instanceof CustomerDebitNote ? $this->planCreditNote($document) : null;
             if (in_array($creditNotePlan['state'] ?? null, ['not_applicable', 'failed'], true)) {
                 return $this->settleUnsendableCreditNote($document, $zimraSale, $creditNotePlan);
             }
@@ -299,20 +300,21 @@ class ZimraSalesService
     }
 
     /**
-     * What to do with a refund's reversal row or an invoice's credit note. ZIMRA only takes a credit note
+     * What to do with a refund's reversal row, or an invoice's credit or debit note. ZIMRA only takes a credit note
      * against a receipt it holds, issued within the last 12 months (RCPT032,
      * RCPT033), so a refund of a sale it never accepted can't be sent at all.
      *
-     * @return array{state: 'send'|'wait'|'not_applicable'|'failed', reference?: array<string, int>, notes?: string, error?: string}
+     * @return array{state: 'send'|'wait'|'not_applicable'|'failed', reference?: array<string, int>, notes?: string, type?: 'CreditNote'|'DebitNote', error?: string}
      */
     private function planCreditNote(FiscalDocument $document): array
     {
-        if ($document instanceof CreditNote) {
+        $type = $document instanceof CustomerDebitNote ? 'DebitNote' : 'CreditNote';
+        if ($document instanceof CreditNote || $document instanceof CustomerDebitNote) {
             if (! $document->fiscalReadyToSend()) {
                 return ['state' => 'wait'];
             }
             $originalSale = ZimraSale::where('invoice_id', $document->invoice_id)->first();
-            $notes = $document->reason ?: 'Credit note against invoice '.$document->invoice?->invoice_number;
+            $notes = $document->reason ?: ($type === 'DebitNote' ? 'Debit note' : 'Credit note').' against invoice '.$document->invoice?->invoice_number;
         } else {
             $salesReturn = SalesReturn::where('return_transaction_id', $document->id)->first();
             if (! $salesReturn || $document->fiscalLines()->isEmpty()) {
@@ -356,6 +358,7 @@ class ZimraSalesService
             'state' => 'send',
             'reference' => $reference,
             'notes' => $notes,
+            'type' => $type,
         ];
     }
 
@@ -500,7 +503,7 @@ class ZimraSalesService
                 $taxCodeMap,
                 $device->applicable_taxes ?? [],
                 $invoiceNo,
-                $creditNotePlan === null ? null : ['reference' => $creditNotePlan['reference'], 'notes' => $creditNotePlan['notes']],
+                $creditNotePlan === null ? null : ['reference' => $creditNotePlan['reference'], 'notes' => $creditNotePlan['notes'], 'type' => $creditNotePlan['type']],
                 $this->lastSubmittedReceiptDate($device),
                 $this->exemptProductIds($items)
             );

@@ -122,7 +122,9 @@ class ZimraClient
             ];
         }
 
-        $updates = [];
+        // Taxpayer, branch and verification URL for printed receipts. Kept whole
+        // so production values replace test ones without code changes.
+        $updates = ['fdms_config' => array_diff_key($data, array_flip(['operationID', 'applicableTaxes', 'taxPercents']))];
         if (! empty($taxCodeMap)) {
             $updates['tax_codes'] = $taxCodeMap;
             $updates['applicable_taxes'] = $applicableTaxes;
@@ -214,6 +216,10 @@ class ZimraClient
         if ($blocked = $this->guardBlock('OpenDay')) {
             return $blocked;
         }
+
+        // ZIMRA: refresh the applicable taxes before each day, as tax IDs and
+        // rates can change. A failure here leaves the last known config in use.
+        $this->getDeviceConfig($deviceId, $device);
 
         $result = $this->deviceRequest($device, 'POST', "/Device/v1/{$deviceId}/OpenDay", [
             'fiscalDayOpened' => now('Africa/Harare')->format('Y-m-d\TH:i:s'),
