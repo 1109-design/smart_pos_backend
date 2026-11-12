@@ -675,6 +675,100 @@ class SyncController extends Controller
     }
 
     /**
+     * Which of the device's tables have something new to pull — one cheap
+     * request instead of a /sync/pull per table. The app asks this every
+     * sync cycle and pulls only the tables listed, so a till isn't sending
+     * 125 requests a cycle back to back (2026-11-12: that kept an Intel
+     * N150 till at 70%+ CPU whenever it was online).
+     *
+     * `cursors` maps table name → the device's own pull position for it
+     * ({since, after_id}, exactly what it would send to /sync/pull; both
+     * null for a table it has never pulled). A table is listed when a
+     * record from another device sits past that position.
+     *
+     * Only looks back a day, so the query stays small however stale a
+     * rarely-changing table's cursor is. Anything older that a device
+     * still lacks (offline for days, a pull that failed) is picked up by
+     * the full every-table pull the app still runs at startup and every
+     * 30 minutes.
+     */
+    public function changedTables(Request $request): JsonResponse
+    {
+        $request->validate([
+            'cursors' => 'present|array',
+            'cursors.*.since' => 'nullable|date',
+            'cursors.*.after_id' => 'nullable|integer',
+        ]);
+
+        $device = $this->deviceResolver->fromRequest($request);
+        $serverTime = now();
+
+        // Pulls are what keep last_seen_at meaning "online now" (see
+        // pull()); a device that finds nothing changed may not pull at all.
+        if ($device && (! $device->last_seen_at || $device->last_seen_at->lt($serverTime->copy()->subSeconds(30)))) {
+            $device->forceFill(['last_seen_at' => $serverTime])->saveQuietly();
+        }
+
+        $cursors = collect($request->input('cursors', []))
+            ->map(fn ($cursor) => [
+                'since' => isset($cursor['since']) ? Carbon::parse($cursor['since'])->utc() : null,
+                'after_id' => isset($cursor['after_id']) ? (int) $cursor['after_id'] : null,
+            ]);
+
+        if ($cursors->isEmpty()) {
+            return response()->json([
+                'tables' => [],
+                'server_time' => $serverTime->toIso8601String(),
+                'app_releases' => (object) AppRelease::latestByPlatform(),
+            ]);
+        }
+
+        $floor = $serverTime->copy()->subDay();
+        $oldestSince = $cursors->pluck('since')->filter()->min();
+        if ($cursors->every(fn ($cursor) => $cursor['since'] !== null) && $oldestSince->gt($floor)) {
+            $floor = $oldestSince->copy();
+        }
+
+        $latestByTable = SyncRecord::query()
+            ->where('business_id', $device?->tenant_id)
+            ->whereIn('table_name', $cursors->keys()->all())
+            ->where('synced_at', '>=', $floor)
+            ->when($device, fn ($q) => $q->where(function ($q) use ($device) {
+                $q->whereNull('device_id')->orWhere('device_id', '!=', $device->id);
+            }))
+            ->groupBy('table_name')
+            ->selectRaw('table_name, MAX(synced_at) as latest_at, MAX(id) as latest_id')
+            ->get();
+
+        $changed = [];
+        foreach ($latestByTable as $row) {
+            $cursor = $cursors->get($row->table_name);
+            $since = $cursor['since'] ?? null;
+            if ($since === null) {
+                $changed[] = $row->table_name;
+
+                continue;
+            }
+            $latestAt = Carbon::parse($row->latest_at, 'UTC');
+            // Same rule as pull(): past `since`, or tied on it with a higher
+            // id than `after_id`. MAX(id) can only over-report (a harmless
+            // extra pull that returns nothing), never miss a record.
+            if ($latestAt->timestamp > $since->timestamp
+                || ($latestAt->timestamp === $since->timestamp
+                    && $cursor['after_id'] !== null
+                    && (int) $row->latest_id > $cursor['after_id'])) {
+                $changed[] = $row->table_name;
+            }
+        }
+
+        return response()->json([
+            'tables' => $changed,
+            'server_time' => $serverTime->toIso8601String(),
+            'app_releases' => (object) AppRelease::latestByPlatform(),
+        ]);
+    }
+
+    /**
      * PHP has no distinct "empty map" type — json_decode('{}', true) and
      * json_decode('[]', true) both produce []. Eloquent's 'array' cast on
      * SyncRecord::payload uses exactly that decode, so an approval_requests
