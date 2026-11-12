@@ -45,6 +45,7 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::post('sync/push', [SyncController::class, 'push']);
     Route::post('sync/fiscalise/{transactionId}', [SyncController::class, 'fiscalise']);
     Route::get('sync/pull', [SyncController::class, 'pull']);
+    Route::post('sync/changed-tables', [SyncController::class, 'changedTables']);
     Route::get('app-releases', [AppReleaseController::class, 'index']);
     Route::get('devices/overview', [DeviceOverviewController::class, 'index']);
     Route::get('sync/status', [SyncController::class, 'status']);
