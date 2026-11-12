@@ -5,6 +5,7 @@ namespace App\Console\Commands\Zimra;
 use App\Models\Business;
 use App\Models\Location;
 use App\Models\Zimra\ZimraDevice;
+use App\Services\Zimra\ZimraCertificateService;
 use App\Services\Zimra\ZimraClient;
 use Exception;
 use Illuminate\Console\Command;
@@ -68,7 +69,7 @@ class RegisterZimraDevice extends Command
         $this->info('Taxpayer verified: '.($verify['data']['taxPayerName'] ?? 'OK'));
 
         try {
-            [$csrPem, $privateKeyPem] = $this->generateCsr($deviceId, $serialNo);
+            [$csrPem, $privateKeyPem] = ZimraCertificateService::generateCsr($deviceId, $serialNo);
         } catch (Exception $e) {
             $this->error('CSR generation failed: '.$e->getMessage());
 
@@ -188,47 +189,5 @@ class RegisterZimraDevice extends Command
 
         return $choice === '' ? null : (string) $choice;
 
-    }
-
-    /**
-     * Generate an RSA-2048 CSR per ZIMRA spec: CN = ZIMRA-{serial}-{deviceId
-     * left-padded to 10 digits}, C=ZW.
-     *
-     * @return array{0: string, 1: string} [csrPem, privateKeyPem]
-     */
-    private function generateCsr(string $deviceId, string $serialNo): array
-    {
-        $dn = [
-            'countryName' => 'ZW',
-            'stateOrProvinceName' => 'Zimbabwe',
-            'organizationName' => 'Zimbabwe Revenue Authority',
-            'commonName' => 'ZIMRA-'.$serialNo.'-'.str_pad($deviceId, 10, '0', STR_PAD_LEFT),
-        ];
-
-        $config = [
-            'private_key_bits' => 2048,
-            'private_key_type' => OPENSSL_KEYTYPE_RSA,
-            'digest_alg' => 'sha256',
-        ];
-
-        $privKey = openssl_pkey_new($config);
-        if ($privKey === false) {
-            throw new Exception('Failed to generate private key: '.openssl_error_string());
-        }
-
-        $csr = openssl_csr_new($dn, $privKey, $config);
-        if ($csr === false) {
-            throw new Exception('Failed to generate CSR: '.openssl_error_string());
-        }
-
-        if (! openssl_csr_export($csr, $csrPem)) {
-            throw new Exception('Failed to export CSR: '.openssl_error_string());
-        }
-
-        if (! openssl_pkey_export($privKey, $privKeyPem)) {
-            throw new Exception('Failed to export private key: '.openssl_error_string());
-        }
-
-        return [$csrPem, $privKeyPem];
     }
 }

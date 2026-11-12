@@ -264,6 +264,118 @@ class SyncQuotationInvoiceTest extends TestCase
         $this->assertDatabaseMissing('credit_notes', ['id' => $creditNoteId]);
     }
 
+    /** @return array{0: string, 1: Invoice} */
+    private function creditableInvoice(string $tenantId, string $status = 'sent', string $role = 'business_owner'): array
+    {
+        $token = $this->actingDeviceToken($tenantId);
+        $this->seed(RolesAndPermissionsSeeder::class);
+        User::where('email', $tenantId.'-owner@example.com')->first()->assignRole($role);
+        $customer = Customer::create(['id' => (string) Str::uuid(), 'business_id' => $tenantId, 'name' => 'Credited Customer']);
+
+        return [$token, Invoice::create([
+            'id' => (string) Str::uuid(), 'business_id' => $tenantId, 'customer_id' => $customer->id,
+            'invoice_number' => 'INV-'.$tenantId, 'status' => $status, 'issue_date' => now(), 'total' => 115,
+            'created_by_user_id' => (string) Str::uuid(),
+        ])];
+    }
+
+    private function pushCreditNote(string $token, Invoice $invoice, float $total): TestResponse
+    {
+        return $this->push($token, 'credit_notes', (string) Str::uuid(), [
+            'business_id' => $invoice->business_id,
+            'invoice_id' => $invoice->id,
+            'customer_id' => $invoice->customer_id,
+            'credit_note_number' => 'CN-'.Str::random(8),
+            'reason' => 'Returned',
+            'total' => $total,
+            'created_by_user_id' => (string) Str::uuid(),
+        ]);
+    }
+
+    private function recordPayment(Invoice $invoice, float $amount): void
+    {
+        InvoicePayment::create([
+            'id' => (string) Str::uuid(), 'invoice_id' => $invoice->id, 'method' => 'cash', 'amount' => $amount,
+            'currency_code' => 'USD', 'exchange_rate_used' => 1, 'base_equivalent' => $amount,
+            'recorded_by_user_id' => (string) Str::uuid(), 'paid_at' => now(),
+        ]);
+    }
+
+    public function test_a_credit_note_comes_off_what_the_invoice_still_owes(): void
+    {
+        [$token, $invoice] = $this->creditableInvoice('tenant-cn-owed');
+
+        $this->pushCreditNote($token, $invoice, 23)->assertOk();
+
+        $invoice->refresh();
+        $this->assertEqualsWithDelta(23, (float) $invoice->amount_paid, 0.001);
+        $this->assertSame('partial', $invoice->status);
+    }
+
+    public function test_a_credit_survives_the_invoice_being_pushed_again(): void
+    {
+        [$token, $invoice] = $this->creditableInvoice('tenant-cn-resync');
+        $this->pushCreditNote($token, $invoice, 23)->assertOk();
+
+        $this->push($token, 'invoices', $invoice->id, [
+            'business_id' => $invoice->business_id,
+            'customer_id' => $invoice->customer_id,
+            'invoice_number' => $invoice->invoice_number,
+            'status' => 'partial',
+            'issue_date' => now()->toDateString(),
+            'total' => 115,
+            'amount_paid' => 115,
+            'created_by_user_id' => $invoice->created_by_user_id,
+        ])->assertOk();
+
+        // Neither lost, nor inflated by what the device claimed.
+        $this->assertEqualsWithDelta(23, (float) $invoice->refresh()->amount_paid, 0.001);
+    }
+
+    public function test_payments_and_a_credit_together_settle_the_invoice(): void
+    {
+        [$token, $invoice] = $this->creditableInvoice('tenant-cn-settle', 'partial');
+        $this->recordPayment($invoice, 92);
+
+        $this->pushCreditNote($token, $invoice, 23)->assertOk();
+
+        $invoice->refresh();
+        $this->assertEqualsWithDelta(115, (float) $invoice->amount_paid, 0.001);
+        $this->assertSame('paid', $invoice->status);
+    }
+
+    public function test_a_credit_beyond_the_balance_does_not_overstate_what_was_paid(): void
+    {
+        [$token, $invoice] = $this->creditableInvoice('tenant-cn-over', 'paid');
+        $this->recordPayment($invoice, 115);
+
+        $this->pushCreditNote($token, $invoice, 23)->assertOk();
+
+        $invoice->refresh();
+        $this->assertEqualsWithDelta(115, (float) $invoice->amount_paid, 0.001);
+        $this->assertSame('paid', $invoice->status);
+    }
+
+    public function test_a_credit_note_leaves_a_cancelled_invoice_cancelled(): void
+    {
+        [$token, $invoice] = $this->creditableInvoice('tenant-cn-cancelled', 'cancelled');
+
+        $this->pushCreditNote($token, $invoice, 23)->assertOk();
+
+        $this->assertSame('cancelled', $invoice->refresh()->status);
+    }
+
+    public function test_a_refused_credit_note_changes_nothing_on_the_invoice(): void
+    {
+        [$token, $invoice] = $this->creditableInvoice('tenant-cn-refused', 'sent', 'cashier');
+
+        $this->pushCreditNote($token, $invoice, 23)->assertOk()->assertJsonCount(1, 'errors');
+
+        $invoice->refresh();
+        $this->assertEqualsWithDelta(0, (float) $invoice->amount_paid, 0.001);
+        $this->assertSame('sent', $invoice->status);
+    }
+
     public function test_recurring_invoice_schedule_can_be_pushed(): void
     {
         $tenantId = 'tenant-rec-1';

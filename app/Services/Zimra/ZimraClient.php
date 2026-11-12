@@ -4,6 +4,8 @@ namespace App\Services\Zimra;
 
 use App\Models\Zimra\ZimraConfiguration;
 use App\Models\Zimra\ZimraDevice;
+use App\Models\Zimra\ZimraFiscalDay;
+use Carbon\Carbon;
 use Exception;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Http;
@@ -120,7 +122,9 @@ class ZimraClient
             ];
         }
 
-        $updates = [];
+        // Taxpayer, branch and verification URL for printed receipts. Kept whole
+        // so production values replace test ones without code changes.
+        $updates = ['fdms_config' => array_diff_key($data, array_flip(['operationID', 'applicableTaxes', 'taxPercents']))];
         if (! empty($taxCodeMap)) {
             $updates['tax_codes'] = $taxCodeMap;
             $updates['applicable_taxes'] = $applicableTaxes;
@@ -131,11 +135,30 @@ class ZimraClient
             $updates['fiscal_day_max_hours'] = (int) $maxHours;
         }
 
+        // Unlike ZIMRA's other timestamps this one is UTC: it has no offset and
+        // matches the certificate's own notAfter to the second.
+        if (! empty($data['certificateValidTill'])) {
+            $updates['certificate_expires_at'] = Carbon::parse($data['certificateValidTill'], 'UTC');
+        }
+
         if (! empty($updates)) {
             $device->update($updates);
         }
 
         return ['success' => true, 'data' => $data, 'tax_code_map' => $taxCodeMap];
+    }
+
+    /**
+     * Tell ZIMRA the device is online. Guarded so a cloned database on a developer
+     * machine can't report a live device as online.
+     */
+    public function ping(string $deviceId, ZimraDevice $device): array
+    {
+        if ($blocked = $this->guardBlock('Ping')) {
+            return $blocked;
+        }
+
+        return $this->deviceRequest($device, 'POST', "/Device/v1/{$deviceId}/Ping");
     }
 
     /**
@@ -194,6 +217,10 @@ class ZimraClient
             return $blocked;
         }
 
+        // ZIMRA: refresh the applicable taxes before each day, as tax IDs and
+        // rates can change. A failure here leaves the last known config in use.
+        $this->getDeviceConfig($deviceId, $device);
+
         $result = $this->deviceRequest($device, 'POST', "/Device/v1/{$deviceId}/OpenDay", [
             'fiscalDayOpened' => now('Africa/Harare')->format('Y-m-d\TH:i:s'),
         ]);
@@ -202,6 +229,10 @@ class ZimraClient
             // Stamp fiscal_day_opened_at so previousReceiptHash queries are scoped
             // to the current fiscal day only (spec §2.3: hash chains are per day).
             $device->update(['fiscal_day_opened_at' => now()]);
+
+            if ($fiscalDayNo = (int) ($result['data']['fiscalDayNo'] ?? 0)) {
+                ZimraFiscalDay::recordFor($device, $fiscalDayNo);
+            }
         }
 
         return $result;

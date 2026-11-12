@@ -23,7 +23,7 @@ class ZimraCloseDayPayloadBuilder
 
         $acceptedRows = ZimraSale::query()
             ->where('device_id', (string) $device->device_id)
-            ->where('status', 'fiscalised')
+            ->whereIn('status', ZimraSale::IN_CHAIN_STATUSES)
             ->whereNotNull('fiscalised_at')
             ->where('fiscalised_at', '>=', $openedAt)
             ->orderBy('receipt_global_no')
@@ -39,12 +39,18 @@ class ZimraCloseDayPayloadBuilder
             }
 
             $currency = strtoupper((string) ($snapshot['receiptCurrency'] ?? 'USD'));
+            $counterPrefix = match ($snapshot['receiptType'] ?? 'FiscalInvoice') {
+                'CreditNote' => 'CreditNote',
+                'DebitNote' => 'DebitNote',
+                default => 'Sale',
+            };
 
             foreach ($snapshot['receiptTaxes'] as $tax) {
                 $taxPercent = array_key_exists('taxPercent', $tax) ? (float) $tax['taxPercent'] : null;
-                $key = ($taxPercent === null ? 'null' : (string) round($taxPercent, 2)).'_'.$currency;
+                $key = $counterPrefix.'_'.($taxPercent === null ? 'null' : (string) round($taxPercent, 2)).'_'.$currency;
 
                 $saleByTax[$key] ??= [
+                    'counterPrefix' => $counterPrefix,
                     'taxPercent' => $taxPercent,
                     'currency' => $currency,
                     'value' => 0.0,
@@ -66,7 +72,9 @@ class ZimraCloseDayPayloadBuilder
 
         $counters = $this->buildCounters($saleByTax, $balanceByType);
         $receiptCounter = $lastReceiptCounter ?? $acceptedRows->count();
-        $fiscalDayDate = $openedAt->toDateString();
+        // The fiscal day's date is the Harare date it opened on: a day opened just
+        // after midnight there is still the previous date in UTC.
+        $fiscalDayDate = $openedAt->copy()->timezone('Africa/Harare')->toDateString();
         $signingString = $this->signingString((string) $device->device_id, $fiscalDayNo, $fiscalDayDate, $counters);
 
         Log::info('ZIMRA CloseDay payload built', [
@@ -101,9 +109,10 @@ class ZimraCloseDayPayloadBuilder
             $taxPercent = $entry['taxPercent'] === null ? null : (float) $entry['taxPercent'];
             $taxId = $entry['taxID'] ?? ($taxPercent === null ? 3 : 2);
 
-            if (round((float) $entry['value'], 2) > 0) {
+            // Credit note counters run negative in the FDMS spec; only zeros are left out.
+            if (round((float) $entry['value'], 2) != 0) {
                 $counter = [
-                    'fiscalCounterType' => 'SaleByTax',
+                    'fiscalCounterType' => $entry['counterPrefix'].'ByTax',
                     'fiscalCounterCurrency' => $entry['currency'],
                     'fiscalCounterTaxID' => $taxId,
                     'fiscalCounterValue' => round((float) $entry['value'], 2),
@@ -114,9 +123,9 @@ class ZimraCloseDayPayloadBuilder
                 $counters[] = $counter;
             }
 
-            if (round((float) $entry['taxAmount'], 2) > 0) {
+            if (round((float) $entry['taxAmount'], 2) != 0) {
                 $counters[] = [
-                    'fiscalCounterType' => 'SaleTaxByTax',
+                    'fiscalCounterType' => $entry['counterPrefix'].'TaxByTax',
                     'fiscalCounterCurrency' => $entry['currency'],
                     'fiscalCounterTaxID' => $taxId,
                     'fiscalCounterTaxPercent' => $taxPercent,
@@ -126,7 +135,7 @@ class ZimraCloseDayPayloadBuilder
         }
 
         foreach ($balanceByType as $entry) {
-            if (round((float) $entry['value'], 2) <= 0) {
+            if (round((float) $entry['value'], 2) == 0) {
                 continue;
             }
 
@@ -152,6 +161,10 @@ class ZimraCloseDayPayloadBuilder
         $typeOrder = [
             'SaleByTax' => 0,
             'SaleTaxByTax' => 1,
+            'CreditNoteByTax' => 2,
+            'CreditNoteTaxByTax' => 3,
+            'DebitNoteByTax' => 4,
+            'DebitNoteTaxByTax' => 5,
             'BalanceByMoneyType' => 6,
         ];
 
