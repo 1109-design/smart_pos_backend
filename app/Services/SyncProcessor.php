@@ -62,6 +62,7 @@ use App\Models\MilestoneTask;
 use App\Models\Payment;
 use App\Models\PaymentMethodConfig;
 use App\Models\Payroll\EmployeeLeaveEntry;
+use App\Models\Payroll\EmployeeLeaveRequest;
 use App\Models\Payroll\EmployeeLoan;
 use App\Models\Payroll\EmployeePayProfile;
 use App\Models\Payroll\EmployeePaySplit;
@@ -144,6 +145,7 @@ use App\Services\Accounting\JournalEntryApprovalService;
 use App\Services\Accounting\OpeningBalanceService;
 use App\Services\Accounting\ProductOpeningStockPostingService;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
+use App\Services\Payroll\LeaveRequestDecision;
 use App\Services\Payroll\PayrollSync;
 use App\Services\Zimra\ZimraSalesService;
 use App\Support\BackOfficePermission;
@@ -328,6 +330,7 @@ class SyncProcessor
         'employee_pay_splits' => EmployeePaySplit::class,
         'employee_recurring_components' => EmployeeRecurringComponent::class,
         'employee_loans' => EmployeeLoan::class,
+        'employee_leave_requests' => EmployeeLeaveRequest::class,
         'tax_tables' => TaxTable::class,
         'tax_table_bands' => TaxTableBand::class,
         'statutory_settings' => StatutorySetting::class,
@@ -1157,6 +1160,19 @@ class SyncProcessor
                     // discarded) on its final decision.
                     if (($payload['action'] ?? null) === JournalEntryApprovalService::ACTION) {
                         app(JournalEntryApprovalService::class)->applyDecision(ApprovalRequest::find($uuid));
+                    }
+
+                    // A leave request decided in the app: decide it here too
+                    // (and post approved annual leave's deduction), so every
+                    // device converges even if it never saw the leave row
+                    // update. Idempotent — see LeaveRequestDecision.
+                    $decidedRequest = ApprovalRequest::find($uuid);
+                    if ($decidedRequest !== null && LeaveRequestDecision::handles($decidedRequest)) {
+                        $leaveDecider = (string) ($payload['approver_user_id'] ?? '');
+                        if ($incomingApprovalStatus === 'rejected'
+                            || LeaveRequestDecision::ownLeaveBlock($decidedRequest, $leaveDecider) === null) {
+                            app(LeaveRequestDecision::class)->apply($decidedRequest, $incomingApprovalStatus, $leaveDecider);
+                        }
                     }
                 }
                 break;

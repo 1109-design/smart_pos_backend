@@ -34,7 +34,21 @@ class ApprovalActionPermissions
             'approveStockTake',
             ['manager', 'branch_manager', 'operations_manager'],
         ],
+        'approve_leave_request' => [
+            'approveLeave',
+            ['manager', 'branch_manager', 'operations_manager', 'hr_officer'],
+        ],
     ];
+
+    /**
+     * Roles holding [$action]'s permission by default.
+     *
+     * @return list<string>
+     */
+    public static function defaultRolesFor(string $action): array
+    {
+        return self::REQUIRED[$action][1] ?? [];
+    }
 
     public function __construct(private readonly TillPermissions $permissions) {}
 
