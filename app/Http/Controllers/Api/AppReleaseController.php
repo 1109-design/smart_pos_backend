@@ -50,7 +50,9 @@ class AppReleaseController extends Controller
             return $ignored;
         }
 
-        AppRelease::updateOrCreate(['platform' => $data['platform']], $data);
+        // A GitHub-hosted asset isn't hashed here; any sha256 recorded for an earlier upload
+        // doesn't describe this file.
+        AppRelease::updateOrCreate(['platform' => $data['platform']], $data + ['sha256' => null]);
         AppRelease::forgetCache();
 
         return response()->json(['updated' => true]);
@@ -74,6 +76,8 @@ class AppReleaseController extends Controller
             'version' => self::VERSION_RULE,
             // KB; the APK is the big one (~250 MB).
             'file' => 'required|file|max:512000',
+            // Hex SHA-256 the release machine computed; devices verify downloads against it.
+            'sha256' => ['nullable', 'string', 'regex:/^[A-Fa-f0-9]{64}$/'],
         ]);
         $platform = $data['platform'];
         $file = $request->file('file');
@@ -84,6 +88,15 @@ class AppReleaseController extends Controller
             || strtolower(pathinfo($name, PATHINFO_EXTENSION)) !== self::EXTENSIONS[$platform]) {
             return response()->json([
                 'message' => "A {$platform} release must be a .".self::EXTENSIONS[$platform].' file with a plain name.',
+            ], 422);
+        }
+
+        // Hashed from what actually arrived, so a corrupted upload is refused here rather than
+        // relayed. A given hash must match; without one (older release scripts) we still relay ours.
+        $sha256 = hash_file('sha256', $file->getRealPath());
+        if (! empty($data['sha256']) && ! hash_equals(strtolower($data['sha256']), $sha256)) {
+            return response()->json([
+                'message' => 'Uploaded file does not match the given sha256.',
             ], 422);
         }
 
@@ -99,6 +112,7 @@ class AppReleaseController extends Controller
             'version' => $data['version'],
             'asset_name' => $name,
             'download_url' => $disk->url($dir.'/'.rawurlencode($name)),
+            'sha256' => $sha256,
         ]);
         AppRelease::forgetCache();
 

@@ -163,4 +163,36 @@ class AppReleaseRelayTest extends TestCase
         $this->assertDatabaseCount('app_releases', 0);
         $this->assertSame([], Storage::disk('public')->allFiles());
     }
+
+    public function test_an_upload_is_hashed_and_the_hash_reaches_devices(): void
+    {
+        Storage::fake('public');
+        $file = UploadedFile::fake()->createWithContent('SmartPOS-Setup-1.0.60+1.exe', 'signed installer bytes');
+        $sum = hash('sha256', 'signed installer bytes');
+
+        $this->withHeader('X-Release-Token', 'ci-secret')
+            ->post('/api/v1/app-releases/upload', [
+                'platform' => 'windows', 'version' => 'v1.0.60', 'sha256' => strtoupper($sum), 'file' => $file,
+            ], ['Accept' => 'application/json'])
+            ->assertOk();
+
+        $pull = $this->withHeader('Authorization', 'Bearer '.$this->deviceToken())
+            ->getJson('/api/v1/sync/pull');
+        $this->assertSame($sum, $pull->json('app_releases.windows.sha256'));
+    }
+
+    public function test_an_upload_that_does_not_match_its_hash_is_refused(): void
+    {
+        Storage::fake('public');
+        $file = UploadedFile::fake()->createWithContent('SmartPOS-Setup-1.0.60+1.exe', 'truncated');
+
+        $this->withHeader('X-Release-Token', 'ci-secret')
+            ->post('/api/v1/app-releases/upload', [
+                'platform' => 'windows', 'version' => 'v1.0.60', 'sha256' => hash('sha256', 'something else'), 'file' => $file,
+            ], ['Accept' => 'application/json'])
+            ->assertStatus(422);
+
+        $this->assertDatabaseCount('app_releases', 0);
+        $this->assertSame([], Storage::disk('public')->allFiles());
+    }
 }

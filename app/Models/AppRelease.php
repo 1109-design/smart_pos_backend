@@ -21,14 +21,14 @@ class AppRelease extends Model
 
     protected $keyType = 'string';
 
-    protected $fillable = ['platform', 'version', 'asset_name', 'download_url'];
+    protected $fillable = ['platform', 'version', 'asset_name', 'download_url', 'sha256'];
 
     /**
      * Every platform's newest release, keyed by platform — the shape
      * /sync/pull and GET /app-releases return. Cached briefly: every
      * device's pull reads it, every few seconds.
      *
-     * @return array<string, array{version: string, asset_name: string, download_url: string}>
+     * @return array<string, array{version: string, asset_name: string, download_url: string, sha256: ?string}>
      */
     public static function latestByPlatform(): array
     {
@@ -38,6 +38,7 @@ class AppRelease extends Model
                 'version' => $r->version,
                 'asset_name' => $r->asset_name,
                 'download_url' => $r->download_url,
+                'sha256' => $r->sha256,
             ]])
             ->all());
     }
