@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\Zimra\ZimraDeviceEvent;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
@@ -55,6 +56,13 @@ Schedule::command('zimra:ping')
 // certificate is only replaced while the fiscal day is closed.
 Schedule::command('zimra:renew-certificates')
     ->dailyAt('00:15')
+    ->timezone('Africa/Harare')
+    ->withoutOverlapping()
+    ->onOneServer();
+
+// Keep the ZIMRA device log to zimra.event_retention_days (90 by default).
+Schedule::command('model:prune', ['--model' => [ZimraDeviceEvent::class]])
+    ->dailyAt('00:30')
     ->timezone('Africa/Harare')
     ->withoutOverlapping()
     ->onOneServer();

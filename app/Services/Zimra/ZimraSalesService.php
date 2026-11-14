@@ -29,7 +29,9 @@ class ZimraSalesService
         private ZimraClient $client,
         private FiscalisationGuard $fiscalisationGuard,
         private ZimraReceiptPreflightService $preflight,
-    ) {}
+    ) {
+        $this->client->setEventSource('sale');
+    }
 
     /**
      * Entry point at sale time: records a pending ZimraSale and queues the
