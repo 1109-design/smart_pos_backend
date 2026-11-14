@@ -18,6 +18,7 @@ use App\Http\Controllers\Api\SyncDiagnosticsController;
 use App\Http\Controllers\Api\SyncHealthController;
 use App\Http\Controllers\Api\TillController;
 use App\Http\Controllers\Api\WebhookController;
+use App\Http\Controllers\Api\ZimraDeviceController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function () {
@@ -130,6 +131,13 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     // offline devices can't both approve the same payroll (see
     // PayrollPeriodLockController and PayrollSync).
     Route::post('payroll/period-locks', [PayrollPeriodLockController::class, 'store']);
+
+    // Finance → Fiscal Devices on the tills: health, fiscal days and the
+    // device log of each ZIMRA device, and a read-only live status check.
+    Route::get('zimra/devices', [ZimraDeviceController::class, 'index']);
+    Route::get('zimra/devices/{deviceId}/fiscal-days', [ZimraDeviceController::class, 'fiscalDays']);
+    Route::get('zimra/devices/{deviceId}/events', [ZimraDeviceController::class, 'events']);
+    Route::post('zimra/devices/{deviceId}/check', [ZimraDeviceController::class, 'check']);
 });
 
 // Webhooks (no auth — verified by payload signature)

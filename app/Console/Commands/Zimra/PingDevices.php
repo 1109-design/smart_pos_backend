@@ -16,6 +16,7 @@ class PingDevices extends Command
     public function handle(ZimraClient $client): int
     {
         $failures = 0;
+        $client->setEventSource('scheduler');
 
         foreach (ZimraDevice::where('is_active', true)->get() as $device) {
             $result = $client->ping((string) $device->device_id, $device);
@@ -28,7 +29,7 @@ class PingDevices extends Command
             }
 
             $failures++;
-            // The scheduler discards command output, so the log is the only record.
+            // Also in the device log (ZimraDeviceEventRecorder).
             Log::warning('ZIMRA ping failed', ['device_id' => (string) $device->device_id, 'error' => $result['error']]);
             $this->error("Device {$device->device_id}: ping failed: {$result['error']}");
         }

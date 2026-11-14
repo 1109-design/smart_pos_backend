@@ -76,4 +76,26 @@ return [
         explode(',', (string) env('ZIMRA_FISCALISATION_ALERT_EMAILS', ''))
     )),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Fiscal Device Management
+    |--------------------------------------------------------------------------
+    |
+    | How long the device log (zimra_device_events) is kept, and when
+    | FiscalDeviceHealth calls a device unhealthy. Pings run every 5 minutes,
+    | so 15 minutes without a successful contact means three missed in a row.
+    |
+    */
+
+    'event_retention_days' => (int) env('ZIMRA_EVENT_RETENTION_DAYS', 90),
+
+    'health' => [
+        'no_contact_minutes' => 15,
+        'day_warning_hours_before_limit' => 2,
+        'close_unconfirmed_minutes' => 30,
+        'certificate_warning_days' => 30,
+        'pending_sale_minutes' => 20,
+        'problem_window_days' => 30,
+    ],
+
 ];
