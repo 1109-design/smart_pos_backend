@@ -6,4 +6,9 @@ namespace App\Models\Payroll;
 class PayRun extends PayrollModel
 {
     protected $table = 'pay_runs';
+
+    protected $casts = [
+        'totals_checked_at' => 'datetime',
+        'totals_mismatch' => 'array',
+    ];
 }

@@ -13,6 +13,7 @@ class Customer extends Model
     protected $fillable = [
         'id', 'business_id', 'name', 'phone', 'email', 'address', 'photo_path',
         'loyalty_points', 'credit_balance', 'credit_limit', 'is_tax_exempt', 'group',
+        'tax_number', 'vat_number',
     ];
 
     protected static function booted(): void

@@ -118,7 +118,7 @@ class TakeOnSyncTest extends TestCase
         $roles = app(AccountRoleMappingService::class);
 
         $this->assertSame('3025', $roles->resolve(self::BIZ, 'take_on_clearing')->code);
-        $this->assertSame('1170', $roles->resolve(self::BIZ, 'supplier_prepayments')->code);
+        $this->assertSame('1175', $roles->resolve(self::BIZ, 'supplier_prepayments')->code);
     }
 
     public function test_a_draft_batch_and_its_rows_sync(): void

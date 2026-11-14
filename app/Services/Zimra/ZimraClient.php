@@ -4,6 +4,8 @@ namespace App\Services\Zimra;
 
 use App\Models\Zimra\ZimraConfiguration;
 use App\Models\Zimra\ZimraDevice;
+use App\Models\Zimra\ZimraFiscalDay;
+use Carbon\Carbon;
 use Exception;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Http;
@@ -21,9 +23,26 @@ class ZimraClient
 {
     private ZimraConfiguration $config;
 
+    /** Who triggered the calls this client makes, for the device log. */
+    private ?string $eventSource = null;
+
+    private ?string $eventUserId = null;
+
     public function __construct()
     {
         $this->config = ZimraConfiguration::getCurrent() ?? $this->createDefaultConfig();
+    }
+
+    /**
+     * Labels the following calls in the device log, e.g. 'scheduler' for the
+     * ping job or 'manual' (with the user) for Check now.
+     */
+    public function setEventSource(?string $source, ?string $userId = null): static
+    {
+        $this->eventSource = $source;
+        $this->eventUserId = $userId;
+
+        return $this;
     }
 
     public function getConfig(): ZimraConfiguration
@@ -85,7 +104,7 @@ class ZimraClient
      */
     public function getStatus(string $deviceId, ZimraDevice $device): array
     {
-        return $this->deviceRequest($device, 'GET', "/Device/v1/{$deviceId}/GetStatus");
+        return $this->deviceRequest($device, 'status', 'GET', "/Device/v1/{$deviceId}/GetStatus");
     }
 
     /**
@@ -94,7 +113,7 @@ class ZimraClient
      */
     public function getDeviceConfig(string $deviceId, ZimraDevice $device): array
     {
-        $result = $this->deviceRequest($device, 'GET', "/Device/v1/{$deviceId}/GetConfig");
+        $result = $this->deviceRequest($device, 'config', 'GET', "/Device/v1/{$deviceId}/GetConfig");
 
         if (! $result['success']) {
             return $result;
@@ -120,7 +139,9 @@ class ZimraClient
             ];
         }
 
-        $updates = [];
+        // Taxpayer, branch and verification URL for printed receipts. Kept whole
+        // so production values replace test ones without code changes.
+        $updates = ['fdms_config' => array_diff_key($data, array_flip(['operationID', 'applicableTaxes', 'taxPercents']))];
         if (! empty($taxCodeMap)) {
             $updates['tax_codes'] = $taxCodeMap;
             $updates['applicable_taxes'] = $applicableTaxes;
@@ -131,11 +152,30 @@ class ZimraClient
             $updates['fiscal_day_max_hours'] = (int) $maxHours;
         }
 
+        // Unlike ZIMRA's other timestamps this one is UTC: it has no offset and
+        // matches the certificate's own notAfter to the second.
+        if (! empty($data['certificateValidTill'])) {
+            $updates['certificate_expires_at'] = Carbon::parse($data['certificateValidTill'], 'UTC');
+        }
+
         if (! empty($updates)) {
             $device->update($updates);
         }
 
         return ['success' => true, 'data' => $data, 'tax_code_map' => $taxCodeMap];
+    }
+
+    /**
+     * Tell ZIMRA the device is online. Guarded so a cloned database on a developer
+     * machine can't report a live device as online.
+     */
+    public function ping(string $deviceId, ZimraDevice $device): array
+    {
+        if ($blocked = $this->guardBlock('Ping', $device, 'ping')) {
+            return $blocked;
+        }
+
+        return $this->deviceRequest($device, 'ping', 'POST', "/Device/v1/{$deviceId}/Ping");
     }
 
     /**
@@ -149,11 +189,11 @@ class ZimraClient
      */
     public function issueCertificate(string $deviceId, string $csrPem, ZimraDevice $device): array
     {
-        if ($blocked = $this->guardBlock('IssueCertificate')) {
+        if ($blocked = $this->guardBlock('IssueCertificate', $device, 'certificate')) {
             return $blocked;
         }
 
-        return $this->deviceRequest($device, 'POST', "/Device/v1/{$deviceId}/IssueCertificate", [
+        return $this->deviceRequest($device, 'certificate', 'POST', "/Device/v1/{$deviceId}/IssueCertificate", [
             'certificateRequest' => $csrPem,
         ]);
     }
@@ -164,7 +204,7 @@ class ZimraClient
      */
     public function submitReceipt(string $deviceId, array $receiptData, ZimraDevice $device): array
     {
-        if ($blocked = $this->guardBlock('SubmitReceipt')) {
+        if ($blocked = $this->guardBlock('SubmitReceipt', $device, 'receipt')) {
             return $blocked;
         }
 
@@ -176,7 +216,9 @@ class ZimraClient
             'receipt_global_no' => $receiptData['receipt']['receiptGlobalNo'] ?? null,
         ]);
 
-        $result = $this->deviceRequest($device, 'POST', "/Device/v1/{$deviceId}/SubmitReceipt", null, $jsonBody);
+        // Receipts are logged only when they fail: one row per sale would bury
+        // the device log.
+        $result = $this->deviceRequest($device, 'receipt', 'POST', "/Device/v1/{$deviceId}/SubmitReceipt", null, $jsonBody, recordSuccess: false);
 
         Log::info('ZIMRA SubmitReceipt response', [
             'device_id' => $deviceId,
@@ -190,11 +232,15 @@ class ZimraClient
 
     public function openFiscalDay(string $deviceId, ZimraDevice $device): array
     {
-        if ($blocked = $this->guardBlock('OpenDay')) {
+        if ($blocked = $this->guardBlock('OpenDay', $device, 'open_day')) {
             return $blocked;
         }
 
-        $result = $this->deviceRequest($device, 'POST', "/Device/v1/{$deviceId}/OpenDay", [
+        // ZIMRA: refresh the applicable taxes before each day, as tax IDs and
+        // rates can change. A failure here leaves the last known config in use.
+        $this->getDeviceConfig($deviceId, $device);
+
+        $result = $this->deviceRequest($device, 'open_day', 'POST', "/Device/v1/{$deviceId}/OpenDay", [
             'fiscalDayOpened' => now('Africa/Harare')->format('Y-m-d\TH:i:s'),
         ]);
 
@@ -202,6 +248,10 @@ class ZimraClient
             // Stamp fiscal_day_opened_at so previousReceiptHash queries are scoped
             // to the current fiscal day only (spec §2.3: hash chains are per day).
             $device->update(['fiscal_day_opened_at' => now()]);
+
+            if ($fiscalDayNo = (int) ($result['data']['fiscalDayNo'] ?? 0)) {
+                ZimraFiscalDay::recordFor($device, $fiscalDayNo);
+            }
         }
 
         return $result;
@@ -209,11 +259,13 @@ class ZimraClient
 
     public function closeFiscalDay(string $deviceId, array $fiscalDayData, ZimraDevice $device): array
     {
-        if ($blocked = $this->guardBlock('CloseDay')) {
+        $dayNo = isset($fiscalDayData['fiscalDayNo']) ? (int) $fiscalDayData['fiscalDayNo'] : null;
+
+        if ($blocked = $this->guardBlock('CloseDay', $device, 'close_day', $dayNo)) {
             return $blocked;
         }
 
-        return $this->deviceRequest($device, 'POST', "/Device/v1/{$deviceId}/CloseDay", $fiscalDayData);
+        return $this->deviceRequest($device, 'close_day', 'POST', "/Device/v1/{$deviceId}/CloseDay", $fiscalDayData, fiscalDayNo: $dayNo);
     }
 
     /**
@@ -241,7 +293,39 @@ class ZimraClient
      *
      * @return array{success: bool, data?: array, error?: string, status_code?: int}
      */
-    private function deviceRequest(ZimraDevice $device, string $method, string $path, ?array $jsonPayload = null, ?string $rawBody = null): array
+    private function deviceRequest(
+        ZimraDevice $device,
+        string $kind,
+        string $method,
+        string $path,
+        ?array $jsonPayload = null,
+        ?string $rawBody = null,
+        bool $recordSuccess = true,
+        ?int $fiscalDayNo = null,
+    ): array {
+        $started = hrtime(true);
+        $result = $this->sendDeviceRequest($device, $method, $path, $jsonPayload, $rawBody);
+
+        if (! $result['success'] || $recordSuccess) {
+            $this->recordEvent($device, $kind, $result, (int) ((hrtime(true) - $started) / 1_000_000), $fiscalDayNo);
+        }
+
+        return $result;
+    }
+
+    private function recordEvent(ZimraDevice $device, string $kind, array $result, ?int $durationMs, ?int $fiscalDayNo = null): void
+    {
+        app(ZimraDeviceEventRecorder::class)->record($device, $kind, $result, $durationMs, array_filter([
+            'fiscal_day_no' => $fiscalDayNo,
+            'source' => $this->eventSource,
+            'user_id' => $this->eventUserId,
+        ], fn ($v) => $v !== null));
+    }
+
+    /**
+     * @return array{success: bool, data?: array, error?: string, status_code?: int}
+     */
+    private function sendDeviceRequest(ZimraDevice $device, string $method, string $path, ?array $jsonPayload = null, ?string $rawBody = null): array
     {
         $certFile = null;
         $keyFile = null;
@@ -378,7 +462,7 @@ class ZimraClient
      *
      * @return array{success: false, error: string, guard_blocked: true}|null
      */
-    private function guardBlock(string $operation): ?array
+    private function guardBlock(string $operation, ?ZimraDevice $device = null, ?string $kind = null, ?int $fiscalDayNo = null): ?array
     {
         $guard = app(FiscalisationGuard::class);
 
@@ -393,6 +477,11 @@ class ZimraClient
             'reason' => $reason,
         ]);
 
-        return ['success' => false, 'error' => $reason, 'guard_blocked' => true];
+        $blocked = ['success' => false, 'error' => $reason, 'guard_blocked' => true];
+        if ($device !== null && $kind !== null) {
+            $this->recordEvent($device, $kind, $blocked, null, $fiscalDayNo);
+        }
+
+        return $blocked;
     }
 }

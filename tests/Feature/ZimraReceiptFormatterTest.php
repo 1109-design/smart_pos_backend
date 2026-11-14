@@ -191,6 +191,60 @@ class ZimraReceiptFormatterTest extends TestCase
         );
     }
 
+    public function test_corrected_split_reports_only_the_tenders_actually_used(): void
+    {
+        $device = $this->makeDevice();
+        $business = Business::create(['id' => 'biz-1', 'name' => 'Test Shop']);
+
+        $transaction = Transaction::create([
+            'id' => (string) Str::uuid(),
+            'business_id' => 'biz-1',
+            'user_id' => (string) Str::uuid(),
+            'subtotal' => 100,
+            'tax_total' => 15,
+            'total' => 115,
+            'base_currency' => 'USD',
+            'status' => 'completed',
+        ]);
+
+        $item = new TransactionItem([
+            'transaction_id' => $transaction->id,
+            'product_name' => 'Widget',
+            'quantity' => 1,
+            'unit_price' => 115,
+            'tax_amount' => 15.00,
+            'line_total' => 115.00,
+        ]);
+
+        // Rung up as cash, then corrected on the till to all EcoCash: the
+        // cash legs net to zero and must not reach ZIMRA as a $0 payment.
+        $payments = [
+            new Payment(['method' => 'cash', 'amount' => 115.00, 'base_equivalent' => 115.00]),
+            new Payment(['method' => 'cash', 'amount' => -115.00, 'base_equivalent' => -115.00, 'reference' => 'Split correction']),
+            new Payment(['method' => 'mobile_money', 'amount' => 115.00, 'base_equivalent' => 115.00, 'reference' => 'Split correction']),
+        ];
+
+        $result = ZimraReceiptFormatter::formatReceipt(
+            $transaction,
+            [$item],
+            $payments,
+            $business,
+            null,
+            $device,
+            null,
+            44,
+            9,
+            $device->tax_codes,
+            $device->applicable_taxes,
+            'DOC-44'
+        );
+
+        $payments = $result['receipt']['receiptPayments'];
+        $this->assertCount(1, $payments);
+        $this->assertSame(115.0, $payments[0]['paymentAmount']);
+        $this->assertNotSame('Cash', $payments[0]['moneyTypeCode']);
+    }
+
     public function test_zero_rated_items_resolve_to_zero_rated_tax_id(): void
     {
         $resolved = ZimraReceiptFormatter::resolveTax(0.0, [

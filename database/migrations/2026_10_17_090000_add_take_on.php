@@ -18,7 +18,7 @@ use Illuminate\Support\Facades\Schema;
  *   journal each one posted.
  * - businesses.take_on_finalised_at / _by_user_id: once set, take-on is
  *   closed on every device and no more take-on journals are accepted.
- * - 1170 Supplier Prepayments and 3025 Take-on Clearing for every
+ * - 1175 Supplier Prepayments and 3025 Take-on Clearing for every
  *   business that already has a chart.
  */
 return new class extends Migration

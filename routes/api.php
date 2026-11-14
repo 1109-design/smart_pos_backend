@@ -1,9 +1,12 @@
 <?php
 
+use App\Http\Controllers\Api\AppReleaseController;
+use App\Http\Controllers\Api\AuditController;
 use App\Http\Controllers\Api\BackOfficeAccessController;
 use App\Http\Controllers\Api\BusinessBrandingController;
 use App\Http\Controllers\Api\DeviceAuthController;
 use App\Http\Controllers\Api\DeviceDbSnapshotController;
+use App\Http\Controllers\Api\DeviceOverviewController;
 use App\Http\Controllers\Api\JournalAttachmentFileController;
 use App\Http\Controllers\Api\LedgerSummaryController;
 use App\Http\Controllers\Api\LocalSyncConflictController;
@@ -18,10 +21,19 @@ use App\Http\Controllers\Api\SyncHealthController;
 use App\Http\Controllers\Api\TakeOnFileController;
 use App\Http\Controllers\Api\TillController;
 use App\Http\Controllers\Api\WebhookController;
+use App\Http\Controllers\Api\ZimraDeviceController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function () {
     Route::get('health', fn () => response()->json(['ok' => true]));
+});
+
+// CI reports each newly published app installer, or the release build
+// machine uploads it (shared-secret auth, see AppReleaseController) —
+// relayed to devices on /sync/pull.
+Route::prefix('v1')->middleware(['throttle:30,1'])->group(function () {
+    Route::post('app-releases', [AppReleaseController::class, 'store']);
+    Route::post('app-releases/upload', [AppReleaseController::class, 'upload']);
 });
 
 // POS device authentication (no tenant context needed yet — tenant resolved by business_code)
@@ -37,6 +49,9 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::post('sync/push', [SyncController::class, 'push']);
     Route::post('sync/fiscalise/{transactionId}', [SyncController::class, 'fiscalise']);
     Route::get('sync/pull', [SyncController::class, 'pull']);
+    Route::post('sync/changed-tables', [SyncController::class, 'changedTables']);
+    Route::get('app-releases', [AppReleaseController::class, 'index']);
+    Route::get('devices/overview', [DeviceOverviewController::class, 'index']);
     Route::get('sync/status', [SyncController::class, 'status']);
     Route::get('sync/conflicts', [SyncController::class, 'conflicts']);
     Route::post('sync/conflicts/{id}/resolve', [SyncController::class, 'resolveConflict']);
@@ -57,6 +72,11 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::get('sync/diagnostics/db-snapshots/{id}/download', [DeviceDbSnapshotController::class, 'download'])->whereNumber('id');
     Route::post('sync/diagnostics/db-snapshots/{id}/chunks', [DeviceDbSnapshotController::class, 'chunk'])->whereNumber('id');
     Route::post('sync/diagnostics/db-snapshots/{id}/complete', [DeviceDbSnapshotController::class, 'complete'])->whereNumber('id');
+
+    // The owner's audit trail — every device uploads, the app reads it back
+    // (who may open it is the app's reportsAudit permission). Append-only.
+    Route::post('audit/push', [AuditController::class, 'push']);
+    Route::get('audit', [AuditController::class, 'index']);
 
     // Back Office access — portal details + owner/manager password set/reset
     Route::get('backoffice/info', [BackOfficeAccessController::class, 'info']);
@@ -124,6 +144,12 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     // The ledger month by month, read-only: a device compares its own copy
     // of the books to it (Phase 12.1 integrity check).
     Route::get('accounting/ledger-summary', [LedgerSummaryController::class, 'show']);
+    // Finance → Fiscal Devices on the tills: health, fiscal days and the
+    // device log of each ZIMRA device, and a read-only live status check.
+    Route::get('zimra/devices', [ZimraDeviceController::class, 'index']);
+    Route::get('zimra/devices/{deviceId}/fiscal-days', [ZimraDeviceController::class, 'fiscalDays']);
+    Route::get('zimra/devices/{deviceId}/events', [ZimraDeviceController::class, 'events']);
+    Route::post('zimra/devices/{deviceId}/check', [ZimraDeviceController::class, 'check']);
 });
 
 // Webhooks (no auth — verified by payload signature)

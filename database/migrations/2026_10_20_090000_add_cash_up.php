@@ -14,7 +14,7 @@ use Illuminate\Support\Facades\Schema;
  *   fixed once made; the cash-up's approval and printing are recorded.
  * - businesses.cash_up_variance_threshold: over / short within this posts
  *   at close; more needs a supervisor (not the cashier).
- * - 6067 Cash Over/Short and 2060 Layby Deposits for every chart.
+ * - 6067 Cash Over/Short and 2062 Layby Deposits for every chart.
  */
 return new class extends Migration
 {

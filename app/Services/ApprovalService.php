@@ -11,6 +11,7 @@ use App\Models\StockTake;
 use App\Models\SyncRecord;
 use App\Models\User;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
+use App\Services\Payroll\LeaveRequestDecision;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -208,7 +209,8 @@ class ApprovalService
             );
         }
 
-        $permissionBlock = app(ApprovalActionPermissions::class)->missing($request, User::find($approverUserId));
+        $permissionBlock = app(ApprovalActionPermissions::class)->missing($request, User::find($approverUserId))
+            ?? LeaveRequestDecision::ownLeaveBlock($request, $approverUserId);
         if ($permissionBlock !== null) {
             throw new \RuntimeException($permissionBlock);
         }
@@ -346,6 +348,12 @@ class ApprovalService
             return;
         }
 
+        if (LeaveRequestDecision::handles($request)) {
+            app(LeaveRequestDecision::class)->apply($request->fresh() ?? $request, 'approved', $approverUserId);
+
+            return;
+        }
+
         if ($request->subject_type === StockTakeApprovalService::SUBJECT_TYPE && $request->action === StockTakeApprovalService::ACTION) {
             $take = StockTake::with('items')->find($request->subject_id);
             if ($take !== null) {
@@ -448,6 +456,12 @@ class ApprovalService
     {
         if ($request->subject_type === 'Requisition' && $request->action === 'approve_requisition') {
             $this->decideRequisition($request, 'rejected', $approverUserId);
+
+            return;
+        }
+
+        if (LeaveRequestDecision::handles($request)) {
+            app(LeaveRequestDecision::class)->apply($request->fresh() ?? $request, 'rejected', $approverUserId);
 
             return;
         }

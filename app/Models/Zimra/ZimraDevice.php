@@ -8,6 +8,14 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class ZimraDevice extends Model
 {
+    /** Never serialised: keys, certificates and taxpayer config stay on the server. */
+    protected $hidden = [
+        'activation_key',
+        'certificate_data',
+        'private_key_data',
+        'fdms_config',
+    ];
+
     protected $fillable = [
         'business_id',
         'location_id',
@@ -22,6 +30,7 @@ class ZimraDevice extends Model
         'error_message',
         'tax_codes',
         'applicable_taxes',
+        'fdms_config',
         'certificate_data',
         'private_key_data',
         'certificate_expires_at',
@@ -36,9 +45,12 @@ class ZimraDevice extends Model
             'is_active' => 'boolean',
             'tax_codes' => 'array',
             'applicable_taxes' => 'array',
+            'fdms_config' => 'array',
             'certificate_expires_at' => 'datetime',
             'fiscal_day_opened_at' => 'datetime',
             'last_sync_at' => 'datetime',
+            'last_contact_ok_at' => 'datetime',
+            'last_contact_failed_at' => 'datetime',
         ];
     }
 

@@ -83,7 +83,7 @@ class MultiCurrencySyncTest extends TestCase
     {
         $roles = app(AccountRoleMappingService::class);
         $this->assertSame('4025', $roles->resolve(self::BIZ, 'fx_unrealised_gain')->code);
-        $this->assertSame('6085', $roles->resolve(self::BIZ, 'fx_unrealised_loss')->code);
+        $this->assertSame('6086', $roles->resolve(self::BIZ, 'fx_unrealised_loss')->code);
         $this->assertSame('finance', AccountingPeriod::moduleFor('fx_revaluation'));
         $this->assertSame('finance', AccountingPeriod::moduleFor('fx_realised'));
     }

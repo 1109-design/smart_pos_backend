@@ -124,7 +124,7 @@ class CashUpSyncTest extends TestCase
 
         $roles = app(AccountRoleMappingService::class);
         $this->assertSame('6067', $roles->resolve(self::BIZ, 'cash_over_short')->code);
-        $this->assertSame('2060', $roles->resolve(self::BIZ, 'layby_deposits')->code);
+        $this->assertSame('2062', $roles->resolve(self::BIZ, 'layby_deposits')->code);
         $this->assertSame('sales', AccountingPeriod::moduleFor('layby_payment'));
     }
 }

@@ -2,12 +2,15 @@
 
 namespace App\Services\Payroll;
 
+use App\Models\Employee;
 use App\Models\Payroll\EmployeeLeaveEntry;
+use App\Models\Payroll\EmployeeLeaveRequest;
 use App\Models\Payroll\EmployeeLoan;
 use App\Models\Payroll\EmployeePayProfile;
 use App\Models\Payroll\EmployeePaySplit;
 use App\Models\Payroll\EmployeeRecurringComponent;
 use App\Models\Payroll\PayComponent;
+use App\Models\Payroll\PayrollAuditEntry;
 use App\Models\Payroll\PayrollModel;
 use App\Models\Payroll\PayrollPeriodLock;
 use App\Models\Payroll\PayrollSetting;
@@ -18,8 +21,10 @@ use App\Models\Payroll\StatutoryRemittance;
 use App\Models\Payroll\StatutorySetting;
 use App\Models\Payroll\TaxTable;
 use App\Models\Payroll\TaxTableBand;
+use App\Models\SyncRecord;
 use App\Models\User;
 use App\Services\Accounting\PayRunPostingService;
+use App\Services\ApprovalActionPermissions;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Schema;
 
@@ -34,7 +39,11 @@ use Illuminate\Support\Facades\Schema;
  *  - A regular run can only become approved while it holds its month's
  *    lock (payroll_period_locks, claimed online at approval), approved by
  *    someone holding approvePayroll.
- *  - Leave entries and statutory remittances are append-only.
+ *  - Leave entries, statutory remittances and the payroll audit log are
+ *    append-only.
+ *  - A leave request arrives pending, is decided once (by someone holding
+ *    approveLeave who isn't the requester or the employee) or cancelled,
+ *    and never changes status again.
  *
  * It then posts journals for businesses the server still posts for (see
  * PayRunPostingService).
@@ -49,6 +58,7 @@ class PayrollSync
         'employee_pay_splits' => EmployeePaySplit::class,
         'employee_recurring_components' => EmployeeRecurringComponent::class,
         'employee_loans' => EmployeeLoan::class,
+        'employee_leave_requests' => EmployeeLeaveRequest::class,
         'tax_tables' => TaxTable::class,
         'tax_table_bands' => TaxTableBand::class,
         'statutory_settings' => StatutorySetting::class,
@@ -57,9 +67,10 @@ class PayrollSync
         'pay_run_lines' => PayRunLine::class,
         'statutory_remittances' => StatutoryRemittance::class,
         'employee_leave_entries' => EmployeeLeaveEntry::class,
+        'payroll_audit_log' => PayrollAuditEntry::class,
     ];
 
-    public const APPEND_ONLY = ['statutory_remittances', 'employee_leave_entries'];
+    public const APPEND_ONLY = ['statutory_remittances', 'employee_leave_entries', 'payroll_audit_log'];
 
     private const LOCKED_STATUSES = ['approved', 'paid', 'reversed'];
 
@@ -79,7 +90,10 @@ class PayrollSync
         'effective_from', 'effective_to', 'issued_at', 'period_start',
         'period_end', 'pay_date', 'calculated_at', 'approved_at',
         'paid_usd_at', 'paid_zwg_at', 'paid_at', 'entry_date',
+        'start_date', 'end_date', 'decided_at', 'cancelled_at',
     ];
+
+    private const LEAVE_FINAL_STATUSES = ['approved', 'rejected', 'cancelled'];
 
     /** @var array<string, list<string>> */
     private array $columns = [];
@@ -101,6 +115,10 @@ class PayrollSync
     {
         $model = self::MODELS[$table];
         $data = $this->clean($table, $payload);
+        if ($table === 'payroll_audit_log' && isset($payload['created_at'])) {
+            // The till's time of the change; created_at is the server's.
+            $data['logged_at'] = Carbon::parse((string) $payload['created_at']);
+        }
         $existing = $model::find($uuid);
 
         if (in_array($table, self::APPEND_ONLY, true) && $existing) {
@@ -112,6 +130,7 @@ class PayrollSync
                 'pay_runs' => $data = $this->guardRun($existing, $uuid, $data),
                 'pay_run_employees' => $data = $this->guardRunEmployee($existing, $data),
                 'pay_run_lines' => $data = $this->guardRunLine($existing, $data),
+                'employee_leave_requests' => $data = $this->guardLeaveRequest($existing, $uuid, $data),
                 default => null,
             };
             if ($data === null) {
@@ -260,6 +279,66 @@ class PayrollSync
             return null;
         }
         throw new \RuntimeException('pay_run_lines: an approved pay run\'s lines can\'t change.');
+    }
+
+    /**
+     * A leave request is created pending; pending moves once to approved or
+     * rejected (by an approveLeave holder who is neither the requester nor
+     * the employee) or to cancelled; a decided request never changes. A
+     * re-push of a decided request that disagrees is dropped and the server
+     * row re-sent, so the device converges instead of failing its sync.
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>|null
+     */
+    private function guardLeaveRequest(?EmployeeLeaveRequest $existing, string $uuid, array $data): ?array
+    {
+        $incoming = $data['status'] ?? $existing?->status ?? 'pending';
+
+        if ($existing === null) {
+            if ($incoming !== 'pending') {
+                throw new \RuntimeException('employee_leave_requests: a leave request must start pending.');
+            }
+
+            return $data;
+        }
+
+        if (in_array($existing->status, self::LEAVE_FINAL_STATUSES, true)) {
+            if ($incoming !== $existing->status) {
+                SyncRecord::create([
+                    'business_id' => $existing->business_id,
+                    'table_name' => 'employee_leave_requests',
+                    'record_uuid' => $uuid,
+                    'operation' => 'upsert',
+                    'payload' => LeaveRequestDecision::payload($existing),
+                    'source_updated_at' => now(),
+                    'synced_at' => now(),
+                ]);
+            }
+
+            return null;
+        }
+
+        // The request itself (who, when, how long) is fixed once raised —
+        // only its outcome moves.
+        $decision = array_intersect_key($data, array_flip([
+            'status', 'decided_by_user_id', 'decided_at', 'decision_note',
+            'cancelled_at', 'ledger_entry_id',
+        ]));
+
+        if (in_array($incoming, ['approved', 'rejected'], true)) {
+            $decider = (string) ($data['decided_by_user_id'] ?? '');
+            if (! $this->permissions->userHas(User::find($decider), (string) $existing->business_id, 'approveLeave', ApprovalActionPermissions::defaultRolesFor(LeaveRequestDecision::ACTION))) {
+                throw new \RuntimeException('employee_leave_requests: the decider is not allowed to approve leave.');
+            }
+            $employeeUser = Employee::where('id', $existing->employee_id)->value('user_id');
+            if ($decider === (string) $existing->requested_by_user_id
+                || ($employeeUser !== null && $decider === (string) $employeeUser)) {
+                throw new \RuntimeException('employee_leave_requests: nobody can decide their own leave.');
+            }
+        }
+
+        return $decision;
     }
 
     // ── Posting ────────────────────────────────────────────────────────────

@@ -4,10 +4,8 @@ namespace App\Services\Zimra;
 
 use App\Models\Business;
 use App\Models\Customer;
-use App\Models\Payment;
-use App\Models\Transaction;
-use App\Models\TransactionItem;
 use App\Models\Zimra\ZimraDevice;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -25,24 +23,24 @@ class ZimraReceiptFormatter
      */
     private static function taxCalculator(float $saleAmount, float $taxRate): float
     {
-        if ($taxRate <= 0.0 || $saleAmount == 0.0) {
+        if ($taxRate <= 0.0 || $saleAmount <= 0.0) {
             return 0.0;
         }
 
-        // On the magnitude, keeping the sign: a credit note's tax is the
-        // negative of the same sale's (Phase 11.2).
-        $magnitude = abs($saleAmount);
-        $preTax = $magnitude / (1 + ($taxRate / 100));
+        $preTax = $saleAmount / (1 + ($taxRate / 100));
 
-        return ($saleAmount < 0 ? -1 : 1) * round($magnitude - $preTax, 2, PHP_ROUND_HALF_UP);
+        return round($saleAmount - $preTax, 2, PHP_ROUND_HALF_UP);
     }
 
     /**
-     * @param  iterable<TransactionItem>  $items
-     * @param  iterable<Payment>  $payments
+     * @param  iterable<object>  $items
+     * @param  iterable<object>  $payments
+     * @param  string|null  $previousReceiptDate  The device's last submitted receiptDate.
+     * @param  array{reference: array<string, int>, notes: string, type?: 'CreditNote'|'DebitNote'}|null  $creditNote  Makes this a CreditNote, whose lines, taxes, payments and total go negative while quantities stay positive (FDMS spec, RCPT022/023/028/040), or a DebitNote, which stays positive.
+     * @param  array<int, string>  $exemptProductIds  Products on an Exempt tax rate. A line's stored tax can't tell exempt from zero-rated, as both are nil.
      */
     public static function formatReceipt(
-        Transaction $transaction,
+        FiscalDocument $document,
         iterable $items,
         iterable $payments,
         Business $business,
@@ -54,14 +52,12 @@ class ZimraReceiptFormatter
         ?array $taxCodeMap,
         ?array $applicableTaxes,
         string $invoiceNo,
-        array $options = []
+        ?array $creditNote = null,
+        ?string $previousReceiptDate = null,
+        array $exemptProductIds = []
     ): array {
-        // Phase 11.2 — the same receipt as a CreditNote / DebitNote (or a
-        // customer invoice's FiscalInvoice): its type, currency, the receipt
-        // it credits or debits, and the reason ZIMRA requires (RCPT015 /
-        // RCPT034). A credit note's lines and totals arrive negative
-        // (RCPT022 / RCPT028 / RCPT040); quantities stay positive.
-        $receiptType = $options['receiptType'] ?? 'FiscalInvoice';
+        $receiptType = $creditNote === null ? 'FiscalInvoice' : ($creditNote['type'] ?? 'CreditNote');
+        $sign = $receiptType === 'CreditNote' ? -1.0 : 1.0;
         $receiptLines = [];
         $lineNo = 0;
 
@@ -71,13 +67,21 @@ class ZimraReceiptFormatter
             $lineTotal = (float) round((float) $item->line_total, 2);
             $taxAmount = (float) round((float) $item->tax_amount, 2);
 
-            // Items store the VAT amount, not the rate — derive the inclusive
-            // rate (from magnitudes, so a credit note's negative line gives
-            // the same rate as the sale it credits).
-            $netAmount = abs($lineTotal) - abs($taxAmount);
-            $taxRate = $netAmount > 0 ? round((abs($taxAmount) / $netAmount) * 100, 2) : 0.0;
+            // A till stores a refund's lines as positive amounts on a negative
+            // transaction, so take the size here and apply the sign once.
+            if ($creditNote !== null) {
+                $quantity = abs($quantity);
+                $lineTotal = abs($lineTotal) * $sign;
+                $taxAmount = abs($taxAmount);
+            }
 
-            $resolved = self::resolveTax($taxRate, $applicableTaxes);
+            // Items store the VAT amount, not the rate — derive the inclusive
+            // rate, from the unrounded amounts so a small line still reads 15%.
+            $netAmount = abs((float) $item->line_total) - abs((float) $item->tax_amount);
+            $taxRate = $netAmount > 0 ? round((abs((float) $item->tax_amount) / $netAmount) * 100, 2) : 0.0;
+
+            $isExemptLine = $taxRate === 0.0 && in_array($item->product_id ?? null, $exemptProductIds, true);
+            $resolved = ($isExemptLine ? self::exemptTax($applicableTaxes) : null) ?? self::resolveTax($taxRate, $applicableTaxes);
             $taxId = $resolved['taxID'];
             $fdmsTaxPercent = $resolved['taxPercent'];
 
@@ -98,7 +102,7 @@ class ZimraReceiptFormatter
 
             // Only include taxPercent for non-exempt lines, using the FDMS value
             // so it matches the device config exactly.
-            if ($taxId !== 1 && $fdmsTaxPercent !== null) {
+            if ($fdmsTaxPercent !== null) {
                 $lineObj['taxPercent'] = (float) round($fdmsTaxPercent, 2);
             }
 
@@ -125,11 +129,18 @@ class ZimraReceiptFormatter
             $amount = (float) ($payment->base_equivalent ?? $payment->amount);
             $paymentTotalsByMoneyType[$moneyType] = ($paymentTotalsByMoneyType[$moneyType] ?? 0.0) + $amount;
         }
+        // A till's payment correction adds signed legs ("Split correction":
+        // -40 cash, +40 EcoCash), so a money type can net to nothing — leave
+        // it off the receipt rather than send ZIMRA a zero payment.
+        $paymentTotalsByMoneyType = array_filter(
+            $paymentTotalsByMoneyType,
+            fn (float $amt) => abs($amt) >= 0.005,
+        );
 
         $receiptPayments = [];
         if (empty($paymentTotalsByMoneyType)) {
             $receiptPayments[] = [
-                'moneyTypeCode' => 'Cash',
+                'moneyTypeCode' => $document->fiscalDefaultMoneyType(),
                 'paymentAmount' => $receiptTotal,
             ];
         } else {
@@ -158,6 +169,7 @@ class ZimraReceiptFormatter
                 $taxGroups[$key] = [
                     'taxID' => $tId,
                     'taxPercent' => $tRate,
+                    'isExempt' => ! isset($line['taxPercent']),
                     'salesAmountWithTax' => 0.0,
                 ];
             }
@@ -168,7 +180,8 @@ class ZimraReceiptFormatter
         foreach ($taxGroups as $group) {
             $taxObj = [
                 'taxID' => $group['taxID'],
-                'taxAmount' => (float) round(self::taxCalculator($group['salesAmountWithTax'], $group['taxPercent']), 2),
+                // Adding 0.0 turns a credit note's -0.0 back into a plain zero.
+                'taxAmount' => (float) round(self::taxCalculator(abs($group['salesAmountWithTax']), $group['taxPercent']), 2) * $sign + 0.0,
                 'salesAmountWithTax' => (float) round($group['salesAmountWithTax'], 2),
             ];
 
@@ -177,8 +190,8 @@ class ZimraReceiptFormatter
                 $taxObj['taxCode'] = $taxCodeValue;
             }
 
-            // Only omit taxPercent for taxID=1 (Exempt); zero-rated must send 0.
-            if ($group['taxID'] !== 1) {
+            // Only omit taxPercent for Exempt; zero-rated must send 0.
+            if (! $group['isExempt']) {
                 $taxObj['taxPercent'] = (float) round($group['taxPercent'], 2);
             }
 
@@ -196,16 +209,39 @@ class ZimraReceiptFormatter
         });
 
         // ── Buyer data (optional; both name and 10-char TIN required — RCPT043) ─
+        // Left off without a valid TIN, as sending part of it would be rejected.
         $buyerData = null;
-        // SmartPOS customers have no TIN field yet; include buyerData only when a
-        // TIN is stashed in the business metadata per-customer flow later. Walk-in
-        // sales legitimately omit buyerData entirely.
+        if ($customer && $customer->name && preg_match('/^\d{10}$/', (string) $customer->tax_number)) {
+            $buyerData = [
+                'buyerRegisterName' => $customer->name,
+                'buyerTIN' => $customer->tax_number,
+            ];
+            if (preg_match('/^\d{9}$/', (string) $customer->vat_number)) {
+                $buyerData['VATNumber'] = $customer->vat_number;
+            }
+            $contacts = array_filter([
+                'phoneNo' => mb_substr(trim((string) $customer->phone), 0, 20),
+                'email' => filter_var(trim((string) $customer->email), FILTER_VALIDATE_EMAIL) ?: '',
+            ]);
+            if ($contacts !== []) {
+                $buyerData['buyerContacts'] = $contacts;
+            }
+        }
 
         // ── Assemble ─────────────────────────────────────────────────────────
         // Spec §2.4 requires Africa/Harare timestamps; using the sale's original
         // created_at causes RCPT030 when fiscalising older transactions.
-        $receiptDate = now('Africa/Harare')->format('Y-m-d\TH:i:s');
-        $currencyCode = $options['currency'] ?? ($transaction->base_currency ?: 'USD');
+        // It must also be strictly later than the last receipt: two in the same
+        // second would be a Red RCPT030.
+        $receiptMoment = now('Africa/Harare')->startOfSecond();
+        if ($previousReceiptDate !== null) {
+            $previous = Carbon::parse($previousReceiptDate, 'Africa/Harare');
+            if ($receiptMoment->lte($previous)) {
+                $receiptMoment = $previous->copy()->addSecond();
+            }
+        }
+        $receiptDate = $receiptMoment->format('Y-m-d\TH:i:s');
+        $currencyCode = $document->fiscalCurrency();
 
         $receipt = [
             'receiptType' => $receiptType,
@@ -219,17 +255,16 @@ class ZimraReceiptFormatter
             'receiptTaxes' => $receiptTaxes,
             'receiptPayments' => $receiptPayments,
             'receiptTotal' => (float) round($receiptTotal, 2),
-            'receiptPrintForm' => 'Receipt48',
+            'receiptPrintForm' => $document->fiscalPrintForm(),
         ];
+
+        if ($creditNote !== null) {
+            $receipt['creditDebitNote'] = $creditNote['reference'];
+            $receipt['receiptNotes'] = $creditNote['notes'];
+        }
 
         if ($buyerData !== null) {
             $receipt['buyerData'] = $buyerData;
-        }
-        if (! empty($options['creditDebitNote'])) {
-            $receipt['creditDebitNote'] = $options['creditDebitNote'];
-        }
-        if (filled($options['receiptNotes'] ?? null)) {
-            $receipt['receiptNotes'] = (string) $options['receiptNotes'];
         }
 
         // ── Signature (spec §13.2.1) ─────────────────────────────────────────
@@ -281,6 +316,22 @@ class ZimraReceiptFormatter
         ];
 
         return ['receipt' => $receipt];
+    }
+
+    /**
+     * The device's Exempt tax: the one GetConfig lists with no percent.
+     *
+     * @return array{taxID: int, taxPercent: null}|null
+     */
+    private static function exemptTax(?array $applicableTaxes): ?array
+    {
+        foreach ($applicableTaxes ?? [] as $tax) {
+            if ($tax['taxPercent'] === null) {
+                return ['taxID' => (int) $tax['taxID'], 'taxPercent' => null];
+            }
+        }
+
+        return null;
     }
 
     /**

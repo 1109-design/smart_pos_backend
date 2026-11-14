@@ -5,7 +5,7 @@ use Illuminate\Database\Migrations\Migration;
 use Illuminate\Support\Facades\DB;
 
 /**
- * 4030 Stock Gains (Other Income) for every existing chart: stock counted,
+ * 4035 Stock Gains (Other Income) for every existing chart: stock counted,
  * adjusted or revalued up posts here instead of crediting 6050 Stock Loss /
  * Write-offs. New businesses get it from the seeded chart.
  */

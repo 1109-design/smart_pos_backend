@@ -6,6 +6,7 @@ use App\Events\SyncTablesChanged;
 use App\Exceptions\JournalRejectedException;
 use App\Exceptions\MissingParentRecordException;
 use App\Http\Controllers\Controller;
+use App\Models\AppRelease;
 use App\Models\Device;
 use App\Models\PendingSyncRecord;
 use App\Models\StockOversell;
@@ -118,6 +119,23 @@ class SyncController extends Controller
                 }
 
                 $existingVersion = $existing?->source_updated_at ?? $existing?->synced_at;
+                // A product_stock push only races other devices' pushes, never
+                // the server's own ledger recomputes: processing it recomputes
+                // quantity from the ledger anyway, and the rest of the row
+                // (reserved_quantity, in_transit_quantity, threshold, price
+                // override) is only ever set by devices. Measured against a
+                // recompute, a device's release of reserved stock was lost
+                // whenever its own movements in the same push (e.g. Pending
+                // Book allocations) had just bumped the row.
+                if ($record['table'] === 'product_stock' && $existing !== null && $existing->device_id === null) {
+                    $lastDevicePush = SyncRecord::where('business_id', $device?->tenant_id)
+                        ->where('table_name', 'product_stock')
+                        ->where('record_uuid', $record['uuid'])
+                        ->whereNotNull('device_id')
+                        ->latest('synced_at')
+                        ->first();
+                    $existingVersion = $lastDevicePush?->source_updated_at ?? $lastDevicePush?->synced_at;
+                }
                 if ($existingVersion && $existingVersion->gt($incomingUpdatedAt)) {
                     $merged = $this->attemptFieldLevelMerge($record, $existing);
 
@@ -557,6 +575,13 @@ class SyncController extends Controller
         $tables = $request->input('tables', []);
         $serverTime = now();
 
+        // Pulls run every few seconds whether or not the device has anything
+        // to push, so they're what makes last_seen_at mean "online now" on
+        // the Devices screen. Throttled to keep it to a write per 30s.
+        if ($device && (! $device->last_seen_at || $device->last_seen_at->lt($serverTime->copy()->subSeconds(30)))) {
+            $device->forceFill(['last_seen_at' => $serverTime])->saveQuietly();
+        }
+
         $reconciliationRequired = $device
             ? $this->detectReconciliationRequired($request, $device, $tables)
             : [];
@@ -665,6 +690,103 @@ class SyncController extends Controller
             // history next cycle — never a wipe of the whole local database,
             // and the outbox (pending pushes) is untouched either way.
             'reconciliation_required' => $reconciliationRequired,
+            // Newest app installer per platform — how devices learn of an
+            // update without polling GitHub (see AppRelease).
+            'app_releases' => (object) AppRelease::latestByPlatform(),
+        ]);
+    }
+
+    /**
+     * Which of the device's tables have something new to pull — one cheap
+     * request instead of a /sync/pull per table. The app asks this every
+     * sync cycle and pulls only the tables listed, so a till isn't sending
+     * 125 requests a cycle back to back (2026-11-12: that kept an Intel
+     * N150 till at 70%+ CPU whenever it was online).
+     *
+     * `cursors` maps table name → the device's own pull position for it
+     * ({since, after_id}, exactly what it would send to /sync/pull; both
+     * null for a table it has never pulled). A table is listed when a
+     * record from another device sits past that position.
+     *
+     * Only looks back a day, so the query stays small however stale a
+     * rarely-changing table's cursor is. Anything older that a device
+     * still lacks (offline for days, a pull that failed) is picked up by
+     * the full every-table pull the app still runs at startup and every
+     * 30 minutes.
+     */
+    public function changedTables(Request $request): JsonResponse
+    {
+        $request->validate([
+            'cursors' => 'present|array',
+            'cursors.*.since' => 'nullable|date',
+            'cursors.*.after_id' => 'nullable|integer',
+        ]);
+
+        $device = $this->deviceResolver->fromRequest($request);
+        $serverTime = now();
+
+        // Pulls are what keep last_seen_at meaning "online now" (see
+        // pull()); a device that finds nothing changed may not pull at all.
+        if ($device && (! $device->last_seen_at || $device->last_seen_at->lt($serverTime->copy()->subSeconds(30)))) {
+            $device->forceFill(['last_seen_at' => $serverTime])->saveQuietly();
+        }
+
+        $cursors = collect($request->input('cursors', []))
+            ->map(fn ($cursor) => [
+                'since' => isset($cursor['since']) ? Carbon::parse($cursor['since'])->utc() : null,
+                'after_id' => isset($cursor['after_id']) ? (int) $cursor['after_id'] : null,
+            ]);
+
+        if ($cursors->isEmpty()) {
+            return response()->json([
+                'tables' => [],
+                'server_time' => $serverTime->toIso8601String(),
+                'app_releases' => (object) AppRelease::latestByPlatform(),
+            ]);
+        }
+
+        $floor = $serverTime->copy()->subDay();
+        $oldestSince = $cursors->pluck('since')->filter()->min();
+        if ($cursors->every(fn ($cursor) => $cursor['since'] !== null) && $oldestSince->gt($floor)) {
+            $floor = $oldestSince->copy();
+        }
+
+        $latestByTable = SyncRecord::query()
+            ->where('business_id', $device?->tenant_id)
+            ->whereIn('table_name', $cursors->keys()->all())
+            ->where('synced_at', '>=', $floor)
+            ->when($device, fn ($q) => $q->where(function ($q) use ($device) {
+                $q->whereNull('device_id')->orWhere('device_id', '!=', $device->id);
+            }))
+            ->groupBy('table_name')
+            ->selectRaw('table_name, MAX(synced_at) as latest_at, MAX(id) as latest_id')
+            ->get();
+
+        $changed = [];
+        foreach ($latestByTable as $row) {
+            $cursor = $cursors->get($row->table_name);
+            $since = $cursor['since'] ?? null;
+            if ($since === null) {
+                $changed[] = $row->table_name;
+
+                continue;
+            }
+            $latestAt = Carbon::parse($row->latest_at, 'UTC');
+            // Same rule as pull(): past `since`, or tied on it with a higher
+            // id than `after_id`. MAX(id) can only over-report (a harmless
+            // extra pull that returns nothing), never miss a record.
+            if ($latestAt->timestamp > $since->timestamp
+                || ($latestAt->timestamp === $since->timestamp
+                    && $cursor['after_id'] !== null
+                    && (int) $row->latest_id > $cursor['after_id'])) {
+                $changed[] = $row->table_name;
+            }
+        }
+
+        return response()->json([
+            'tables' => $changed,
+            'server_time' => $serverTime->toIso8601String(),
+            'app_releases' => (object) AppRelease::latestByPlatform(),
         ]);
     }
 
@@ -697,6 +819,17 @@ class SyncController extends Controller
         $recordsArray = $records->toArray();
 
         foreach ($recordsArray as &$record) {
+            // A record with nothing in it — notably a server-side delete,
+            // stored with an empty payload — would otherwise go out as `[]`,
+            // which every app version fails to read as a record and skips
+            // for good (2026-10: deleted approval rules and quotation lines
+            // stayed on every till). Always send an object.
+            if (($record['payload'] ?? null) === [] || ! array_key_exists('payload', $record) || $record['payload'] === null) {
+                $record['payload'] = (object) [];
+
+                continue;
+            }
+
             if (($record['table_name'] ?? null) !== 'approval_requests') {
                 continue;
             }

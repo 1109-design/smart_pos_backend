@@ -22,6 +22,9 @@ use Illuminate\Console\Command;
  * cut over to client posting, only rows older than the grace period are
  * posted — the till should have done it by then. See
  * PostPendingSalaryPayments for the same pattern.
+ *
+ * It also checks each newly locked run's totals against its synced
+ * employees and lines, once they have settled (PayRunTotalsCheck).
  */
 class PostPendingPayroll extends Command
 {
@@ -34,6 +37,20 @@ class PostPendingPayroll extends Command
 
     public function handle(): int
     {
+        $flagged = 0;
+        $unchecked = PayRun::whereIn('status', ['approved', 'paid', 'reversed'])
+            ->whereNull('totals_checked_at')
+            ->where('updated_at', '<=', now()->subMinutes(self::REVERSAL_SETTLE_MINUTES))
+            ->get();
+        foreach ($unchecked as $run) {
+            if ($totals->checkAndRecord($run) !== []) {
+                $flagged++;
+            }
+        }
+        if ($flagged > 0) {
+            $this->warn("{$flagged} pay run(s) don't add up — see pay_runs.totals_mismatch.");
+        }
+
         $attempted = 0;
         foreach (Business::whereNotNull('accounting_go_live_date')->get() as $business) {
             $posted = fn (string $type) => JournalHeader::where('business_id', $business->id)

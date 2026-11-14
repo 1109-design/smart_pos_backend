@@ -74,11 +74,13 @@ use App\Models\MilestoneTask;
 use App\Models\Payment;
 use App\Models\PaymentMethodConfig;
 use App\Models\Payroll\EmployeeLeaveEntry;
+use App\Models\Payroll\EmployeeLeaveRequest;
 use App\Models\Payroll\EmployeeLoan;
 use App\Models\Payroll\EmployeePayProfile;
 use App\Models\Payroll\EmployeePaySplit;
 use App\Models\Payroll\EmployeeRecurringComponent;
 use App\Models\Payroll\PayComponent;
+use App\Models\Payroll\PayrollAuditEntry;
 use App\Models\Payroll\PayrollSetting;
 use App\Models\Payroll\PayRun;
 use App\Models\Payroll\PayRunEmployee;
@@ -156,6 +158,7 @@ use App\Models\Zimra\ZimraSale;
 use App\Services\Accounting\JournalBundleIngestor;
 use App\Services\Accounting\PurchaseOrderApprovalGate;
 use App\Services\Audit\ServerAudit;
+use App\Services\Payroll\LeaveRequestDecision;
 use App\Services\Payroll\PayrollSync;
 use App\Services\Zimra\ZimraSalesService;
 use App\Support\BackOfficePermission;
@@ -355,6 +358,7 @@ class SyncProcessor
         'employee_pay_splits' => EmployeePaySplit::class,
         'employee_recurring_components' => EmployeeRecurringComponent::class,
         'employee_loans' => EmployeeLoan::class,
+        'employee_leave_requests' => EmployeeLeaveRequest::class,
         'tax_tables' => TaxTable::class,
         'tax_table_bands' => TaxTableBand::class,
         'statutory_settings' => StatutorySetting::class,
@@ -363,6 +367,7 @@ class SyncProcessor
         'pay_run_lines' => PayRunLine::class,
         'statutory_remittances' => StatutoryRemittance::class,
         'employee_leave_entries' => EmployeeLeaveEntry::class,
+        'payroll_audit_log' => PayrollAuditEntry::class,
     ];
 
     // Child tables scoped only through a parent record: table => [own model,
@@ -1205,6 +1210,19 @@ class SyncProcessor
 
                     // A manual journal's approval no longer posts anything
                     // here: the device that approves it posts the journal.
+
+                    // A leave request decided in the app: decide it here too
+                    // (and post approved annual leave's deduction), so every
+                    // device converges even if it never saw the leave row
+                    // update. Idempotent — see LeaveRequestDecision.
+                    $decidedRequest = ApprovalRequest::find($uuid);
+                    if ($decidedRequest !== null && LeaveRequestDecision::handles($decidedRequest)) {
+                        $leaveDecider = (string) ($payload['approver_user_id'] ?? '');
+                        if ($incomingApprovalStatus === 'rejected'
+                            || LeaveRequestDecision::ownLeaveBlock($decidedRequest, $leaveDecider) === null) {
+                            app(LeaveRequestDecision::class)->apply($decidedRequest, $incomingApprovalStatus, $leaveDecider);
+                        }
+                    }
                 }
                 break;
 
@@ -1807,6 +1825,7 @@ class SyncProcessor
                 break;
 
             case 'customers':
+                $existingCustomer = Customer::find($uuid);
                 Customer::updateOrCreate(
                     ['id' => $uuid],
                     [
@@ -1823,6 +1842,10 @@ class SyncProcessor
                         'credit_limit' => $payload['credit_limit'] ?? 0,
                         'is_tax_exempt' => $payload['is_tax_exempt'] ?? false,
                         'group' => $payload['group'] ?? 'regular',
+                        // Most writers of this row don't carry these, such as a
+                        // balance update, and must not wipe them.
+                        'tax_number' => array_key_exists('tax_number', $payload) ? $payload['tax_number'] : $existingCustomer?->tax_number,
+                        'vat_number' => array_key_exists('vat_number', $payload) ? $payload['vat_number'] : $existingCustomer?->vat_number,
                     ]
                 );
                 $this->recomputeCustomerBalances($uuid);
@@ -1898,8 +1921,17 @@ class SyncProcessor
                 // fiscal_status is 'fiscalised' or ZIMRA has already accepted
                 // the receipt — so this only ever queues real transitions,
                 // never a duplicate submission.
-                if ($tx->status === 'completed' && $previousStatus !== 'completed') {
+                // A credit sale is a taxable supply the moment it is made, so it
+                // goes too; settling its balance later never submits it again.
+                $fiscalStatuses = ['completed', 'credit_sale'];
+                if (in_array($tx->status, $fiscalStatuses, true) && ! in_array($previousStatus, $fiscalStatuses, true)) {
                     app(ZimraSalesService::class)->queueFiscalisation($tx);
+                }
+
+                // Normally the return row arrives after this one and queues the
+                // credit note; this covers a push that delivers them the other way.
+                if (! $txExists && ($salesReturn = SalesReturn::where('return_transaction_id', $tx->id)->first())) {
+                    app(ZimraSalesService::class)->queueCreditNoteForReturn($salesReturn);
                 }
 
                 // No journal posting here, or anywhere in sync: the app posts
@@ -2325,7 +2357,7 @@ class SyncProcessor
                         'supplier_invoice_id' => $payload['supplier_invoice_id'] ?? null,
                         'note_number' => $payload['note_number'] ?? '',
                         'note_type' => $payload['note_type'] ?? 'credit',
-                        'note_date' => $payload['note_date'] ?? now()->toDateString(),
+                        'note_date' => $payload['note_date'] ?? $payload['debit_note_date'] ?? now()->toDateString(),
                         'reason' => $payload['reason'] ?? null,
                         'currency_code' => $payload['currency_code'] ?? 'USD',
                         'exchange_rate' => $payload['exchange_rate'] ?? 1,
@@ -2495,7 +2527,8 @@ class SyncProcessor
                 break;
 
             case 'customer_debit_notes':
-                CustomerDebitNote::updateOrCreate(
+                $existingDebitNoteStatus = CustomerDebitNote::where('id', $uuid)->value('status');
+                $debitNote = CustomerDebitNote::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'business_id' => $payload['business_id'] ?? null,
@@ -2517,6 +2550,11 @@ class SyncProcessor
                         'created_by_user_id' => $payload['created_by_user_id'] ?? null,
                     ]
                 );
+                // Sent once, when it stops being a draft. Its lines arrive after it,
+                // so the queue waits for them (fiscalReadyToSend).
+                if (in_array($existingDebitNoteStatus, [null, 'draft'], true) && $debitNote->wantsFiscalisation()) {
+                    app(ZimraSalesService::class)->queueFiscalisation($debitNote);
+                }
                 break;
 
             case 'customer_debit_note_items':
@@ -2677,7 +2715,7 @@ class SyncProcessor
                 break;
 
             case 'sales_returns':
-                SalesReturn::updateOrCreate(
+                $salesReturn = SalesReturn::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'business_id' => $payload['business_id'] ?? null,
@@ -2698,6 +2736,9 @@ class SyncProcessor
                         'approval_request_id' => $payload['approval_request_id'] ?? null,
                     ]
                 );
+                if ($salesReturn->wasRecentlyCreated) {
+                    app(ZimraSalesService::class)->queueCreditNoteForReturn($salesReturn);
+                }
                 break;
 
             case 'sales_return_items':
@@ -3550,10 +3591,11 @@ class SyncProcessor
                         // What it's owed in (Phase 9.1) — settled at its own
                         // rate when paid in that currency.
                         'currency_code' => $preserveInvoice('currency_code'),
-                        'exchange_rate' => $preserveInvoice('exchange_rate', 1),
+                        'exchange_rate' => $preserveInvoice('exchange_rate', 1) ?? 1,
                     ]
                 );
                 $this->recomputeInvoiceAmountPaid($uuid);
+                app(ZimraSalesService::class)->queueInvoiceIfIssued(Invoice::findOrFail($uuid), $existingInvoice?->status);
                 break;
 
             case 'invoice_items':
@@ -3568,6 +3610,7 @@ class SyncProcessor
                         'unit_price' => $payload['unit_price'] ?? 0,
                         'discount_pct' => $payload['discount_pct'] ?? 0,
                         'tax_rate_id' => $payload['tax_rate_id'] ?? null,
+                        'tax_amount' => $payload['tax_amount'] ?? 0,
                         'line_total' => $payload['line_total'] ?? 0,
                     ]
                 );
@@ -3614,7 +3657,7 @@ class SyncProcessor
                     }
                 }
 
-                CreditNote::updateOrCreate(
+                $creditNote = CreditNote::updateOrCreate(
                     ['id' => $uuid],
                     [
                         'business_id' => $payload['business_id'] ?? null,
@@ -3631,6 +3674,9 @@ class SyncProcessor
                         ...array_intersect_key($payload, array_flip(['status', 'is_gl_posted', 'journal_header_id', 'unallocated_amount', 'posted_at'])),
                     ]
                 );
+                if ($creditNote->wasRecentlyCreated) {
+                    app(ZimraSalesService::class)->queueFiscalisation($creditNote);
+                }
                 if (! empty($payload['invoice_id'])) {
                     $this->recomputeInvoiceAmountPaid($payload['invoice_id']);
                 }
@@ -3647,6 +3693,7 @@ class SyncProcessor
                         'product_name' => $payload['product_name'] ?? '',
                         'quantity' => $payload['quantity'] ?? 0,
                         'unit_price' => $payload['unit_price'] ?? 0,
+                        'tax_amount' => $payload['tax_amount'] ?? 0,
                         'line_total' => $payload['line_total'] ?? 0,
                     ]
                 );
@@ -5139,7 +5186,8 @@ class SyncProcessor
      * A fiscal document a device raised (Phase 11.2) — a customer invoice,
      * or a credit / debit note against a fiscalised sale or invoice. Its
      * content is fixed once ZIMRA has it; its status and fiscal fields are
-     * only ever the server's. Queued for ZIMRA like a till sale.
+     * only ever the server's. Older tills still send these; they are no
+     * longer queued for ZIMRA (see below).
      *
      * @param  array<string, mixed>  $payload
      */
@@ -5165,7 +5213,7 @@ class SyncProcessor
             }
         }
         $json = fn ($v) => is_string($v) ? (json_decode($v, true) ?? []) : ($v ?? []);
-        $document = FiscalDocument::updateOrCreate(['id' => $uuid], [
+        FiscalDocument::updateOrCreate(['id' => $uuid], [
             'business_id' => $payload['business_id'],
             'location_id' => $payload['location_id'] ?? null,
             'document_type' => $type,
@@ -5180,9 +5228,11 @@ class SyncProcessor
             'lines' => $json($payload['lines'] ?? []),
             'payments' => $json($payload['payments'] ?? []),
             'reason' => $payload['reason'] ?? null,
-            'status' => 'pending',
+            'status' => 'superseded',
         ]);
-        app(ZimraSalesService::class)->queueDocument($document);
+        // Kept as a record only. The server fiscalises invoices, credit notes
+        // and debit notes itself when they sync (ZimraSalesService), so
+        // sending this too would put the same document on ZIMRA twice.
     }
 
     /**
@@ -5564,6 +5614,12 @@ class SyncProcessor
      * from every report that reads amount_paid/status. Called after both
      * an 'invoices' upsert and an 'invoice_payments' upsert, so a genuine
      * new payment is reflected immediately either way.
+     *
+     * Credit notes on the invoice count towards it too, up to what the payments
+     * left owing; anything above that stays as credit on the customer's account.
+     * They're ledger rows the server holds, created behind
+     * finance.credit_note.create, so the rule above still holds. Called after a
+     * 'credit_notes' upsert as well.
      */
     protected function recomputeInvoiceAmountPaid(string $invoiceId): void
     {
@@ -5587,9 +5643,13 @@ class SyncProcessor
             ->sum(fn ($p) => $invoiceCurrency !== $baseCurrency && $p->currency_code === $invoiceCurrency && $invoiceRate > 0
                 ? round((float) $p->amount / $invoiceRate, 4)
                 : (float) $p->base_equivalent);
-        $amountPaid = max(0, $paid
-            + CustomerReceiptAllocation::where('invoice_id', $invoiceId)->sum('allocated_amount')
-            + $credited);
+        // Never more than the invoice still owes after its payments: anything
+        // above that stays as credit on the customer's account.
+        $applied = min(
+            (float) CustomerReceiptAllocation::where('invoice_id', $invoiceId)->sum('allocated_amount') + $credited,
+            max(0, (float) $invoice->total - $paid),
+        );
+        $amountPaid = max(0, $paid + $applied);
 
         $update = ['amount_paid' => $amountPaid];
 
@@ -5597,7 +5657,11 @@ class SyncProcessor
         // when status is itself payment-derived — never override a
         // lifecycle state (draft/sent/cancelled) that has nothing to do
         // with how much has been paid.
-        if (in_array($invoice->status, ['paid', 'partial'], true)) {
+        // A credit note arrives on an issued invoice with no payment to have
+        // moved it to 'partial' yet.
+        $paymentDerived = in_array($invoice->status, ['paid', 'partial'], true)
+            || ($applied > 0 && in_array($invoice->status, ['sent', 'issued', 'overdue'], true));
+        if ($paymentDerived) {
             $update['status'] = $amountPaid >= (float) $invoice->total ? 'paid' : 'partial';
         }
 

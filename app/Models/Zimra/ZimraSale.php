@@ -2,7 +2,11 @@
 
 namespace App\Models\Zimra;
 
+use App\Models\CreditNote;
+use App\Models\CustomerDebitNote;
+use App\Models\Invoice;
 use App\Models\Transaction;
+use App\Services\Zimra\FiscalDocument;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -10,12 +14,25 @@ use Illuminate\Support\Facades\Log;
 
 class ZimraSale extends Model
 {
+    /**
+     * Rows holding a receipt ZIMRA has taken into the fiscal day's chain. A
+     * rejected receipt is one of them: ZIMRA gives it a receipt ID and global
+     * number, so the next receipt still chains from its hash.
+     *
+     * @var list<string>
+     */
+    public const IN_CHAIN_STATUSES = ['fiscalised', 'rejected'];
+
     protected $fillable = [
         'transaction_id',
         'fiscal_document_id',
+        'invoice_id',
+        'credit_note_id',
+        'customer_debit_note_id',
         'business_id',
         'tin',
         'device_id',
+        'fiscal_day_no',
         'status',
         'zimra_receipt_id',
         'zimra_qr_code',
@@ -48,14 +65,56 @@ class ZimraSale extends Model
         return $this->belongsTo(Transaction::class);
     }
 
-    public function fiscalDocument(): BelongsTo
+    public function invoice(): BelongsTo
     {
-        return $this->belongsTo(FiscalDocument::class);
+        return $this->belongsTo(Invoice::class);
+    }
+
+    public function creditNote(): BelongsTo
+    {
+        return $this->belongsTo(CreditNote::class);
+    }
+
+    public function debitNote(): BelongsTo
+    {
+        return $this->belongsTo(CustomerDebitNote::class, 'customer_debit_note_id');
+    }
+
+    /** Whichever kind of document this receipt was issued for. */
+    public function document(): ?FiscalDocument
+    {
+        return $this->transaction ?? $this->invoice ?? $this->creditNote ?? $this->debitNote;
     }
 
     public function isFiscalised(): bool
     {
         return $this->status === 'fiscalised';
+    }
+
+    /**
+     * ZIMRA took the receipt but flagged red validation errors, so the sale is
+     * not validly fiscalised. Read from the response so that rows saved before
+     * the `rejected` status existed are recognised too.
+     */
+    public function isRejectedByZimra(): bool
+    {
+        return $this->redValidationCodes() !== [];
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function redValidationCodes(): array
+    {
+        $red = array_filter(
+            (array) data_get($this->zimra_response, 'validationErrors', []),
+            fn ($error) => strtolower((string) data_get($error, 'validationErrorColor')) === 'red'
+        );
+
+        return array_values(array_map(
+            fn ($error) => (string) data_get($error, 'validationErrorCode'),
+            $red
+        ));
     }
 
     public function hasZimraReceiptEvidence(): bool
@@ -110,8 +169,11 @@ class ZimraSale extends Model
             return null;
         }
 
+        // GetConfig's qrUrl is authoritative; the fallbacks cover a device whose
+        // config hasn't been fetched since this was added.
         $config = ZimraConfiguration::getCurrent();
-        $baseUrl = $config?->settings['qr_verification_url']
+        $baseUrl = ZimraDevice::where('device_id', (string) $this->device_id)->first()?->fdms_config['qrUrl']
+            ?? $config?->settings['qr_verification_url']
             ?? ($config?->isTest() ? 'https://fdmstest.zimra.co.zw' : 'https://fdms.zimra.co.zw');
         $baseUrl = rtrim($baseUrl, '/');
 

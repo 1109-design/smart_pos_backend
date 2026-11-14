@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\Zimra\ZimraDeviceEvent;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
@@ -18,9 +19,51 @@ Schedule::command('zimra:fiscal-day close --all')
     ->withoutOverlapping()
     ->onOneServer();
 
+// ZIMRA finishes validating a close after accepting it, so check on any close it
+// hasn't confirmed. Only devices with an unconfirmed close call ZIMRA.
+Schedule::command('zimra:fiscal-day confirm --all')
+    ->everyFifteenMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
 // Re-submit pending/failed fiscalisations left behind by ZIMRA outages.
 Schedule::command('zimra:retry-failed')
     ->everyFifteenMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
+// Get a device moving again after a failed or stuck fiscal day, or tell someone
+// it has to be closed in the ZIMRA Public Portal.
+Schedule::command('zimra:reprobe-blocked-devices')
+    ->everyTenMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
+// Email the alert recipients when sales stop being fiscalised, so nobody has to
+// be looking at a till to find out.
+Schedule::command('zimra:check-health')
+    ->everyFifteenMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
+// ZIMRA requires every device to report in once every 5 minutes.
+Schedule::command('zimra:ping')
+    ->everyFiveMinutes()
+    ->withoutOverlapping()
+    ->onOneServer();
+
+// Renew certificates close to expiring. Runs after the 23:45 close, because a
+// certificate is only replaced while the fiscal day is closed.
+Schedule::command('zimra:renew-certificates')
+    ->dailyAt('00:15')
+    ->timezone('Africa/Harare')
+    ->withoutOverlapping()
+    ->onOneServer();
+
+// Keep the ZIMRA device log to zimra.event_retention_days (90 by default).
+Schedule::command('model:prune', ['--model' => [ZimraDeviceEvent::class]])
+    ->dailyAt('00:30')
+    ->timezone('Africa/Harare')
     ->withoutOverlapping()
     ->onOneServer();
 

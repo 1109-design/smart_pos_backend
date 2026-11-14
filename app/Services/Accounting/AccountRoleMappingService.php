@@ -45,7 +45,7 @@ class AccountRoleMappingService
         'inventory_adjustment' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6050', 'name' => 'Stock Loss / Write-offs'],
         // Stock counted, adjusted or revalued up — kept off 6050 so gains
         // don't show as a negative expense.
-        'stock_gain' => ['category' => 'Revenue', 'subCategory' => 'Other Income', 'code' => '4030', 'name' => 'Stock Gains'],
+        'stock_gain' => ['category' => 'Revenue', 'subCategory' => 'Other Income', 'code' => '4035', 'name' => 'Stock Gains'],
         // Accounts Payable module (spec §7/§12) — 'inventory'/'grn_suspense'
         // point at the SAME '1200'/'2010' codes GrvPostingService/
         // GrvPostingService.php already hardcoded; role-mapping them here
@@ -70,7 +70,7 @@ class AccountRoleMappingService
         'vat_payable' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2035', 'name' => 'VAT Payable (ZIMRA)'],
         'vat_refund_due' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1155', 'name' => 'VAT Refund Due'],
         'fx_unrealised_gain' => ['category' => 'Revenue', 'subCategory' => 'Other Income', 'code' => '4025', 'name' => 'Unrealised FX Gain'],
-        'fx_unrealised_loss' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6085', 'name' => 'Unrealised FX Loss'],
+        'fx_unrealised_loss' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6086', 'name' => 'Unrealised FX Loss'],
         // A forfeited returnable-container deposit is money the business
         // keeps for good — see the Flutter side's identical note. Shares
         // '4010' Other Income rather than a new code.
@@ -84,11 +84,11 @@ class AccountRoleMappingService
         'change_owed_liability' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2025', 'name' => 'Change Owed'],
         // Take-on (Phase 3).
         'cash_over_short' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6067', 'name' => 'Cash Over/Short'],
-        'layby_deposits' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2060', 'name' => 'Layby Deposits'],
+        'layby_deposits' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2062', 'name' => 'Layby Deposits'],
         'vouchers_payable' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2070', 'name' => 'Payment Vouchers Payable'],
         'stock_in_transit' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1210', 'name' => 'Stock in Transit'],
         'take_on_clearing' => ['category' => 'Equity', 'subCategory' => "Shareholders' Equity", 'code' => '3025', 'name' => 'Take-on Clearing'],
-        'supplier_prepayments' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1170', 'name' => 'Supplier Prepayments'],
+        'supplier_prepayments' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1175', 'name' => 'Supplier Prepayments'],
         // Payroll — see PayRunPostingService and the Flutter side's
         // identical roles (account_role_mapping_service.dart).
         'employer_payroll_expense' => ['category' => 'Expenses', 'subCategory' => 'Operating Expenses', 'code' => '6025', 'name' => 'Employer Payroll Costs'],
@@ -100,6 +100,16 @@ class AccountRoleMappingService
         'other_deductions_payable' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2055', 'name' => 'Payroll Deductions Payable'],
         'nec_payable' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2056', 'name' => 'NEC Levy Payable'],
         'staff_loans_receivable' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1160', 'name' => 'Staff Loans & Advances'],
+        // Asset disposals that aren't paid in cash — see
+        // ChartOfAccountsSeeder::ASSET_DISPOSAL_ACCOUNTS.
+        'supplier_refunds_due' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1165', 'name' => 'Supplier Refunds Due'],
+        'insurance_claims_receivable' => ['category' => 'Assets', 'subCategory' => 'Current Assets', 'code' => '1170', 'name' => 'Insurance Claims Receivable'],
+        // Donations — see ChartOfAccountsSeeder::DONATION_ACCOUNTS and the
+        // Flutter side's identical roles.
+        'donations_received' => ['category' => 'Revenue', 'subCategory' => 'Other Income', 'code' => '4030', 'name' => 'Donations Received'],
+        'deferred_donations' => ['category' => 'Liabilities', 'subCategory' => 'Current Liabilities', 'code' => '2060', 'name' => 'Deferred Donations'],
+        'deferred_capital_grants' => ['category' => 'Liabilities', 'subCategory' => 'Long-Term Liabilities', 'code' => '2065', 'name' => 'Deferred Capital Grants'],
+        'donations_given' => ['category' => 'Expenses', 'subCategory' => 'Other Expenses', 'code' => '6085', 'name' => 'Donations Given'],
         // Deliberately NOT mapped: 'accumulated depreciation' would need to
         // match whatever GL account the still-hardcoded, still-server-only
         // monthly depreciation sweep (postMonthlyDepreciation()) posts

@@ -35,6 +35,13 @@ return [
         ],
     ],
 
+    'app_releases' => [
+        // Shared secret CI sends as X-Release-Token when it reports a newly
+        // published app installer (POST /api/v1/app-releases). Unset = every
+        // report is refused (fail closed).
+        'token' => env('APP_RELEASE_TOKEN'),
+    ],
+
     'revenuecat' => [
         // Set the same value as the Authorization header configured on the
         // RevenueCat webhook. Requests without a matching header are rejected;

@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Accounting;
 
+use App\Jobs\ProcessZimraFiscalisationJob;
 use App\Models\Business;
 use App\Models\Device;
 use App\Models\Tenant;
@@ -70,7 +71,7 @@ class FiscalDocumentSyncTest extends TestCase
         ];
     }
 
-    public function test_a_note_is_stored_queued_and_its_fiscal_fields_stay_the_servers(): void
+    public function test_a_note_is_stored_not_queued_and_its_fiscal_fields_stay_the_servers(): void
     {
         Queue::fake();
         $id = (string) Str::uuid();
@@ -79,6 +80,9 @@ class FiscalDocumentSyncTest extends TestCase
         $doc = FiscalDocument::findOrFail($id);
         $this->assertNotSame('fiscalised', $doc->status);
         $this->assertNull($doc->fiscal_receipt_id);
+        // The server fiscalises notes itself, so this copy is never sent.
+        $this->assertSame('superseded', $doc->status);
+        Queue::assertNotPushed(ProcessZimraFiscalisationJob::class);
     }
 
     public function test_a_note_needs_a_reason_and_an_original(): void

@@ -6,7 +6,7 @@ use Illuminate\Support\Facades\DB;
 
 /**
  * Phase 9 — multi-currency. Month-end revaluation posts to 4025 Unrealised
- * FX Gain / 6085 Unrealised FX Loss, kept apart from realised 4020 / 6080.
+ * FX Gain / 6086 Unrealised FX Loss, kept apart from realised 4020 / 6080.
  *
  * No other schema change: rates already mean "units of foreign per 1
  * base". Foreign supplier payments once posted at amount × rate are put

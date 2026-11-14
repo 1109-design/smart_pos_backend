@@ -12,7 +12,7 @@ class CreditNoteItem extends Model
 
     protected $fillable = [
         'id', 'credit_note_id', 'invoice_item_id', 'product_id',
-        'product_name', 'quantity', 'unit_price', 'line_total',
+        'product_name', 'quantity', 'unit_price', 'tax_amount', 'line_total',
     ];
 
     public function creditNote(): BelongsTo

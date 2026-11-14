@@ -221,7 +221,7 @@ class ChartOfAccountsSeeder
     /** Month-end revaluation (Phase 9), apart from realised gains / losses. */
     public const PHASE9_ACCOUNTS = [
         ['Revenue', 'Other Income', ['code' => '4025', 'name' => 'Unrealised FX Gain']],
-        ['Expenses', 'Other Expenses', ['code' => '6085', 'name' => 'Unrealised FX Loss']],
+        ['Expenses', 'Other Expenses', ['code' => '6086', 'name' => 'Unrealised FX Loss']],
     ];
 
     /** Payment vouchers (Phase 8): approved expense vouchers not yet paid. */
@@ -232,7 +232,7 @@ class ChartOfAccountsSeeder
     /** Till (Phase 7): cash shortages / overages, and lay-by money held. */
     public const PHASE7_ACCOUNTS = [
         ['Expenses', 'Other Expenses', ['code' => '6067', 'name' => 'Cash Over/Short']],
-        ['Liabilities', 'Current Liabilities', ['code' => '2060', 'name' => 'Layby Deposits']],
+        ['Liabilities', 'Current Liabilities', ['code' => '2062', 'name' => 'Layby Deposits']],
     ];
 
     /**
@@ -241,7 +241,7 @@ class ChartOfAccountsSeeder
      * more stock found than lost showed a negative expense.
      */
     public const STOCK_GAIN_ACCOUNTS = [
-        ['Revenue', 'Other Income', ['code' => '4030', 'name' => 'Stock Gains']],
+        ['Revenue', 'Other Income', ['code' => '4035', 'name' => 'Stock Gains']],
     ];
 
     /** Stock between locations (Phase 6): a transfer's dispatched value. */
@@ -255,8 +255,36 @@ class ChartOfAccountsSeeder
      * supplier prepayments brought forward need an asset of their own.
      */
     public const PHASE3_ACCOUNTS = [
-        ['Assets', 'Current Assets', ['code' => '1170', 'name' => 'Supplier Prepayments']],
+        ['Assets', 'Current Assets', ['code' => '1175', 'name' => 'Supplier Prepayments']],
         ['Equity', "Shareholders' Equity", ['code' => '3025', 'name' => 'Take-on Clearing']],
+    ];
+
+    /**
+     * Where a disposed asset's value goes when it isn't cash — see
+     * AssetPostingService::recordDisposal(). A return to the supplier waits
+     * in Supplier Refunds Due until the supplier's credit note clears it
+     * against Accounts Payable; a theft or loss claimed on insurance waits
+     * in Insurance Claims Receivable until the insurer pays.
+     * [category, sub-category, account].
+     */
+    public const ASSET_DISPOSAL_ACCOUNTS = [
+        ['Assets', 'Current Assets', ['code' => '1165', 'name' => 'Supplier Refunds Due']],
+        ['Assets', 'Current Assets', ['code' => '1170', 'name' => 'Insurance Claims Receivable']],
+    ];
+
+    /**
+     * Donation accounts — see the till's donation_posting_service.dart.
+     * Treated like grants (IFRS for SMEs s24 / IAS 20): an unconditional
+     * donation is income; one with conditions waits in Deferred Donations
+     * until they're met; one for a capital project waits in Deferred
+     * Capital Grants and is released over the asset's life. Donations a
+     * business gives away are an expense. [category, sub-category, account].
+     */
+    public const DONATION_ACCOUNTS = [
+        ['Revenue', 'Other Income', ['code' => '4030', 'name' => 'Donations Received']],
+        ['Liabilities', 'Current Liabilities', ['code' => '2060', 'name' => 'Deferred Donations']],
+        ['Liabilities', 'Long-Term Liabilities', ['code' => '2065', 'name' => 'Deferred Capital Grants']],
+        ['Expenses', 'Other Expenses', ['code' => '6085', 'name' => 'Donations Given']],
     ];
 
     private const CHART = [
@@ -273,7 +301,9 @@ class ChartOfAccountsSeeder
                     ['code' => '1150', 'name' => 'Input VAT'],
                     ['code' => '1155', 'name' => 'VAT Refund Due'],
                     ['code' => '1160', 'name' => 'Staff Loans & Advances'],
-                    ['code' => '1170', 'name' => 'Supplier Prepayments'],
+                    ['code' => '1165', 'name' => 'Supplier Refunds Due'],
+                    ['code' => '1170', 'name' => 'Insurance Claims Receivable'],
+                    ['code' => '1175', 'name' => 'Supplier Prepayments'],
                     ['code' => '1200', 'name' => 'Inventory', 'control_type' => 'inventory'],
                     ['code' => '1210', 'name' => 'Stock in Transit'],
                 ]],
@@ -294,7 +324,7 @@ class ChartOfAccountsSeeder
                     ['code' => '2015', 'name' => 'Withholding Tax Payable'],
                     ['code' => '2020', 'name' => 'Deposits Held'],
                     ['code' => '2025', 'name' => 'Change Owed'],
-                    ['code' => '2060', 'name' => 'Layby Deposits'],
+                    ['code' => '2062', 'name' => 'Layby Deposits'],
                     ['code' => '2070', 'name' => 'Payment Vouchers Payable'],
                     ['code' => '2030', 'name' => 'Tax Payable'],
                     ['code' => '2035', 'name' => 'VAT Payable (ZIMRA)'],
@@ -307,9 +337,11 @@ class ChartOfAccountsSeeder
                     ['code' => '2054', 'name' => 'ZIMDEF Payable'],
                     ['code' => '2055', 'name' => 'Payroll Deductions Payable'],
                     ['code' => '2056', 'name' => 'NEC Levy Payable'],
+                    ['code' => '2060', 'name' => 'Deferred Donations'],
                 ]],
                 ['name' => 'Long-Term Liabilities', 'accounts' => [
                     ['code' => '2040', 'name' => 'Loans'],
+                    ['code' => '2065', 'name' => 'Deferred Capital Grants'],
                 ]],
             ],
         ],
@@ -344,9 +376,10 @@ class ChartOfAccountsSeeder
                     // supplier grants that reduce the invoice's cost.
                     ['code' => '4015', 'name' => 'Discount Received'],
                     ['code' => '4020', 'name' => 'FX Gain'],
+                    ['code' => '4030', 'name' => 'Donations Received'],
                     ['code' => '4025', 'name' => 'Unrealised FX Gain'],
                     // Stock counted up — see STOCK_GAIN_ACCOUNTS.
-                    ['code' => '4030', 'name' => 'Stock Gains'],
+                    ['code' => '4035', 'name' => 'Stock Gains'],
                 ]],
             ],
         ],
@@ -383,7 +416,8 @@ class ChartOfAccountsSeeder
                     ['code' => '6070', 'name' => 'Depreciation Expense'],
                     ['code' => '6075', 'name' => 'Gain/Loss on Disposal of Assets'],
                     ['code' => '6080', 'name' => 'FX Loss'],
-                    ['code' => '6085', 'name' => 'Unrealised FX Loss'],
+                    ['code' => '6085', 'name' => 'Donations Given'],
+                    ['code' => '6086', 'name' => 'Unrealised FX Loss'],
                 ]],
             ],
         ],

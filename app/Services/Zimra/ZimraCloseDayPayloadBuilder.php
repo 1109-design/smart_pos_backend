@@ -23,7 +23,7 @@ class ZimraCloseDayPayloadBuilder
 
         $acceptedRows = ZimraSale::query()
             ->where('device_id', (string) $device->device_id)
-            ->where('status', 'fiscalised')
+            ->whereIn('status', ZimraSale::IN_CHAIN_STATUSES)
             ->whereNotNull('fiscalised_at')
             ->where('fiscalised_at', '>=', $openedAt)
             ->orderBy('receipt_global_no')
@@ -39,11 +39,7 @@ class ZimraCloseDayPayloadBuilder
             }
 
             $currency = strtoupper((string) ($snapshot['receiptCurrency'] ?? 'USD'));
-            // Each receipt type has its own counters (spec §6): a credit
-            // note's (negative) amounts go to CreditNoteByTax /
-            // CreditNoteTaxByTax, a debit note's to DebitNote…; all of them
-            // move BalanceByMoneyType.
-            $kind = match ($snapshot['receiptType'] ?? 'FiscalInvoice') {
+            $counterPrefix = match ($snapshot['receiptType'] ?? 'FiscalInvoice') {
                 'CreditNote' => 'CreditNote',
                 'DebitNote' => 'DebitNote',
                 default => 'Sale',
@@ -51,10 +47,10 @@ class ZimraCloseDayPayloadBuilder
 
             foreach ($snapshot['receiptTaxes'] as $tax) {
                 $taxPercent = array_key_exists('taxPercent', $tax) ? (float) $tax['taxPercent'] : null;
-                $key = $kind.'_'.($taxPercent === null ? 'null' : (string) round($taxPercent, 2)).'_'.$currency;
+                $key = $counterPrefix.'_'.($taxPercent === null ? 'null' : (string) round($taxPercent, 2)).'_'.$currency;
 
                 $saleByTax[$key] ??= [
-                    'kind' => $kind,
+                    'counterPrefix' => $counterPrefix,
                     'taxPercent' => $taxPercent,
                     'currency' => $currency,
                     'value' => 0.0,
@@ -76,7 +72,9 @@ class ZimraCloseDayPayloadBuilder
 
         $counters = $this->buildCounters($saleByTax, $balanceByType);
         $receiptCounter = $lastReceiptCounter ?? $acceptedRows->count();
-        $fiscalDayDate = $openedAt->toDateString();
+        // The fiscal day's date is the Harare date it opened on: a day opened just
+        // after midnight there is still the previous date in UTC.
+        $fiscalDayDate = $openedAt->copy()->timezone('Africa/Harare')->toDateString();
         $signingString = $this->signingString((string) $device->device_id, $fiscalDayNo, $fiscalDayDate, $counters);
 
         Log::info('ZIMRA CloseDay payload built', [
@@ -110,12 +108,11 @@ class ZimraCloseDayPayloadBuilder
         foreach ($saleByTax as $entry) {
             $taxPercent = $entry['taxPercent'] === null ? null : (float) $entry['taxPercent'];
             $taxId = $entry['taxID'] ?? ($taxPercent === null ? 3 : 2);
-            $kind = $entry['kind'] ?? 'Sale';
 
-            // Zero counters are left out; a credit note's are negative.
+            // Credit note counters run negative in the FDMS spec; only zeros are left out.
             if (round((float) $entry['value'], 2) != 0) {
                 $counter = [
-                    'fiscalCounterType' => $kind.'ByTax',
+                    'fiscalCounterType' => $entry['counterPrefix'].'ByTax',
                     'fiscalCounterCurrency' => $entry['currency'],
                     'fiscalCounterTaxID' => $taxId,
                     'fiscalCounterValue' => round((float) $entry['value'], 2),
@@ -128,7 +125,7 @@ class ZimraCloseDayPayloadBuilder
 
             if (round((float) $entry['taxAmount'], 2) != 0) {
                 $counters[] = [
-                    'fiscalCounterType' => $kind.'TaxByTax',
+                    'fiscalCounterType' => $entry['counterPrefix'].'TaxByTax',
                     'fiscalCounterCurrency' => $entry['currency'],
                     'fiscalCounterTaxID' => $taxId,
                     'fiscalCounterTaxPercent' => $taxPercent,

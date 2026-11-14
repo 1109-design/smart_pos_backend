@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Jobs\ProcessZimraFiscalisationJob;
 use App\Models\Business;
+use App\Models\CreditNote;
 use App\Models\Device;
 use App\Models\Location;
 use App\Models\Tenant;
@@ -393,5 +394,225 @@ class SyncFiscalisationGateTest extends TestCase
             'transaction_id' => $transactionId,
             'device_id' => '90003',
         ]);
+    }
+
+    /**
+     * @return array{0: string, 1: string}
+     */
+    private function fiscalShop(string $tenantId, string $deviceId): array
+    {
+        $token = $this->actingDeviceToken($tenantId);
+        Business::create(['id' => $tenantId, 'name' => 'Shop', 'fiscalisation_enabled' => true, 'tin' => '1234567890']);
+        ZimraDevice::create(['business_id' => $tenantId, 'tin' => '1234567890', 'device_id' => $deviceId, 'is_active' => true, 'status' => 'active']);
+
+        return [$token, $tenantId];
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    private function pushRow(string $token, string $table, string $uuid, array $payload): void
+    {
+        $this->withHeader('Authorization', 'Bearer '.$token)->postJson('/api/v1/sync/push', ['records' => [[
+            'table' => $table,
+            'uuid' => $uuid,
+            'operation' => 'upsert',
+            'payload' => $payload,
+            'updated_at' => now()->toIso8601String(),
+        ]]])->assertOk();
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function salePayload(string $tenantId, string $status, float $total): array
+    {
+        return [
+            'business_id' => $tenantId,
+            'user_id' => '99999999-9999-4999-9999-999999999999',
+            'subtotal' => $total,
+            'tax_total' => 0,
+            'total' => $total,
+            'base_currency' => 'USD',
+            'status' => $status,
+            'sale_number' => 'S-'.Str::random(6),
+        ];
+    }
+
+    public function test_a_credit_sale_is_queued_once_and_not_again_when_it_is_paid_off(): void
+    {
+        Queue::fake();
+        [$token, $tenantId] = $this->fiscalShop('tenant-fiscal-credit', '12350');
+        $id = (string) Str::uuid();
+
+        $this->pushRow($token, 'transactions', $id, $this->salePayload($tenantId, 'credit_sale', 40));
+        $this->assertDatabaseHas('zimra_sales', ['transaction_id' => $id, 'status' => 'pending']);
+        Queue::assertPushed(ProcessZimraFiscalisationJob::class, 1);
+
+        $this->pushRow($token, 'transactions', $id, $this->salePayload($tenantId, 'completed', 40));
+        Queue::assertPushed(ProcessZimraFiscalisationJob::class, 1);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function returnPayload(string $tenantId, string $originalId, string $reversalId): array
+    {
+        return [
+            'business_id' => $tenantId,
+            'return_number' => 'RET-1',
+            'original_transaction_id' => $originalId,
+            'return_transaction_id' => $reversalId,
+            'outcome' => 'refund',
+            'returned_value' => 40,
+            'net_amount' => -40,
+            'reason' => 'Faulty',
+            'requested_by_user_id' => '99999999-9999-4999-9999-999999999999',
+        ];
+    }
+
+    public function test_a_reversal_row_alone_queues_nothing_until_its_return_arrives(): void
+    {
+        Queue::fake();
+        [$token, $tenantId] = $this->fiscalShop('tenant-fiscal-refund', '12351');
+        $originalId = (string) Str::uuid();
+        $reversalId = (string) Str::uuid();
+        $this->pushRow($token, 'transactions', $originalId, $this->salePayload($tenantId, 'completed', 40));
+
+        $this->pushRow($token, 'transactions', $reversalId, $this->salePayload($tenantId, 'refunded', -40));
+        $this->assertDatabaseMissing('zimra_sales', ['transaction_id' => $reversalId]);
+
+        $this->pushRow($token, 'transaction_items', (string) Str::uuid(), [
+            'transaction_id' => $reversalId,
+            'product_id' => (string) Str::uuid(),
+            'product_name' => 'Widget',
+            'quantity' => 1,
+            'unit_price' => 40,
+            'line_total' => 40,
+        ]);
+        $this->pushRow($token, 'sales_returns', (string) Str::uuid(), $this->returnPayload($tenantId, $originalId, $reversalId));
+
+        $this->assertDatabaseHas('zimra_sales', ['transaction_id' => $reversalId, 'status' => 'pending']);
+    }
+
+    public function test_a_return_that_arrives_before_its_reversal_row_still_queues_it(): void
+    {
+        Queue::fake();
+        [$token, $tenantId] = $this->fiscalShop('tenant-fiscal-order', '12352');
+        $originalId = (string) Str::uuid();
+        $reversalId = (string) Str::uuid();
+        $this->pushRow($token, 'transactions', $originalId, $this->salePayload($tenantId, 'completed', 40));
+
+        $this->pushRow($token, 'sales_returns', (string) Str::uuid(), $this->returnPayload($tenantId, $originalId, $reversalId));
+        $this->pushRow($token, 'transactions', $reversalId, $this->salePayload($tenantId, 'refunded', -40));
+
+        $this->assertDatabaseHas('zimra_sales', ['transaction_id' => $reversalId, 'status' => 'pending']);
+    }
+
+    public function test_marking_the_original_sale_refunded_does_not_send_a_credit_note_for_it(): void
+    {
+        Queue::fake();
+        [$token, $tenantId] = $this->fiscalShop('tenant-fiscal-orig', '12353');
+        $id = (string) Str::uuid();
+        $this->pushRow($token, 'transactions', $id, $this->salePayload($tenantId, 'completed', 40));
+        Queue::assertPushed(ProcessZimraFiscalisationJob::class, 1);
+
+        $this->pushRow($token, 'transactions', $id, $this->salePayload($tenantId, 'refunded', 40));
+
+        Queue::assertPushed(ProcessZimraFiscalisationJob::class, 1);
+    }
+
+    /**
+     * @param  array<string, mixed>  $extra
+     * @return array<string, mixed>
+     */
+    private function invoicePayload(string $tenantId, string $status, array $extra = []): array
+    {
+        return array_merge([
+            'business_id' => $tenantId,
+            'customer_id' => (string) Str::uuid(),
+            'invoice_number' => 'INV-'.Str::random(6),
+            'status' => $status,
+            'issue_date' => now()->toDateString(),
+            'subtotal' => 100,
+            'tax_total' => 15,
+            'total' => 115,
+            'created_by_user_id' => '99999999-9999-4999-9999-999999999999',
+        ], $extra);
+    }
+
+    public function test_a_draft_invoice_is_queued_when_it_is_issued_and_not_when_it_is_paid(): void
+    {
+        Queue::fake();
+        [$token, $tenantId] = $this->fiscalShop('tenant-fiscal-invoice', '12360');
+        $id = (string) Str::uuid();
+
+        $this->pushRow($token, 'invoices', $id, $this->invoicePayload($tenantId, 'draft'));
+        $this->assertDatabaseMissing('zimra_sales', ['invoice_id' => $id]);
+
+        $this->pushRow($token, 'invoices', $id, $this->invoicePayload($tenantId, 'sent', ['currency_code' => 'ZWG', 'exchange_rate' => 2]));
+        $this->assertDatabaseHas('zimra_sales', ['invoice_id' => $id, 'status' => 'pending']);
+        $this->assertDatabaseHas('invoices', ['id' => $id, 'currency_code' => 'ZWG', 'fiscal_status' => 'pending']);
+        Queue::assertPushed(ProcessZimraFiscalisationJob::class, 1);
+
+        $this->pushRow($token, 'invoices', $id, $this->invoicePayload($tenantId, 'paid'));
+        Queue::assertPushed(ProcessZimraFiscalisationJob::class, 1);
+    }
+
+    public function test_an_opening_balance_pushed_as_issued_is_not_sent(): void
+    {
+        Queue::fake();
+        [$token, $tenantId] = $this->fiscalShop('tenant-fiscal-opening', '12361');
+        $id = (string) Str::uuid();
+
+        $this->pushRow($token, 'invoices', $id, $this->invoicePayload($tenantId, 'issued', ['notes' => 'Opening Balance: legacy']));
+
+        $this->assertDatabaseMissing('zimra_sales', ['invoice_id' => $id]);
+    }
+
+    public function test_invoice_and_credit_note_lines_keep_their_tax(): void
+    {
+        Queue::fake();
+        [$token, $tenantId] = $this->fiscalShop('tenant-fiscal-lines', '12362');
+        $invoiceId = (string) Str::uuid();
+        $itemId = (string) Str::uuid();
+        $noteId = (string) Str::uuid();
+        $noteItemId = (string) Str::uuid();
+
+        $this->pushRow($token, 'invoices', $invoiceId, $this->invoicePayload($tenantId, 'draft'));
+        $this->pushRow($token, 'invoice_items', $itemId, ['invoice_id' => $invoiceId, 'business_id' => $tenantId, 'product_id' => (string) Str::uuid(), 'product_name' => 'Widget', 'quantity' => 1, 'unit_price' => 100, 'tax_amount' => 15, 'line_total' => 115]);
+        CreditNote::create(['id' => $noteId, 'business_id' => $tenantId, 'invoice_id' => $invoiceId, 'customer_id' => (string) Str::uuid(), 'credit_note_number' => 'CN-1', 'created_by_user_id' => (string) Str::uuid()]);
+        $this->pushRow($token, 'credit_note_items', $noteItemId, ['credit_note_id' => $noteId, 'business_id' => $tenantId, 'product_id' => (string) Str::uuid(), 'product_name' => 'Widget', 'quantity' => 1, 'unit_price' => 100, 'tax_amount' => 15, 'line_total' => 115]);
+
+        $this->assertDatabaseHas('invoice_items', ['id' => $itemId, 'tax_amount' => 15]);
+        $this->assertDatabaseHas('credit_note_items', ['id' => $noteItemId, 'tax_amount' => 15]);
+    }
+
+    public function test_a_customers_tax_numbers_survive_an_update_that_does_not_carry_them(): void
+    {
+        [$token, $tenantId] = $this->fiscalShop('tenant-fiscal-customer', '12363');
+        $id = (string) Str::uuid();
+
+        $this->pushRow($token, 'customers', $id, ['business_id' => $tenantId, 'name' => 'Acme', 'tax_number' => '2000123456', 'vat_number' => '220012345']);
+        $this->pushRow($token, 'customers', $id, ['business_id' => $tenantId, 'name' => 'Acme Ltd']);
+
+        $this->assertDatabaseHas('customers', ['id' => $id, 'name' => 'Acme Ltd', 'tax_number' => '2000123456', 'vat_number' => '220012345']);
+
+        $this->pushRow($token, 'customers', $id, ['business_id' => $tenantId, 'name' => 'Acme Ltd', 'tax_number' => null]);
+
+        $this->assertDatabaseHas('customers', ['id' => $id, 'tax_number' => null]);
+    }
+
+    public function test_an_invoice_line_with_no_product_is_kept(): void
+    {
+        Queue::fake();
+        [$token, $tenantId] = $this->fiscalShop('tenant-fiscal-service-line', '12364');
+        $invoiceId = (string) Str::uuid();
+        $itemId = (string) Str::uuid();
+
+        $this->pushRow($token, 'invoices', $invoiceId, $this->invoicePayload($tenantId, 'draft'));
+        $this->pushRow($token, 'invoice_items', $itemId, ['invoice_id' => $invoiceId, 'business_id' => $tenantId, 'product_id' => null, 'product_name' => 'Consulting', 'quantity' => 1, 'unit_price' => 100, 'tax_amount' => 15, 'line_total' => 115]);
+
+        $this->assertDatabaseHas('invoice_items', ['id' => $itemId, 'product_name' => 'Consulting', 'product_id' => null]);
     }
 }

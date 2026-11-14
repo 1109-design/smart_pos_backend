@@ -50,6 +50,38 @@ class ChartOfAccountsSeederTest extends TestCase
         $this->assertTrue($cash->must_be_positive);
     }
 
+    public function test_new_charts_include_the_donation_accounts_in_the_right_categories(): void
+    {
+        Tenant::create(['id' => 'biz-1', 'business_name' => 'biz-1', 'owner_email' => 'biz-1@example.com']);
+        (new ChartOfAccountsSeeder)->seedForBusiness('biz-1');
+
+        foreach (ChartOfAccountsSeeder::DONATION_ACCOUNTS as [$category, $subCategory, $account]) {
+            $gl = GlAccount::where('business_id', 'biz-1')->where('code', $account['code'])->first();
+            $this->assertNotNull($gl, "{$account['code']} missing");
+            $this->assertSame($account['name'], $gl->name);
+            $this->assertSame($category, AccountCategory::find($gl->account_category_id)->name);
+        }
+    }
+
+    public function test_ensure_account_adds_donation_accounts_to_an_older_chart_once(): void
+    {
+        Tenant::create(['id' => 'biz-1', 'business_name' => 'biz-1', 'owner_email' => 'biz-1@example.com']);
+        $seeder = new ChartOfAccountsSeeder;
+        $seeder->seedForBusiness('biz-1');
+        GlAccount::where('business_id', 'biz-1')->whereIn('code', ['4030', '2060', '2065', '6085'])->delete();
+
+        foreach ([1, 2] as $run) {
+            foreach (ChartOfAccountsSeeder::DONATION_ACCOUNTS as [$category, $subCategory, $account]) {
+                $seeder->ensureAccount('biz-1', $category, $subCategory, $account);
+            }
+        }
+
+        $this->assertSame(
+            4,
+            GlAccount::where('business_id', 'biz-1')->whereIn('code', ['4030', '2060', '2065', '6085'])->count()
+        );
+    }
+
     public function test_account_codes_are_unique_per_business(): void
     {
         Tenant::create(['id' => 'biz-1', 'business_name' => 'biz-1', 'owner_email' => 'biz-1@example.com']);
