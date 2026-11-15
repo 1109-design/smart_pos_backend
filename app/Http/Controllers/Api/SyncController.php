@@ -1522,4 +1522,39 @@ class SyncController extends Controller
             'message' => $result['message'] ?? null,
         ]);
     }
+
+    /**
+     * "Fiscalise later" from Sales History or the Fiscal Queue: sends a sale
+     * the cashier kept off ZIMRA at checkout (or one that never got a
+     * receipt). The till pushes the sale with its VAT restored first.
+     */
+    public function fiscaliseLater(string $transactionId, Request $request, ZimraSalesService $zimraService): JsonResponse
+    {
+        $device = $this->deviceResolver->fromRequest($request);
+        $transaction = Transaction::where('id', $transactionId)
+            ->where('business_id', $device?->tenant_id)
+            ->first();
+
+        if (! $transaction) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Transaction not found on server',
+            ], 404);
+        }
+
+        $result = $zimraService->fiscaliseLater($transaction, $request->user()?->id);
+        $transaction->refresh();
+
+        return response()->json([
+            'success' => $result['success'],
+            'refused' => $result['refused'] ?? false,
+            'fiscalised' => $transaction->fiscal_status === 'fiscalised',
+            'fiscal_status' => $transaction->fiscal_status,
+            'fiscal_receipt_number' => $transaction->fiscal_receipt_number,
+            'fiscal_qr_code' => $transaction->fiscal_qr_code,
+            'fiscal_error' => $transaction->fiscal_error,
+            'fiscalisation_requested' => (bool) $transaction->fiscalisation_requested,
+            'message' => $result['message'],
+        ], ($result['refused'] ?? false) ? 422 : 200);
+    }
 }

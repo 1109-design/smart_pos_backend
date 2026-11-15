@@ -120,6 +120,8 @@ class BusinessBrandingTest extends TestCase
         $token = $this->actingDeviceToken($tenantId);
 
         Business::create(['id' => $tenantId, 'name' => 'Device Upload Shop']);
+        // Creating the business already published one record (its public page URL).
+        $baseline = SyncRecord::where('business_id', $tenantId)->where('table_name', 'business_branding')->count();
 
         $file = UploadedFile::fake()->image('logo.png', 100, 100);
 
@@ -137,7 +139,7 @@ class BusinessBrandingTest extends TestCase
             'business_id' => $tenantId,
             'table_name' => 'business_branding',
         ]);
-        $this->assertSame(1, SyncRecord::where('business_id', $tenantId)->where('table_name', 'business_branding')->count());
+        $this->assertSame($baseline + 1, SyncRecord::where('business_id', $tenantId)->where('table_name', 'business_branding')->count());
     }
 
     public function test_backoffice_owner_can_set_brand_color(): void
@@ -145,6 +147,8 @@ class BusinessBrandingTest extends TestCase
         $tenantId = 'tenant-branding-3';
         $this->actingBackOfficeSession($tenantId);
         Business::create(['id' => $tenantId, 'name' => 'Color Shop']);
+        // Creating the business already published one record (its public page URL).
+        $baseline = SyncRecord::where('business_id', $tenantId)->where('table_name', 'business_branding')->count();
 
         $this->post('/office/settings/branding', ['primary_color' => '#ff8800'])
             ->assertRedirect();
@@ -153,7 +157,7 @@ class BusinessBrandingTest extends TestCase
             'id' => $tenantId,
             'primary_color' => '#ff8800',
         ]);
-        $this->assertSame(1, SyncRecord::where('business_id', $tenantId)->where('table_name', 'business_branding')->count());
+        $this->assertSame($baseline + 1, SyncRecord::where('business_id', $tenantId)->where('table_name', 'business_branding')->count());
     }
 
     public function test_backoffice_rejects_an_invalid_color(): void
@@ -201,6 +205,8 @@ class BusinessBrandingTest extends TestCase
         $tenantId = 'tenant-branding-7';
         $token = $this->actingDeviceToken($tenantId);
         Business::create(['id' => $tenantId, 'name' => 'Letterhead Shop']);
+        // Creating the business already published one record (its public page URL).
+        $baseline = SyncRecord::where('business_id', $tenantId)->where('table_name', 'business_branding')->count();
 
         $letterhead = UploadedFile::fake()->image('letterhead.png', 800, 200);
         $footer = UploadedFile::fake()->image('footer.png', 800, 100);
@@ -224,7 +230,7 @@ class BusinessBrandingTest extends TestCase
 
         // letterhead/footer images travel via the pull-only business_branding
         // record, same as the logo — one row per upload.
-        $this->assertSame(2, SyncRecord::where('business_id', $tenantId)->where('table_name', 'business_branding')->count());
+        $this->assertSame($baseline + 2, SyncRecord::where('business_id', $tenantId)->where('table_name', 'business_branding')->count());
     }
 
     /**

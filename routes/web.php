@@ -48,6 +48,7 @@ use App\Http\Controllers\DownloadController;
 use App\Http\Controllers\PairController;
 use App\Http\Controllers\PaymentSettingsController;
 use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\PublicBusinessController;
 use App\Http\Controllers\SubscriptionController;
 use App\Http\Controllers\TierController;
 use App\Http\Controllers\UserController;
@@ -66,6 +67,11 @@ Route::get('/', function () {
 Route::get('download', [DownloadController::class, 'show'])->name('download.show');
 Route::get('download/apk', [DownloadController::class, 'apk'])->name('download.apk');
 Route::get('pair/{tenant}', [PairController::class, 'show'])->name('pair.show');
+// The QR printed on every non-fiscalised sale document.
+Route::get('b/{slug}', [PublicBusinessController::class, 'show'])
+    ->where('slug', '[a-z0-9-]+')
+    ->middleware('throttle:60,1')
+    ->name('business.public');
 
 Route::get('/dashboard', DashboardController::class)->middleware(['auth', 'verified', 'platform.admin'])->name('dashboard');
 

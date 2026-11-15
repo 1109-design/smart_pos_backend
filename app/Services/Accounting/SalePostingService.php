@@ -93,6 +93,77 @@ class SalePostingService
         $this->post($transaction, $payments);
     }
 
+    /**
+     * A sale kept off ZIMRA at checkout posted all of its VAT to Revenue.
+     * Once it is fiscalised later the till restores that VAT on the sale, so
+     * the difference between the VAT the sale journal posted and the VAT the
+     * sale now carries moves from Revenue to VAT Output. Dated today: the
+     * fiscal receipt, and so the VAT return it lands in, is today's.
+     *
+     * Posts only for sales whose books the server owns; a business cut over to
+     * client posting gets the same entry from the till instead. Never posts
+     * twice (one idempotency key per sale).
+     */
+    public function postVatRestore(Transaction $transaction): void
+    {
+        $business = Business::find($transaction->business_id);
+        if (! $business?->accountingIsLive()) {
+            return;
+        }
+
+        $transDate = ($transaction->created_at ?? now())->toDateString();
+        if ($business->postsFromClientFor($transDate)) {
+            return;
+        }
+
+        $saleJournal = $this->existingJournal($transaction);
+        if (! $saleJournal || $saleJournal->status !== 'posted') {
+            return; // not posted yet: it will post with the restored VAT
+        }
+
+        $sourceType = 'sale_vat_restore';
+        if (JournalHeader::where('business_id', $transaction->business_id)
+            ->where('source_type', $sourceType)
+            ->where('source_id', $transaction->id)
+            ->exists()) {
+            return;
+        }
+
+        $accounts = $this->resolveAccounts($transaction->business_id);
+        if (! $accounts) {
+            return;
+        }
+
+        $postedVat = (float) $saleJournal->lines()
+            ->where('gl_account_id', $accounts['tax']->id)
+            ->get()
+            ->sum(fn ($line) => (float) $line->credit - (float) $line->debit);
+        $difference = round((float) $transaction->tax_total - $postedVat, 2);
+        if (abs($difference) <= 0.005) {
+            return;
+        }
+
+        try {
+            $header = $this->journals->createDraft(
+                $transaction->business_id,
+                now()->toDateString(),
+                $sourceType,
+                $transaction->id,
+                'VAT on sale '.($transaction->sale_number ?? $transaction->id).' fiscalised later',
+                idempotencyKey: $sourceType.':'.$transaction->id,
+            );
+            if (! $header->canEdit()) {
+                return;
+            }
+
+            $this->addSignedLine($header, $accounts['revenue'], -$difference);
+            $this->addSignedLine($header, $accounts['tax'], $difference);
+            $this->journals->post($header);
+        } catch (Throwable $e) {
+            Log::warning("Accounting: failed to move VAT for sale {$transaction->id} fiscalised later: {$e->getMessage()}");
+        }
+    }
+
     private function handleVoid(Transaction $transaction): void
     {
         $existing = $this->existingJournal($transaction);
