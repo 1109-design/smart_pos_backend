@@ -15,6 +15,7 @@ use App\Models\Transaction;
 use App\Models\Zimra\ZimraDevice;
 use App\Models\Zimra\ZimraFiscalDay;
 use App\Models\Zimra\ZimraSale;
+use App\Services\Accounting\SalePostingService;
 use Exception;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -74,6 +75,78 @@ class ZimraSalesService
         if (in_array($previousStatus, $preIssue, true) && in_array($invoice->status, $issued, true) && $invoice->isFiscalisable()) {
             $this->queueFiscalisation($invoice);
         }
+    }
+
+    /**
+     * "Fiscalise later": a sale the cashier kept off ZIMRA at checkout (or one
+     * that never got a receipt) is sent now, from Sales History or the Fiscal
+     * Queue. The till restores the sale's VAT and pushes it before calling
+     * this, so the lines here already carry their tax.
+     *
+     * When the server owns this sale's books (not cut over to client posting)
+     * and its journal was posted with less VAT than the sale now carries, the
+     * difference moves from Revenue to VAT Output so the ledger matches what
+     * ZIMRA is told.
+     *
+     * @return array{success: bool, message: string, fiscalised: bool, refused?: bool}
+     */
+    public function fiscaliseLater(Transaction $transaction, ?string $userId = null): array
+    {
+        $refusal = $this->fiscaliseLaterRefusal($transaction);
+        if ($refusal !== null) {
+            return ['success' => false, 'message' => $refusal, 'fiscalised' => false, 'refused' => true];
+        }
+
+        if (! $transaction->fiscalisation_requested || in_array($transaction->fiscal_status, ['excluded', 'not_configured', null], true)) {
+            $transaction->update([
+                'fiscalisation_requested' => true,
+                'fiscal_status' => null,
+                'fiscal_error' => null,
+            ]);
+        }
+
+        app(SalePostingService::class)->postVatRestore($transaction->fresh());
+
+        Log::info('ZIMRA fiscalise-later requested', [
+            'transaction' => $transaction->fiscalNumber(),
+            'user_id' => $userId,
+        ]);
+
+        $this->queueFiscalisation($transaction->fresh());
+        $result = $this->processQueued($transaction->fresh());
+
+        // Whatever the outcome, every till must learn the sale is now asked
+        // for, so it leaves "Not fiscalised" everywhere.
+        $this->emitFiscalSyncRecord($transaction);
+
+        return [
+            'success' => (bool) ($result['success'] ?? false),
+            'message' => (string) ($result['message'] ?? ''),
+            'fiscalised' => $transaction->fresh()->fiscal_status === 'fiscalised',
+        ];
+    }
+
+    /** Why this sale can't be fiscalised later, or null when it can. */
+    public function fiscaliseLaterRefusal(Transaction $transaction): ?string
+    {
+        if ($transaction->fiscal_status === 'fiscalised') {
+            return 'This sale is already fiscalised';
+        }
+
+        $business = Business::find($transaction->business_id);
+        if (! $business?->fiscalisation_enabled) {
+            return 'Fiscalisation is turned off for this business';
+        }
+
+        if (! in_array($transaction->status, ['completed', 'credit_sale'], true)) {
+            return 'Only completed and credit sales can be fiscalised';
+        }
+
+        if ((float) $transaction->total <= 0 || $this->isReversal($transaction)) {
+            return 'A return is fiscalised as a credit note, not on its own';
+        }
+
+        return null;
     }
 
     /**

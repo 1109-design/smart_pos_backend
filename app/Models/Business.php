@@ -6,6 +6,7 @@ use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class Business extends Model
 {
@@ -28,6 +29,8 @@ class Business extends Model
         'metadata',
         'fiscalisation_enabled',
         'fiscalise_by_default',
+        'fiscal_target_usd',
+        'fiscal_target_period',
         'day_shift_start',
         'night_shift_start',
         'stock_reset_at',
@@ -37,6 +40,17 @@ class Business extends Model
         'workflow_settings',
         'accounting_go_live_date',
         'client_gl_posting_enabled_at',
+        'tagline',
+        'website',
+        'timezone',
+        'public_slug',
+        'opening_hours',
+        'latitude',
+        'longitude',
+        'whatsapp',
+        'facebook_url',
+        'instagram_url',
+        'about',
     ];
 
     protected function casts(): array
@@ -45,12 +59,71 @@ class Business extends Model
             'metadata' => 'array',
             'fiscalisation_enabled' => 'boolean',
             'fiscalise_by_default' => 'boolean',
+            'fiscal_target_usd' => 'float',
             'stock_reset_at' => 'datetime',
             'catalogue_reset_at' => 'datetime',
             'workflow_settings' => 'array',
             'accounting_go_live_date' => 'date',
             'client_gl_posting_enabled_at' => 'datetime',
+            'opening_hours' => 'array',
+            'latitude' => 'float',
+            'longitude' => 'float',
         ];
+    }
+
+    /**
+     * Every business gets a public slug the first time it is saved, by any
+     * path (registration, first device push, the backfill migration). The
+     * slug never changes afterwards: it is printed inside the QR on every
+     * receipt, so a rename must not break QRs already in customers' hands.
+     * Assigning one publishes the branding record that carries the page
+     * URL down to the tills.
+     */
+    /** Set while saving a row whose slug was assigned in this save. */
+    private bool $publicSlugJustAssigned = false;
+
+    protected static function booted(): void
+    {
+        static::saving(function (Business $business) {
+            if (empty($business->public_slug)) {
+                $business->public_slug = static::uniquePublicSlug($business->name, $business->id);
+                $business->publicSlugJustAssigned = true;
+            }
+        });
+
+        static::saved(function (Business $business) {
+            if ($business->publicSlugJustAssigned) {
+                $business->publicSlugJustAssigned = false;
+                $business->publishBrandingSyncRecord();
+            }
+        });
+    }
+
+    /** A URL-safe slug from the name, suffixed -2, -3… until it is unused. */
+    public static function uniquePublicSlug(?string $name, ?string $ignoreId = null): string
+    {
+        $base = Str::limit(Str::slug((string) $name), 60, '') ?: 'business';
+        $slug = $base;
+        $suffix = 2;
+
+        while (static::query()
+            ->where('public_slug', $slug)
+            ->when($ignoreId, fn ($query) => $query->where('id', '!=', $ignoreId))
+            ->exists()) {
+            $slug = $base.'-'.$suffix++;
+        }
+
+        return $slug;
+    }
+
+    /** The page the receipt QR opens, or null until a slug is assigned. */
+    public function publicPageUrl(): ?string
+    {
+        if (! $this->public_slug) {
+            return null;
+        }
+
+        return rtrim((string) config('app.public_url'), '/').route('business.public', $this->public_slug, false);
     }
 
     /**
@@ -157,6 +230,7 @@ class Business extends Model
                 'logo_url' => $this->logoUrl(),
                 'letterhead_url' => $this->letterheadUrl(),
                 'footer_url' => $this->footerUrl(),
+                'public_page_url' => $this->publicPageUrl(),
             ],
             'source_updated_at' => now(),
             'synced_at' => now(),

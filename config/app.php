@@ -55,6 +55,13 @@ return [
     'url' => env('APP_URL', 'http://localhost'),
 
     /*
+    | Public address customers reach from the QR printed on non-fiscal
+    | receipts (/b/{slug}). Printed on paper, so it must be the stable public
+    | domain, never the host a till happened to sync through.
+    */
+    'public_url' => env('PUBLIC_URL') ?: env('APP_URL', 'http://localhost'),
+
+    /*
     |--------------------------------------------------------------------------
     | Application Timezone
     |--------------------------------------------------------------------------

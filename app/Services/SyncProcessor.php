@@ -1432,8 +1432,23 @@ class SyncProcessor
                         'footer_text' => $preserve('footer_text'),
                         'metadata' => $preserve('metadata'),
                         'fiscalisation_enabled' => $preserve('fiscalisation_enabled', false),
+                        'fiscalise_by_default' => $preserve('fiscalise_by_default', true),
+                        'fiscal_target_usd' => $preserve('fiscal_target_usd'),
+                        'fiscal_target_period' => $preserve('fiscal_target_period', 'daily'),
                         'day_shift_start' => $preserve('day_shift_start'),
                         'night_shift_start' => $preserve('night_shift_start'),
+                        // Public business page (the QR on non-fiscal receipts).
+                        // public_slug is server-owned and never taken from a device.
+                        'tagline' => $preserve('tagline'),
+                        'website' => $preserve('website'),
+                        'timezone' => $preserve('timezone'),
+                        'opening_hours' => $this->decodeJsonField($preserve('opening_hours')),
+                        'latitude' => $preserve('latitude'),
+                        'longitude' => $preserve('longitude'),
+                        'whatsapp' => $preserve('whatsapp'),
+                        'facebook_url' => $preserve('facebook_url'),
+                        'instagram_url' => $preserve('instagram_url'),
+                        'about' => $preserve('about'),
                     ]
                 );
                 break;
@@ -4921,6 +4936,27 @@ class SyncProcessor
      * finance.credit_note.create, so the rule above still holds. Called after a
      * 'credit_notes' upsert as well.
      */
+    /**
+     * A JSON column a device may send either as a decoded object or as the
+     * raw text it stores locally; anything unparsable becomes null.
+     *
+     * @return array<mixed>|null
+     */
+    protected function decodeJsonField(mixed $value): ?array
+    {
+        if (is_array($value)) {
+            return $value;
+        }
+
+        if (is_string($value) && $value !== '') {
+            $decoded = json_decode($value, true);
+
+            return is_array($decoded) ? $decoded : null;
+        }
+
+        return null;
+    }
+
     protected function recomputeInvoiceAmountPaid(string $invoiceId): void
     {
         $paid = max(0, InvoicePayment::where('invoice_id', $invoiceId)->sum('base_equivalent'));
