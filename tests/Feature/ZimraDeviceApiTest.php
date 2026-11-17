@@ -145,6 +145,31 @@ class ZimraDeviceApiTest extends TestCase
         $this->api('POST', '/api/v1/zimra/devices/38660/check', $otherOwner, $otherToken)->assertNotFound();
     }
 
+    public function test_the_dashboard_status_is_for_everyone_and_holds_no_secrets(): void
+    {
+        [$cashier, $cashierToken] = $this->userWithToken('cashier');
+
+        $response = $this->api('GET', '/api/v1/zimra/status', $cashier, $cashierToken)->assertOk();
+
+        $response->assertJsonCount(1, 'devices')
+            ->assertJsonPath('devices.0.device_id', '38660')
+            ->assertJsonPath('devices.0.health.verdict', 'ok')
+            ->assertJsonPath('devices.0.current_fiscal_day.fiscal_day_no', 9)
+            ->assertJsonPath('devices.0.current_fiscal_day.status', 'open')
+            ->assertJsonPath('devices.0.pending_sales', 0);
+        $body = $response->getContent();
+        foreach (['BEGIN', 'ACTIVATION-SECRET', 'TAXPAYER-SECRET', 'private_key', 'certificate_data', 'activation_key', 'fdms_config'] as $secret) {
+            $this->assertStringNotContainsString($secret, $body);
+        }
+
+        // Scoped to the paired business, and an inactive device isn't shown.
+        Tenant::create(['id' => 'tenant-other', 'business_name' => 'Other', 'owner_email' => 'o2@example.com']);
+        [$other, $otherToken] = $this->userWithToken('cashier', 'tenant-other');
+        $this->api('GET', '/api/v1/zimra/status', $other, $otherToken)->assertOk()->assertJsonCount(0, 'devices');
+        $this->device->update(['is_active' => false]);
+        $this->api('GET', '/api/v1/zimra/status', $cashier, $cashierToken)->assertOk()->assertJsonCount(0, 'devices');
+    }
+
     public function test_needs_the_view_fiscal_devices_permission(): void
     {
         [$cashier] = $this->userWithToken('cashier');

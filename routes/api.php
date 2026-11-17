@@ -46,6 +46,7 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     Route::post('sync/push', [SyncController::class, 'push']);
     Route::post('sync/fiscalise/{transactionId}', [SyncController::class, 'fiscalise']);
     Route::post('sync/fiscalise-later/{transactionId}', [SyncController::class, 'fiscaliseLater']);
+    Route::post('sync/fiscal-results', [SyncController::class, 'fiscalResults']);
     Route::get('sync/pull', [SyncController::class, 'pull']);
     Route::post('sync/changed-tables', [SyncController::class, 'changedTables']);
     Route::get('app-releases', [AppReleaseController::class, 'index']);
@@ -132,6 +133,9 @@ Route::prefix('v1')->middleware(['auth:sanctum'])->group(function () {
     // offline devices can't both approve the same payroll (see
     // PayrollPeriodLockController and PayrollSync).
     Route::post('payroll/period-locks', [PayrollPeriodLockController::class, 'store']);
+
+    // The dashboard's fiscal status card: every signed-in user, no permission.
+    Route::get('zimra/status', [ZimraDeviceController::class, 'status']);
 
     // Finance → Fiscal Devices on the tills: health, fiscal days and the
     // device log of each ZIMRA device, and a read-only live status check.
