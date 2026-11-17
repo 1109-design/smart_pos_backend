@@ -49,7 +49,9 @@ class ZimraCloseDayPayloadBuilder
                 // Exempt taxes carry no taxPercent (or an explicit null); casting a
                 // null to 0.0 would sign them as zero-rated "0.00" instead of "".
                 $taxPercent = isset($tax['taxPercent']) ? (float) $tax['taxPercent'] : null;
-                $key = $counterPrefix.'_'.($taxPercent === null ? 'null' : (string) round($taxPercent, 2)).'_'.$currency;
+                $taxId = isset($tax['taxID']) ? (int) $tax['taxID'] : null;
+                // ZIMRA keeps a counter per taxID, so two taxes sharing a percent stay apart.
+                $key = $counterPrefix.'_'.($taxId ?? 'none').'_'.($taxPercent === null ? 'null' : (string) round($taxPercent, 2)).'_'.$currency;
 
                 $saleByTax[$key] ??= [
                     'counterPrefix' => $counterPrefix,
@@ -57,7 +59,7 @@ class ZimraCloseDayPayloadBuilder
                     'currency' => $currency,
                     'value' => 0.0,
                     'taxAmount' => 0.0,
-                    'taxID' => isset($tax['taxID']) ? (int) $tax['taxID'] : null,
+                    'taxID' => $taxId,
                 ];
                 $saleByTax[$key]['value'] += (float) ($tax['salesAmountWithTax'] ?? 0);
                 $saleByTax[$key]['taxAmount'] += (float) ($tax['taxAmount'] ?? 0);
@@ -194,6 +196,9 @@ class ZimraCloseDayPayloadBuilder
             isset($counter['fiscalCounterMoneyType'])
                 ? (self::MONEY_TYPE_ORDER[$counter['fiscalCounterMoneyType']] ?? PHP_INT_MAX)
                 : PHP_INT_MAX,
+            // Only breaks ties between unknown money types, so the order never
+            // depends on which receipt came first.
+            (string) ($counter['fiscalCounterMoneyType'] ?? ''),
         ];
     }
 
