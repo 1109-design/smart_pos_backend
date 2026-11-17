@@ -53,6 +53,52 @@ class ZimraDeviceController extends Controller
         ]);
     }
 
+    /**
+     * The dashboard's fiscal status, for everyone signed in on a paired till,
+     * cashiers included: so whoever is selling can see at a glance that the
+     * fiscal device is talking to ZIMRA and the fiscal day is open. Only the
+     * verdict, the day and the counts: no device log, no serial-level detail
+     * beyond what's printed on every receipt, and no "Check now".
+     */
+    public function status(Request $request): JsonResponse
+    {
+        $device = $this->deviceResolver->fromRequest($request);
+        if (! $device) {
+            return response()->json(['message' => 'Device is not paired to a business.'], 403);
+        }
+
+        $devices = $this->health->forBusiness((string) $device->tenant_id)
+            ->filter(fn (array $row) => (bool) $row['device']->is_active)
+            ->map(function (array $row) {
+                $zimra = $row['device'];
+                $day = $row['current_day'];
+
+                return [
+                    'device_id' => (string) $zimra->device_id,
+                    'serial_no' => $zimra->device_serial_no,
+                    'location' => $zimra->location?->name,
+                    'last_contact_ok_at' => $this->iso($zimra->last_contact_ok_at ?? $zimra->last_sync_at),
+                    'current_fiscal_day' => $day ? [
+                        'fiscal_day_no' => $day->fiscal_day_no,
+                        'status' => $day->status,
+                        'opened_at' => $this->iso($day->opened_at),
+                        'closed_at' => $this->iso($day->closed_at),
+                        'receipt_counter' => $day->receipt_counter,
+                    ] : null,
+                    'pending_sales' => $row['pending_sales'],
+                    'failed_sales' => $row['failed_sales'],
+                    'health' => $row['health'],
+                ];
+            })
+            ->values()
+            ->all();
+
+        return response()->json([
+            'server_time' => $this->iso(now()),
+            'devices' => $devices,
+        ]);
+    }
+
     public function fiscalDays(Request $request, string $deviceId): JsonResponse
     {
         $auth = $this->authorise($request);

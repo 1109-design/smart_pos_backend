@@ -6,7 +6,10 @@ use App\Events\SyncTablesChanged;
 use App\Exceptions\MissingParentRecordException;
 use App\Http\Controllers\Controller;
 use App\Models\AppRelease;
+use App\Models\CreditNote;
+use App\Models\CustomerDebitNote;
 use App\Models\Device;
+use App\Models\Invoice;
 use App\Models\PendingSyncRecord;
 use App\Models\StockOversell;
 use App\Models\SyncConflict;
@@ -18,6 +21,7 @@ use App\Services\AutoConflictResolver;
 use App\Services\DeviceResolver;
 use App\Services\SyncProcessor;
 use App\Services\Zimra\ZimraSalesService;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -657,7 +661,7 @@ class SyncController extends Controller
         }
 
         return response()->json([
-            'records' => $this->sanitizeApprovalPayloadJson($records),
+            'records' => $this->withCurrentFiscalResults($this->sanitizeApprovalPayloadJson($records)),
             'has_more' => $records->count() === $limit,
             'server_time' => $serverTime->toIso8601String(),
             // See detectReconciliationRequired() — non-empty means the
@@ -766,6 +770,102 @@ class SyncController extends Controller
             'server_time' => $serverTime->toIso8601String(),
             'app_releases' => (object) AppRelease::latestByPlatform(),
         ]);
+    }
+
+    /**
+     * Fiscal documents whose ZIMRA result the server owns, and the fields it
+     * owns on them.
+     *
+     * @var array<string, class-string<Model>>
+     */
+    private const FISCAL_TABLES = [
+        'transactions' => Transaction::class,
+        'invoices' => Invoice::class,
+        'credit_notes' => CreditNote::class,
+        'customer_debit_notes' => CustomerDebitNote::class,
+    ];
+
+    private const FISCAL_FIELDS = ['fiscal_status', 'fiscal_error', 'fiscal_receipt_number', 'fiscal_qr_code'];
+
+    /**
+     * Sends every fiscal document out with the ZIMRA result the server holds
+     * now, not whatever the stored copy carried. A till's push of a sale is
+     * relayed to the other tills as that till sent it, and a till that hadn't
+     * yet heard ZIMRA's answer sends none: on 2026-11-16 one such push landed
+     * 28 seconds after the server fiscalised a sale, and every till that pulled
+     * it wiped the sale's receipt number and QR and raised a false
+     * "not confirmed by ZIMRA" alert. Only the server ever learns the result,
+     * so its row is the truth; this also mends copies already stored that way.
+     *
+     * @param  list<array<string, mixed>>  $records
+     * @return list<array<string, mixed>>
+     */
+    private function withCurrentFiscalResults(array $records): array
+    {
+        $uuidsByTable = [];
+        foreach ($records as $record) {
+            $table = $record['table_name'] ?? null;
+            if (isset(self::FISCAL_TABLES[$table]) && ($record['operation'] ?? null) === 'upsert') {
+                $uuidsByTable[$table][] = $record['record_uuid'];
+            }
+        }
+
+        $current = [];
+        foreach ($uuidsByTable as $table => $uuids) {
+            $model = self::FISCAL_TABLES[$table];
+            $current[$table] = $model::query()
+                ->whereIn('id', array_unique($uuids))
+                ->get(['id', ...self::FISCAL_FIELDS])
+                ->keyBy('id');
+        }
+
+        foreach ($records as &$record) {
+            $row = ($current[$record['table_name'] ?? ''] ?? null)?->get($record['record_uuid'] ?? '');
+            if ($row === null || ! is_array($record['payload'])) {
+                continue;
+            }
+            foreach (self::FISCAL_FIELDS as $field) {
+                $record['payload'][$field] = $row->{$field};
+            }
+        }
+        unset($record);
+
+        return $records;
+    }
+
+    /**
+     * The ZIMRA result the server holds for each document a till asks about.
+     * Tills ask about the ones they still see as unconfirmed, so a till that
+     * missed or lost the answer (see withCurrentFiscalResults) heals itself
+     * without anyone touching it. Unknown ids are left out.
+     */
+    public function fiscalResults(Request $request): JsonResponse
+    {
+        $rules = [];
+        foreach (array_keys(self::FISCAL_TABLES) as $table) {
+            $rules[$table] = 'sometimes|array|max:500';
+            $rules[$table.'.*'] = 'string|max:64';
+        }
+        $data = $request->validate($rules);
+
+        $device = $this->deviceResolver->fromRequest($request);
+        if (! $device) {
+            return response()->json(['message' => 'Device is not paired to a business.'], 403);
+        }
+
+        $results = [];
+        foreach (self::FISCAL_TABLES as $table => $model) {
+            $ids = array_values(array_unique($data[$table] ?? []));
+            $results[$table] = $ids === [] ? [] : $model::query()
+                ->where('business_id', $device->tenant_id)
+                ->whereIn('id', $ids)
+                ->get(['id', ...self::FISCAL_FIELDS])
+                ->map(fn ($row) => $row->only(['id', ...self::FISCAL_FIELDS]))
+                ->values()
+                ->all();
+        }
+
+        return response()->json($results);
     }
 
     /**
