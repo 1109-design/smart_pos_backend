@@ -46,8 +46,12 @@ class ZimraCloseDayPayloadBuilder
             };
 
             foreach ($snapshot['receiptTaxes'] as $tax) {
-                $taxPercent = array_key_exists('taxPercent', $tax) ? (float) $tax['taxPercent'] : null;
-                $key = $counterPrefix.'_'.($taxPercent === null ? 'null' : (string) round($taxPercent, 2)).'_'.$currency;
+                // Exempt taxes carry no taxPercent (or an explicit null); casting a
+                // null to 0.0 would sign them as zero-rated "0.00" instead of "".
+                $taxPercent = isset($tax['taxPercent']) ? (float) $tax['taxPercent'] : null;
+                $taxId = isset($tax['taxID']) ? (int) $tax['taxID'] : null;
+                // ZIMRA keeps a counter per taxID, so two taxes sharing a percent stay apart.
+                $key = $counterPrefix.'_'.($taxId ?? 'none').'_'.($taxPercent === null ? 'null' : (string) round($taxPercent, 2)).'_'.$currency;
 
                 $saleByTax[$key] ??= [
                     'counterPrefix' => $counterPrefix,
@@ -55,7 +59,7 @@ class ZimraCloseDayPayloadBuilder
                     'currency' => $currency,
                     'value' => 0.0,
                     'taxAmount' => 0.0,
-                    'taxID' => isset($tax['taxID']) ? (int) $tax['taxID'] : null,
+                    'taxID' => $taxId,
                 ];
                 $saleByTax[$key]['value'] += (float) ($tax['salesAmountWithTax'] ?? 0);
                 $saleByTax[$key]['taxAmount'] += (float) ($tax['taxAmount'] ?? 0);
@@ -153,6 +157,23 @@ class ZimraCloseDayPayloadBuilder
     }
 
     /**
+     * FDMS MoneyType enum. ZIMRA sorts BalanceByMoneyType counters by this
+     * order, not alphabetically, when it verifies the CloseDay signature.
+     */
+    private const MONEY_TYPE_ORDER = [
+        'Cash' => 0,
+        'Card' => 1,
+        'MobileWallet' => 2,
+        'Coupon' => 3,
+        'Credit' => 4,
+        'BankTransfer' => 5,
+        'Other' => 6,
+    ];
+
+    /**
+     * Counter order ZIMRA signs against: counter type (enum order), then
+     * currency (alphabetical), then taxID (ascending) or money type (enum order).
+     *
      * @param  array<string, mixed>  $counter
      * @return array<int, string|int>
      */
@@ -171,8 +192,13 @@ class ZimraCloseDayPayloadBuilder
         return [
             $typeOrder[$counter['fiscalCounterType']] ?? 99,
             $counter['fiscalCounterCurrency'] ?? '',
-            $counter['fiscalCounterTaxID'] ?? PHP_INT_MAX,
-            $counter['fiscalCounterMoneyType'] ?? '',
+            (int) ($counter['fiscalCounterTaxID'] ?? PHP_INT_MAX),
+            isset($counter['fiscalCounterMoneyType'])
+                ? (self::MONEY_TYPE_ORDER[$counter['fiscalCounterMoneyType']] ?? PHP_INT_MAX)
+                : PHP_INT_MAX,
+            // Only breaks ties between unknown money types, so the order never
+            // depends on which receipt came first.
+            (string) ($counter['fiscalCounterMoneyType'] ?? ''),
         ];
     }
 
