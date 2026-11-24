@@ -990,6 +990,16 @@ class SyncProcessor
                 break;
 
             case 'product_stock':
+                // One row per product and location, so a push with another
+                // id takes over the existing row's id. Tills still holding
+                // the old id were never told, and kept it alongside the new
+                // one: two stock rows for one product, which broke every
+                // single-row read ("Bad state: Too many elements" on the
+                // goods receipt approval, 2026-11-24). Tell them to drop it.
+                $replacedStockId = ProductStock::where('product_id', $payload['product_id'] ?? $uuid)
+                    ->where('location_id', $payload['location_id'] ?? '')
+                    ->where('id', '!=', $uuid)
+                    ->value('id');
                 ProductStock::updateOrCreate(
                     ['product_id' => $payload['product_id'] ?? $uuid, 'location_id' => $payload['location_id'] ?? ''],
                     [
@@ -1001,6 +1011,18 @@ class SyncProcessor
                         'price_override' => $payload['price_override'] ?? null,
                     ]
                 );
+                if ($replacedStockId !== null) {
+                    SyncRecord::create([
+                        'business_id' => $payload['business_id'] ?? Product::whereKey($payload['product_id'] ?? $uuid)->value('business_id'),
+                        'table_name' => 'product_stock',
+                        'record_uuid' => (string) $replacedStockId,
+                        'operation' => 'delete',
+                        'payload' => [],
+                        'source_updated_at' => now(),
+                        'synced_at' => now(),
+                        'device_id' => null,
+                    ]);
+                }
                 // The pushed quantity is a device's snapshot, and it can be
                 // older than movements the same device pushes alongside it
                 // (the app's duplicate-row merge enqueues one before the
