@@ -14,6 +14,7 @@ class Customer extends Model
         'id', 'business_id', 'name', 'phone', 'email', 'address', 'photo_path',
         'loyalty_points', 'credit_balance', 'credit_limit', 'is_tax_exempt', 'group',
         'tax_number', 'vat_number',
+        'next_of_kin_name', 'next_of_kin_relationship', 'next_of_kin_phone', 'next_of_kin_address',
     ];
 
     protected static function booted(): void

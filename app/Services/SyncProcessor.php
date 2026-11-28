@@ -1819,6 +1819,12 @@ class SyncProcessor
                         // balance update, and must not wipe them.
                         'tax_number' => array_key_exists('tax_number', $payload) ? $payload['tax_number'] : $existingCustomer?->tax_number,
                         'vat_number' => array_key_exists('vat_number', $payload) ? $payload['vat_number'] : $existingCustomer?->vat_number,
+                        // Next of kin, same rule: only the customer form sends it.
+                        ...collect(['next_of_kin_name', 'next_of_kin_relationship', 'next_of_kin_phone', 'next_of_kin_address'])
+                            ->mapWithKeys(fn (string $key) => [
+                                $key => array_key_exists($key, $payload) ? $payload[$key] : $existingCustomer?->{$key},
+                            ])
+                            ->all(),
                     ]
                 );
                 $this->recomputeCustomerBalances($uuid);
